@@ -404,6 +404,12 @@ const reorderQueuedCommentsSchema = queuedCommentMutationTargetSchema.extend({
   orderedCommentIds: z.array(z.string().min(1)).max(MAX_ISSUE_COMMENT_LIMIT),
 });
 
+function projectPausedMessage(pauseReason: string | null) {
+  if (pauseReason === "budget") return "Project is paused because its budget hard-stop was reached";
+  if (pauseReason === "manual") return "Project is paused manually; a board user must resume it before agents can work on its tasks";
+  return "Project is paused";
+}
+
 function prefersMinimalIssueUpdateResponse(req: Request) {
   return (req.get("Prefer") ?? "")
     .split(",")
@@ -7203,11 +7209,7 @@ export function issueRoutes(
     if (input.issue.projectId) {
       const project = await projectsSvc.getById(input.issue.projectId);
       if (project?.pausedAt) {
-        throw conflict(
-          project.pauseReason === "budget"
-            ? "Project is paused because its budget hard-stop was reached"
-            : "Project is paused",
-        );
+        throw conflict(projectPausedMessage(project.pauseReason));
       }
     }
     const approvals = await issueApprovalsSvc.listApprovalsForIssue(
@@ -15906,12 +15908,7 @@ export function issueRoutes(
       if (issue.projectId) {
         const project = await projectsSvc.getById(issue.projectId);
         if (project?.pausedAt) {
-          res.status(409).json({
-            error:
-              project.pauseReason === "budget"
-                ? "Project is paused because its budget hard-stop was reached"
-                : "Project is paused",
-          });
+          res.status(409).json({ error: projectPausedMessage(project.pauseReason) });
           return;
         }
       }
