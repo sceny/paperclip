@@ -1341,6 +1341,60 @@ console.log(JSON.stringify({ type: "result", subtype: "success", result: "hello"
     await expect(service.save(companyId, "bob", reconnect, "fixture-stale", undefined, beforeRevocation)).rejects.toThrow("changed");
     await expect(service.select({ ...input, userId: "bob" })).rejects.toThrow("Reconnect");
   });
+  it.each(["personal", "shared"] as const)("reconnects a %s connection whose stored credential was deleted", async ownership => {
+    const owner = `deleted-credential-${ownership}`;
+    await db.insert(companyMemberships).values({ companyId, principalId: owner, principalType: "user", status: "active", membershipRole: "member" });
+    const saved = await create(owner, `Deleted credential ${ownership}`, ownership);
+    const refsOf = async () => (await db.select().from(connectionGrants).where(eq(connectionGrants.id, saved.grantId)))[0].credentialSecretRefs;
+    const [{ secretId: deletedId }] = await refsOf();
+    const slotKey = `ai_${saved.grantId.replaceAll("-", "_")}`;
+    const slots = async () => ownership === "personal"
+      ? (await db.select().from(userSecretDefinitions).where(eq(userSecretDefinitions.key, slotKey))).length
+      : (await db.select().from(companySecrets).where(eq(companySecrets.name, `ai-${saved.grantId}`))).length;
+    expect(await slots()).toBe(1);
+    await secretService(db).remove(deletedId);
+    const reconnect = { ...binding, ownership, name: `Deleted credential ${ownership}`, apiKey: "fixture", agentIds: [], allAgents: true, connectionId: saved.connectionId };
+    const result = await service.save(companyId, owner, reconnect, "fixture-after-delete");
+    expect(result.grantId).toBe(saved.grantId);
+    const [{ secretId }] = await refsOf();
+    expect(secretId).not.toBe(deletedId);
+    expect(await slots()).toBe(1);
+    if (ownership === "personal") expect(await service.credential(await service.select({ ...input, userId: owner }))).toBe("fixture-after-delete");
+    else expect(await secretService(db).resolveSecretValue(companyId, secretId, "latest")).toBe("fixture-after-delete");
+    await service.save(companyId, owner, reconnect, "fixture-second-reconnect");
+    expect((await refsOf())[0].secretId).toBe(secretId);
+  });
+  it("recreates the private slot when both the credential and its definition were deleted", async () => {
+    const owner = "deleted-definition-personal";
+    await db.insert(companyMemberships).values({ companyId, principalId: owner, principalType: "user", status: "active", membershipRole: "member" });
+    const saved = await create(owner, "Deleted definition");
+    const [{ secretId: deletedId }] = (await db.select().from(connectionGrants).where(eq(connectionGrants.id, saved.grantId)))[0].credentialSecretRefs;
+    const [definition] = await db.select().from(userSecretDefinitions).where(eq(userSecretDefinitions.key, `ai_${saved.grantId.replaceAll("-", "_")}`));
+    await secretService(db).removeUserSecretDefinition(companyId, definition.id);
+    const reconnect = { ...binding, ownership: "personal" as const, name: "Deleted definition", apiKey: "fixture", agentIds: [], allAgents: true, connectionId: saved.connectionId };
+    await service.save(companyId, owner, reconnect, "fixture-after-definition-delete");
+    const [{ secretId }] = (await db.select().from(connectionGrants).where(eq(connectionGrants.id, saved.grantId)))[0].credentialSecretRefs;
+    expect(secretId).not.toBe(deletedId);
+    expect(await service.credential(await service.select({ ...input, userId: owner }))).toBe("fixture-after-definition-delete");
+  });
+  it("refuses to delete a stored secret while an active connection uses it", async () => {
+    const owner = "delete-guard-owner";
+    await db.insert(companyMemberships).values({ companyId, principalId: owner, principalType: "user", status: "active", membershipRole: "member" });
+    const secrets = secretService(db);
+    for (const ownership of ["personal", "shared"] as const) {
+      const saved = await create(owner, `Delete guard ${ownership}`, ownership);
+      const [{ secretId }] = (await db.select().from(connectionGrants).where(eq(connectionGrants.id, saved.grantId)))[0].credentialSecretRefs;
+      const guarded = ownership === "personal"
+        ? secrets.removeCurrentUserSecretValue(companyId, owner, secretId)
+        : secrets.remove(secretId, { rejectWhenUsedByConnection: true });
+      await expect(guarded).rejects.toMatchObject({ status: 409, message: `Used by connection Delete guard ${ownership}. Disconnect or reconnect it first.` });
+      expect(await secrets.getById(secretId)).not.toBeNull();
+      await db.update(connectionGrants).set({ status: "revoked" }).where(eq(connectionGrants.id, saved.grantId));
+      await expect(secrets.remove(secretId, { rejectWhenUsedByConnection: true })).resolves.toMatchObject({ id: secretId });
+    }
+    const unused = await secrets.create(companyId, { name: `unused-${randomUUID()}`, provider: "local_encrypted", value: "unused" });
+    await expect(secrets.remove(unused.id, { rejectWhenUsedByConnection: true })).resolves.toMatchObject({ id: unused.id });
+  });
   it("rejects invalid purpose/transport combinations in the database", async () => {
     const selected = await service.select({ ...input, userId: "alice" });
     await expect(db.update(toolConnections).set({ transport: "mcp_remote" }).where(eq(toolConnections.id, selected.connection.id))).rejects.toThrow();
