@@ -3469,6 +3469,8 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig, 
     ),
   });
   const run = hydratedRun ?? initialRun;
+  const runConnectionId = asRecord(run.contextSnapshot?.aiConnection)?.connectionId;
+  const runAiConnectionId = typeof runConnectionId === "string" ? runConnectionId : undefined;
   const { data: boardAccess } = useQuery({
     queryKey: queryKeys.access.currentBoardAccess,
     queryFn: () => accessApi.getCurrentBoardAccess(),
@@ -3839,7 +3841,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig, 
                 companyId={run.companyId}
                 agentId={run.agentId}
                 provider="anthropic"
-                connectionId={typeof asRecord(run.contextSnapshot?.aiConnection)?.connectionId === "string" ? String(asRecord(run.contextSnapshot?.aiConnection)?.connectionId) : undefined}
+                connectionId={runAiConnectionId}
               />
             )}
             {run.errorCode === "claude_auth_required" && adapterType === "claude_local" && !aiConnectionBound && (
