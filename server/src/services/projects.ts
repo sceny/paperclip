@@ -2,7 +2,7 @@ import { listProjectWorkspaceProviders, resolveProjectWorkspaceProvider } from "
 import { retireRemovedPluginWorkspaceDependents } from "./plugin-workspaces.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { enqueueProjectSkillSource, detachProjectSkillSource } from "./project-skill-source-bindings.js";
-import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   projects,
@@ -963,6 +963,40 @@ export function projectService(db: Db, options: { captureWorkspaceUpdates?: bool
     },
 
     create: createProject,
+
+    setManualPause: async (
+      id: string,
+      paused: boolean,
+    ): Promise<{ project: ProjectWithGoals; changed: boolean } | null> => {
+      const now = new Date();
+      const changed = await db
+        .update(projects)
+        .set(
+          paused
+            ? { pausedAt: now, pauseReason: "manual", updatedAt: now }
+            : { pausedAt: null, pauseReason: null, updatedAt: now },
+        )
+        .where(
+          and(
+            eq(projects.id, id),
+            paused ? isNull(projects.pausedAt) : and(isNotNull(projects.pausedAt), eq(projects.pauseReason, "manual")),
+          ),
+        )
+        .returning({ id: projects.id });
+      const project = await getProjectById(id);
+      if (!project) return null;
+      if (changed.length === 0) {
+        const alreadyInTargetState = paused ? project.pauseReason === "manual" : !project.pausedAt;
+        if (!alreadyInTargetState) {
+          throw conflict(
+            paused
+              ? `Project is already paused (reason: ${project.pauseReason ?? "unknown"})`
+              : `Project is not manually paused (pause reason: ${project.pauseReason ?? "unknown"})`,
+          );
+        }
+      }
+      return { project, changed: changed.length > 0 };
+    },
 
     update: async (
       id: string,
