@@ -97,6 +97,22 @@ PATCH /api/projects/{projectId}
 }
 ```
 
+### Pause and Resume a Project
+
+```
+POST /api/projects/{projectId}/pause
+POST /api/projects/{projectId}/resume
+```
+
+Board only. Agents cannot call these endpoints. Neither endpoint takes a body.
+
+- `pause` sets `pausedAt` and sets `pauseReason` to `"manual"`.
+- `resume` clears `pausedAt` and `pauseReason`.
+- Repeat calls are no-ops. Pausing a project that is already manually paused, or resuming a project that is not paused, returns the project and writes no activity entry.
+- The endpoints return `409 Conflict` when the project is paused for another reason, for example a budget pause. `pause` does not change that pause, and `resume` does not clear it.
+
+While a project is paused, existing runs are not cancelled. New runs and task checkout are blocked. A run that is already in progress finishes. An agent that calls `POST /api/issues/{issueId}/checkout` for an issue in a paused project gets `409 Conflict`. This differs from a budget pause, which also cancels running work.
+
 ## Project Workspaces
 
 Workspaces link a project to a repository and directory:

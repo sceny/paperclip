@@ -185,6 +185,30 @@ export function registerProjectCommands(program: Command): void {
     { includeCompany: false },
   );
 
+  for (const [name, path, description] of [
+    ["pause", "pause", "Manually pause a project"],
+    ["resume", "resume", "Resume a manually paused project"],
+  ] as const) {
+    addCommonClientOptions(
+      project
+        .command(name)
+        .description(description)
+        .argument("<project>", "Project ID or shortname")
+        .option("-C, --company-id <id>", "Company ID for shortname lookup")
+        .action(async (projectRef: string, opts: ProjectListOptions) => {
+          try {
+            const ctx = resolveCommandContext(opts);
+            const query = ctx.companyId ? `?${new URLSearchParams({ companyId: ctx.companyId }).toString()}` : "";
+            const updated = await ctx.api.post<Project>(`${apiPath`/api/projects/${projectRef}`}/${path}${query}`, {});
+            printOutput(updated, { json: ctx.json });
+          } catch (err) {
+            handleCommandError(err);
+          }
+        }),
+      { includeCompany: false },
+    );
+  }
+
   addCommonClientOptions(
     project
       .command("delete")
