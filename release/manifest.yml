@@ -1,0 +1,8 @@
+# The branches that make up `prod`, in merge order. prod = upstream/master + these.
+# Every entry:
+#   branch    branch name on origin (the fork)
+#   kind      upstream-request | fork-patch
+#   parent    Paperclip parent task identifier (no internal ids in commits or PRs; this file stays on fork-tools)
+#   pr        pull request URL, or empty
+#   dependsOn optional list of branches that must be listed earlier
+branches: []
