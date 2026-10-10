@@ -466,6 +466,8 @@ export function ProviderApiKeyCard({
   );
 }
 
+const CODE_VERIFY_TIMEOUT_MS = 30_000;
+
 /** Shared instructions for local subscription setup in every authentication host. */
 export function LocalProviderLoginInstructions({ adapterType, login }: {
   adapterType: string;
@@ -475,10 +477,17 @@ export function LocalProviderLoginInstructions({ adapterType, login }: {
   const [browserCode, setBrowserCode] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submittedFor, setSubmittedFor] = useState<string | null>(null);
+  const [verifyTimedOut, setVerifyTimedOut] = useState(false);
   const provider = adapterType === "claude_local" ? "Claude Code" : adapterType === "grok_local" ? "Grok CLI" : "Codex CLI";
   const isolated = login?.isolated ?? (adapterType === "codex_local" || adapterType === "grok_local");
   const command = login?.command;
   const browserLogin = adapterType === "claude_local" || adapterType === "codex_local";
+  useEffect(() => {
+    setVerifyTimedOut(false);
+    if (submittedFor === null) return;
+    const timer = setTimeout(() => setVerifyTimedOut(true), CODE_VERIFY_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [submittedFor]);
   function retry() {
     setSubmittedFor(null);
     login?.retry();
@@ -509,7 +518,9 @@ export function LocalProviderLoginInstructions({ adapterType, login }: {
       authorizationUrl={login.authorizationUrl}
       mode={adapterType === "claude_local" ? "submitted_code" : "displayed_code"}
     >
-      {adapterType === "claude_local" && submittedFor === (login.authorizationUrl ?? "") ? <p role="status" className="flex items-center gap-2 text-foreground"><Loader2 className="size-4 animate-spin" />Code submitted. Verifying your sign-in…</p>
+      {adapterType === "claude_local" && submittedFor === (login.authorizationUrl ?? "") ? (verifyTimedOut
+        ? <p role="alert">That code did not work or expired. Start sign-in again.</p>
+        : <p role="status" className="flex items-center gap-2 text-foreground"><Loader2 className="size-4 animate-spin" />Code submitted. Verifying your sign-in…</p>)
       : adapterType === "claude_local" ? <div className="flex flex-col gap-2">
         <OnboardingCardField
           value={browserCode}
