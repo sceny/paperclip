@@ -33,6 +33,8 @@ export const projectsApi = {
     api.post<Project>(`/companies/${companyId}/projects`, data),
   update: (id: string, data: Record<string, unknown>, companyId?: string) =>
     api.patch<Project>(projectPath(id, companyId), data),
+  pause: (id: string, companyId?: string) => api.post<Project>(projectPath(id, companyId, "/pause"), {}),
+  resume: (id: string, companyId?: string) => api.post<Project>(projectPath(id, companyId, "/resume"), {}),
   listAccessMembers: (id: string, companyId?: string) =>
     api.get<ProjectAccessMember[]>(projectPath(id, companyId, "/access-members")),
   addAccessMember: (
