@@ -110,6 +110,33 @@ describe("project and goal commands", () => {
     expect(fetchMock.mock.calls[1]?.[1]?.method).toBe("DELETE");
   });
 
+  it("pauses and resumes projects", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: PROJECT_ID, companyId: COMPANY_ID, name: "Launch Site", pauseReason: "manual" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: PROJECT_ID, companyId: COMPANY_ID, name: "Launch Site", pauseReason: null }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await createProgram().parseAsync([
+      "project", "pause", PROJECT_ID,
+      "--api-base", "http://localhost:3100",
+      "--api-key", "board-token",
+    ], { from: "user" });
+
+    await createProgram().parseAsync([
+      "project", "resume", "launch-site",
+      "--api-base", "http://localhost:3100",
+      "--api-key", "board-token",
+      "--company-id", COMPANY_ID,
+    ], { from: "user" });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`http://localhost:3100/api/projects/${PROJECT_ID}/pause`);
+    expect(fetchMock.mock.calls[0]?.[1]?.method).toBe("POST");
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(`http://localhost:3100/api/projects/launch-site/resume?companyId=${COMPANY_ID}`);
+    expect(fetchMock.mock.calls[1]?.[1]?.method).toBe("POST");
+  });
+
   it("creates, updates, lists, and deletes goals", async () => {
     const fetchMock = vi
       .fn()
