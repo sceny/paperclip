@@ -11,6 +11,7 @@ export function useLocalAiLogin(companyId: string | null, intent: AiConnectionLo
   const [authorizationUrl, setAuthorizationUrl] = useState<string | null>(null);
   const [code, setCode] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [generation, setGeneration] = useState(0);
   const latestIntent = useRef(intent);
   const restartRequested = useRef(false);
@@ -28,6 +29,7 @@ export function useLocalAiLogin(companyId: string | null, intent: AiConnectionLo
   useEffect(() => {
     setAttempt(null);
     setError(null);
+    setSubmitError(null);
     setStatus(null);
     setAuthorizationUrl(null);
     setCode(null);
@@ -87,15 +89,15 @@ export function useLocalAiLogin(companyId: string | null, intent: AiConnectionLo
     authorizationUrl,
     code,
     status,
-    preparing: active && !status && !error,
-    error,
+    preparing: active && !status && !error && !submitError,
+    error: submitError ?? error,
     retry: () => { restartRequested.current = true; cancelCurrent(); setGeneration((value) => value + 1); },
     submitCode: async (browserCode: string) => {
       if (!companyId || !attempt) throw new Error("Start sign-in before submitting a code.");
       try {
         await aiConnectionsApi.submitLocalLoginCode(companyId, attempt.sessionId, browserCode);
       } catch (cause) {
-        setError("Could not submit the authorization code. Start sign-in again.");
+        setSubmitError("Could not submit the authorization code. Start sign-in again.");
         throw cause;
       }
     },
