@@ -1389,6 +1389,24 @@ console.log(JSON.stringify({ type: "result", subtype: "success", result: "hello"
     expect((await service.select({ companyId, agentId: id, userId, adapterType, binding: selectedBinding })).grant.status).toBe("active");
   });
 
+  it("marks the connection as needing sign-in when a run without a task fails authentication", async () => {
+    const userId = `no-issue-${randomUUID()}`;
+    const id = randomUUID();
+    const runId = randomUUID();
+    const selectedBinding = { provider: "anthropic", method: "api_key", mode: "responsible_user" } as const;
+    await db.insert(companyMemberships).values({ companyId, principalId: userId, principalType: "user", status: "active", membershipRole: "member" });
+    await db.insert(agents).values({ id, companyId, name: "No task run", adapterType: "claude_local", runtimeConfig: { aiConnection: selectedBinding } });
+    const account = await service.save(companyId, userId, { provider: "anthropic", method: "api_key", ownership: "personal", name: "No task account", apiKey: "fixture", agentIds: [id], allAgents: false }, "fixture-no-task-key");
+    const runtime = await prepareManagedAiRuntime(db, { companyId, agentId: id, responsibleUserId: userId, adapterType: "claude_local", binding: selectedBinding, config: {} });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId: id, status: "failed", errorCode: "claude_auth_required", responsibleUserId: userId,
+      contextSnapshot: { aiConnection: { ...runtime.attribution, identity: runtime.identity } } });
+    await runtime.cleanup();
+    expect(await connectionIntentService(db).requestForRunAuthFailure(runId)).toBeNull();
+    const [grant] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, account.grantId));
+    expect(grant.status).toBe("needs_reauthorization");
+    expect((await service.list(companyId, userId)).find(row => row.id === account.connectionId)).toMatchObject({ status: "needs_attention" });
+  });
+
   it("offers a compatible connection for legacy auth failures without silently adopting it", async () => {
     const id = randomUUID();
     const issueId = randomUUID();
