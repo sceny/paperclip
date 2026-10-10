@@ -3,6 +3,7 @@ import { grokBotApi } from "@/api/grokBot";
 import { GrokBotWorkSummary } from "@/components/GrokBotWorkSummary";
 import { PrimaryAgentIndicator, SetPrimaryAgentButton } from "@/components/primary-agent/PrimaryAgentPresentation";
 import { AiConnectionPoolRunDetails } from "@/components/ai-connections/AiConnectionPoolRunDetails";
+import { AiConnectionRunReconnect } from "@/components/ai-connections/AiConnectionRunReconnect";
 import { AgentConnectionInstructions } from "@/features/connections/ConnectionInstructions";
 import type { AgentInstructionCandidate, AgentInstructionsBundle } from "@paperclipai/shared";
 import { InstructionHistory } from "../components/InstructionHistory";
@@ -1512,6 +1513,7 @@ export function AgentDetail() {
           selectedRunId={urlRunId ?? null}
           adapterType={agent.adapterType}
           adapterConfig={agent.adapterConfig}
+          aiConnectionBound={Boolean(agent.runtimeConfig?.aiConnection)}
         />
       )}
 
@@ -3337,6 +3339,7 @@ export function RunsTab({
   selectedRunId,
   adapterType,
   adapterConfig,
+  aiConnectionBound,
 }: {
   runs: HeartbeatRun[];
   companyId: string;
@@ -3345,6 +3348,7 @@ export function RunsTab({
   selectedRunId: string | null;
   adapterType: string;
   adapterConfig: Record<string, unknown>;
+  aiConnectionBound: boolean;
 }) {
   const { isMobile } = useSidebar();
 
@@ -3378,7 +3382,7 @@ export function RunsTab({
             <ArrowLeft className="h-3.5 w-3.5" />
             Back to runs
           </Link>
-          <RunDetail key={selectedRun.id} run={selectedRun} agentRouteId={agentRouteId} adapterType={adapterType} adapterConfig={adapterConfig} />
+          <RunDetail key={selectedRun.id} run={selectedRun} agentRouteId={agentRouteId} adapterType={adapterType} adapterConfig={adapterConfig} aiConnectionBound={aiConnectionBound} />
         </div>
       );
     }
@@ -3409,7 +3413,7 @@ export function RunsTab({
       {/* Right: run detail — natural height, page scrolls */}
       {selectedRun && (
         <div className="flex-1 min-w-0 pl-4">
-          <RunDetail key={selectedRun.id} run={selectedRun} agentRouteId={agentRouteId} adapterType={adapterType} adapterConfig={adapterConfig} />
+          <RunDetail key={selectedRun.id} run={selectedRun} agentRouteId={agentRouteId} adapterType={adapterType} adapterConfig={adapterConfig} aiConnectionBound={aiConnectionBound} />
         </div>
       )}
     </div>
@@ -3453,7 +3457,7 @@ export function RunAccountingMetrics({ run }: { run: HeartbeatRun }) {
   );
 }
 
-function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }: { run: HeartbeatRun; agentRouteId: string; adapterType: string; adapterConfig: Record<string, unknown> }) {
+function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig, aiConnectionBound }: { run: HeartbeatRun; agentRouteId: string; adapterType: string; adapterConfig: Record<string, unknown>; aiConnectionBound: boolean }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { data: hydratedRun } = useQuery({
@@ -3830,7 +3834,15 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig }
                 {run.errorCode && <span className="text-muted-foreground ml-1">({run.errorCode})</span>}
               </div>
             )}
-            {run.errorCode === "claude_auth_required" && adapterType === "claude_local" && (
+            {run.errorCode === "claude_auth_required" && adapterType === "claude_local" && aiConnectionBound && (
+              <AiConnectionRunReconnect
+                companyId={run.companyId}
+                agentId={run.agentId}
+                provider="anthropic"
+                connectionId={typeof asRecord(run.contextSnapshot?.aiConnection)?.connectionId === "string" ? String(asRecord(run.contextSnapshot?.aiConnection)?.connectionId) : undefined}
+              />
+            )}
+            {run.errorCode === "claude_auth_required" && adapterType === "claude_local" && !aiConnectionBound && (
               <div className="space-y-2">
                 <Button
                   variant="outline"
