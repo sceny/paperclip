@@ -3,7 +3,7 @@ import { withAccountHomeSecretMutationLock } from "@paperclipai/adapter-codex-lo
 import { syncConnectionCredentialBindings } from "./connection-credential-bindings.js";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { and, eq, inArray, ne, or, sql } from "drizzle-orm";
 import {
   type Db,
   authUsers,
@@ -648,6 +648,35 @@ export function aiConnectionService(db: Db) {
           : source?.name === `ai-${grantId}`;
         if (!privateSlot) secretId = undefined;
       }
+      // A deleted credential leaves the grant's private slot behind. Reuse it
+      // instead of creating a second slot under the same key or name.
+      let definitionId: string | undefined;
+      if (verifiedCredential && !secretId && reconnect) {
+        if (input.ownership === "personal") {
+          const [definition] = await tx
+            .select({ id: userSecretDefinitions.id })
+            .from(userSecretDefinitions)
+            .where(and(
+              eq(userSecretDefinitions.companyId, companyId),
+              eq(userSecretDefinitions.key, `ai_${grantId.replaceAll("-", "_")}`),
+              ne(userSecretDefinitions.status, "deleted"),
+            ));
+          definitionId = definition?.id;
+          if (definitionId) {
+            const [value] = await tx
+              .select({ id: companySecrets.id })
+              .from(companySecrets)
+              .where(and(
+                eq(companySecrets.companyId, companyId),
+                eq(companySecrets.scope, "user"),
+                eq(companySecrets.ownerUserId, userId),
+                eq(companySecrets.userSecretDefinitionId, definitionId),
+                ne(companySecrets.status, "deleted"),
+              ));
+            secretId = value?.id;
+          }
+        } else secretId = (await secrets.getByName(companyId, `ai-${grantId}`))?.id;
+      }
       if (!verifiedCredential) { secretId = undefined; }
       else if (secretId)
         await secrets.rotate(
@@ -656,19 +685,21 @@ export function aiConnectionService(db: Db) {
           { userId },
         );
       else if (input.ownership === "personal") {
-        const definition = await secrets.createUserSecretDefinition(
-          companyId,
-          {
-            key: `ai_${grantId.replaceAll("-", "_")}`,
-            name: input.name,
-            provider: "local_encrypted",
-          },
-          { userId },
-        );
+        definitionId ??= (
+          await secrets.createUserSecretDefinition(
+            companyId,
+            {
+              key: `ai_${grantId.replaceAll("-", "_")}`,
+              name: input.name,
+              provider: "local_encrypted",
+            },
+            { userId },
+          )
+        ).id;
         const secret = await secrets.createCurrentUserSecretValue(
           companyId,
           userId,
-          { definitionId: definition.id, value: verifiedCredential },
+          { definitionId, value: verifiedCredential },
           { userId },
         );
         secretId = secret.id;

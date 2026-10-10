@@ -1115,7 +1115,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
     );
     if (!existing) return;
 
-    const removed = await svc.remove(id);
+    const removed = await svc.remove(id, { rejectWhenUsedByConnection: true });
     if (!removed) {
       res.status(404).json({ error: "Secret not found" });
       return;
