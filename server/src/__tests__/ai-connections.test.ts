@@ -1395,6 +1395,24 @@ console.log(JSON.stringify({ type: "result", subtype: "success", result: "hello"
     const unused = await secrets.create(companyId, { name: `unused-${randomUUID()}`, provider: "local_encrypted", value: "unused" });
     await expect(secrets.remove(unused.id, { rejectWhenUsedByConnection: true })).resolves.toMatchObject({ id: unused.id });
   });
+  it("refuses to delete the private slot definition of an active connection", async () => {
+    const owner = "delete-guard-definition-owner";
+    await db.insert(companyMemberships).values({ companyId, principalId: owner, principalType: "user", status: "active", membershipRole: "member" });
+    const secrets = secretService(db);
+    const saved = await create(owner, "Delete guard definition");
+    const [{ secretId }] = (await db.select().from(connectionGrants).where(eq(connectionGrants.id, saved.grantId)))[0].credentialSecretRefs;
+    const [definition] = await db.select().from(userSecretDefinitions).where(eq(userSecretDefinitions.key, `ai_${saved.grantId.replaceAll("-", "_")}`));
+    const guarded = { rejectWhenUsedByConnection: true };
+    await expect(secrets.removeUserSecretDefinition(companyId, definition.id, undefined, guarded))
+      .rejects.toMatchObject({ status: 409, message: "Used by connection Delete guard definition. Disconnect or reconnect it first." });
+    await expect(secrets.updateUserSecretDefinition(companyId, definition.id, { status: "deleted" }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(await secrets.getById(secretId)).not.toBeNull();
+    expect((await db.select().from(userSecretDefinitions).where(eq(userSecretDefinitions.id, definition.id)))[0].status).not.toBe("deleted");
+    await db.update(connectionGrants).set({ status: "revoked" }).where(eq(connectionGrants.id, saved.grantId));
+    await expect(secrets.removeUserSecretDefinition(companyId, definition.id, undefined, guarded)).resolves.toMatchObject({ id: definition.id, status: "deleted" });
+    expect(await secrets.getById(secretId)).toBeNull();
+  });
   it("rejects invalid purpose/transport combinations in the database", async () => {
     const selected = await service.select({ ...input, userId: "alice" });
     await expect(db.update(toolConnections).set({ transport: "mcp_remote" }).where(eq(toolConnections.id, selected.connection.id))).rejects.toThrow();
