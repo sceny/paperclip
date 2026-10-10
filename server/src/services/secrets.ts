@@ -9,12 +9,14 @@ import {
   companySecrets,
   companySecretVersions,
   companyMemberships,
+  connectionGrants,
   environments,
   heartbeatRuns,
   issues,
   projects,
   routines,
   secretAccessEvents,
+  toolConnections,
   userSecretDeclarations,
   userSecretDefinitions,
 } from "@paperclipai/db";
@@ -3370,20 +3372,50 @@ export function secretService(db: Db | DbTransaction) {
   // `removeSecretUnlocked` re-reads the secret under the lock, so a delete
   // that lost a race between the pre-check and the lock still sees current
   // state, not the pre-check's stale read.
-  async function removeSecretInternal(secretId: string) {
+  async function removeSecretInternal(
+    secretId: string,
+    options?: { rejectWhenUsedByConnection?: boolean },
+  ) {
     const preCheckSecret = await getById(secretId);
     if (!preCheckSecret) return null;
     return withAccountHomeSecretMutationLock(undefined, preCheckSecret.companyId, () =>
-      removeSecretUnlocked(secretId),
+      removeSecretUnlocked(secretId, options),
     );
   }
 
   // The body of `removeSecretInternal` above, unchanged. Extracted to a named
   // function so that wrapper can hold the lock across this whole delete
   // sequence without duplicating it.
-  async function removeSecretUnlocked(secretId: string) {
+  async function removeSecretUnlocked(
+    secretId: string,
+    options?: { rejectWhenUsedByConnection?: boolean },
+  ) {
     const secret = await getById(secretId);
     if (!secret) return null;
+    if (options?.rejectWhenUsedByConnection && secret.status !== "deleted") {
+      // Connection cleanup also calls `remove`, so only direct user deletes ask for this check.
+      const [usedBy] = await db
+        .select({ name: toolConnections.name })
+        .from(connectionGrants)
+        .innerJoin(
+          toolConnections,
+          and(
+            eq(toolConnections.companyId, connectionGrants.companyId),
+            eq(toolConnections.id, connectionGrants.connectionId),
+          ),
+        )
+        .where(
+          and(
+            eq(connectionGrants.companyId, secret.companyId),
+            eq(connectionGrants.status, "active"),
+            sql`${connectionGrants.credentialSecretRefs} @> ${JSON.stringify([{ secretId: secret.id }])}::jsonb`,
+          ),
+        )
+        .limit(1);
+      if (usedBy) {
+        throw conflict(`Used by connection ${usedBy.name}. Disconnect or reconnect it first.`);
+      }
+    }
     const versionRow = await getSecretVersion(secret.id, secret.latestVersion);
     const providerId = secret.provider as SecretProvider;
     const provider = getSecretProvider(providerId);
@@ -4041,7 +4073,7 @@ export function secretService(db: Db | DbTransaction) {
 
     removeCurrentUserSecretValue: async (companyId: string, ownerUserId: string, secretId: string) => {
       const secret = await getUserSecretValueById(companyId, ownerUserId, secretId);
-      return await secretService(db).remove(secret.id);
+      return await secretService(db).remove(secret.id, { rejectWhenUsedByConnection: true });
     },
 
     syncUserSecretDeclarationsForTarget: async (
