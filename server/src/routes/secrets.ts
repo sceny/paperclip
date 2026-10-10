@@ -697,6 +697,7 @@ export function secretRoutes(db: Db, deps: SecretRoutesDeps = {}) {
       companyId,
       definitionId,
       boardActorUser(req),
+      { rejectWhenUsedByConnection: true },
     );
     if (!removed) {
       res.status(404).json({ error: "User secret definition not found" });
