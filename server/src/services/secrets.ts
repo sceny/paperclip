@@ -3383,6 +3383,30 @@ export function secretService(db: Db | DbTransaction) {
     );
   }
 
+  async function assertSecretNotUsedByConnection(secret: { id: string; companyId: string }) {
+    const [usedBy] = await db
+      .select({ name: toolConnections.name })
+      .from(connectionGrants)
+      .innerJoin(
+        toolConnections,
+        and(
+          eq(toolConnections.companyId, connectionGrants.companyId),
+          eq(toolConnections.id, connectionGrants.connectionId),
+        ),
+      )
+      .where(
+        and(
+          eq(connectionGrants.companyId, secret.companyId),
+          eq(connectionGrants.status, "active"),
+          sql`${connectionGrants.credentialSecretRefs} @> ${JSON.stringify([{ secretId: secret.id }])}::jsonb`,
+        ),
+      )
+      .limit(1);
+    if (usedBy) {
+      throw conflict(`Used by connection ${usedBy.name}. Disconnect or reconnect it first.`);
+    }
+  }
+
   // The body of `removeSecretInternal` above, unchanged. Extracted to a named
   // function so that wrapper can hold the lock across this whole delete
   // sequence without duplicating it.
@@ -3394,27 +3418,7 @@ export function secretService(db: Db | DbTransaction) {
     if (!secret) return null;
     if (options?.rejectWhenUsedByConnection && secret.status !== "deleted") {
       // Connection cleanup also calls `remove`, so only direct user deletes ask for this check.
-      const [usedBy] = await db
-        .select({ name: toolConnections.name })
-        .from(connectionGrants)
-        .innerJoin(
-          toolConnections,
-          and(
-            eq(toolConnections.companyId, connectionGrants.companyId),
-            eq(toolConnections.id, connectionGrants.connectionId),
-          ),
-        )
-        .where(
-          and(
-            eq(connectionGrants.companyId, secret.companyId),
-            eq(connectionGrants.status, "active"),
-            sql`${connectionGrants.credentialSecretRefs} @> ${JSON.stringify([{ secretId: secret.id }])}::jsonb`,
-          ),
-        )
-        .limit(1);
-      if (usedBy) {
-        throw conflict(`Used by connection ${usedBy.name}. Disconnect or reconnect it first.`);
-      }
+      await assertSecretNotUsedByConnection(secret);
     }
     const versionRow = await getSecretVersion(secret.id, secret.latestVersion);
     const providerId = secret.provider as SecretProvider;
@@ -3466,18 +3470,25 @@ export function secretService(db: Db | DbTransaction) {
     companyId: string,
     definitionId: string,
     actor?: { userId?: string | null; agentId?: string | null },
+    options?: { rejectWhenUsedByConnection?: boolean },
   ) {
     const existing = await resolveUserSecretDefinition(companyId, { definitionId });
     const values = await db
-      .select({ id: companySecrets.id })
+      .select({ id: companySecrets.id, companyId: companySecrets.companyId, status: companySecrets.status })
       .from(companySecrets)
       .where(and(
         eq(companySecrets.companyId, companyId),
         eq(companySecrets.scope, "user"),
         eq(companySecrets.userSecretDefinitionId, definitionId),
       ));
+    if (options?.rejectWhenUsedByConnection) {
+      // Check every value first so a guarded value cannot leave the others already deleted.
+      for (const value of values) {
+        if (value.status !== "deleted") await assertSecretNotUsedByConnection(value);
+      }
+    }
     for (const value of values) {
-      await removeSecretInternal(value.id);
+      await removeSecretInternal(value.id, options);
     }
     return db
       .update(userSecretDefinitions)
@@ -3883,7 +3894,7 @@ export function secretService(db: Db | DbTransaction) {
     ) => {
       const existing = await resolveUserSecretDefinition(companyId, { definitionId });
       if (patch.status === "deleted") {
-        return removeUserSecretDefinitionInternal(companyId, existing.id, actor);
+        return removeUserSecretDefinitionInternal(companyId, existing.id, actor, { rejectWhenUsedByConnection: true });
       }
       const nextKey = patch.key?.trim() ?? existing.key;
       if (nextKey !== existing.key) {
@@ -3929,7 +3940,8 @@ export function secretService(db: Db | DbTransaction) {
       companyId: string,
       definitionId: string,
       actor?: { userId?: string | null; agentId?: string | null },
-    ) => removeUserSecretDefinitionInternal(companyId, definitionId, actor),
+      options?: { rejectWhenUsedByConnection?: boolean },
+    ) => removeUserSecretDefinitionInternal(companyId, definitionId, actor, options),
 
     getUserSecretDefinitionCoverage: async (companyId: string, definitionId: string) => {
       await resolveUserSecretDefinition(companyId, { definitionId });
