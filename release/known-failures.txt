@@ -1,0 +1,12 @@
+# Tests that fail on plain upstream/master on this machine (checked 2026-10-10, upstream 19e9facc5), not because of our code.
+# Format: the text after "FAIL" in the vitest output, without the trailing "NNNms".
+
+# ssh refuses root-owned /etc/ssh/ssh_config.d/20-omarchy-keepalive.conf inside the gate runner's user namespace ("Bad owner or permissions").
+|@paperclipai/server| src/__tests__/environment-runtime-driver-contract.test.ts > environment runtime driver contract > SSH satisfies the acquire/release host contract
+|@paperclipai/server| src/__tests__/environment-runtime.test.ts > environmentRuntimeService > acquires and releases an SSH run lease through the runtime seam
+
+# Starts the real codex runner; resume fails with "no rollout found for thread id" (needs a codex login/state this box does not give the test).
+|@paperclipai/server| src/services/native-runtime/native-session-resume.test.ts > archives a damaged prior epoch before completing guarded same-task replacement with real runnerd
+
+# Temp dir is not classified as a proven non-git path in the gate runner's user namespace; fails the same way on every run.
+|@paperclipai/server| src/__tests__/heartbeat-workspace-session.test.ts > assertGitWorktreeBaseWorkspaceReady > marks a proven non-Git local path as an owner configuration conflict without changing the failure
