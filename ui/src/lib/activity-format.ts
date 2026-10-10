@@ -112,6 +112,8 @@ const ACTIVITY_ROW_VERBS: Record<string, string> = {
   "project.created": "created",
   "project.updated": "updated",
   "project.deleted": "deleted",
+  "project.paused": "paused",
+  "project.resumed": "resumed",
   "goal.created": "created",
   "goal.updated": "updated",
   "goal.deleted": "deleted",

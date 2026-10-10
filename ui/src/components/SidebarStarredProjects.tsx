@@ -14,7 +14,7 @@ import {
   useResourceMembershipMutation,
   useResourceMemberships,
 } from "../hooks/useResourceMemberships";
-import { BudgetSidebarMarker } from "./BudgetSidebarMarker";
+import { ProjectPausedSidebarMarker } from "./ProjectPausedSidebarMarker";
 import { ProjectTile } from "./ProjectTile";
 import { StarToggle } from "./StarToggle";
 import { Button } from "@/components/ui/button";
@@ -131,9 +131,7 @@ export function SidebarStarredProjects() {
             <ProjectTile color={project.color ?? null} icon={project.icon ?? null} size="xs" />
             <span className={rail ? SIDEBAR_RAIL_HIDDEN_LABEL : "flex-1 truncate"}>{project.name}</span>
             {!rail && project.visibility === "private" ? <Lock className="size-3.5 shrink-0 text-muted-foreground" aria-label="Private project" /> : null}
-            {!rail && project.pauseReason === "budget" ? (
-              <BudgetSidebarMarker title="Project paused by budget" />
-            ) : null}
+            {!rail ? <ProjectPausedSidebarMarker pauseReason={project.pauseReason} /> : null}
           </NavLink>
         );
 

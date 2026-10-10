@@ -109,6 +109,10 @@ function formatVerb(
       return "updated project";
     case "project.deleted":
       return "deleted project";
+    case "project.paused":
+      return "paused project";
+    case "project.resumed":
+      return "resumed project";
     case "goal.created":
       return "created goal";
     case "goal.updated":
