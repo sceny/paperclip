@@ -89,6 +89,8 @@ const ACTION_TIER: Record<string, EventTier> = {
   "project.created": 2,
   "project.updated": 3,
   "project.deleted": 3,
+  "project.paused": 2,
+  "project.resumed": 2,
   "goal.created": 2,
   "goal.updated": 3,
   "goal.deleted": 3,
