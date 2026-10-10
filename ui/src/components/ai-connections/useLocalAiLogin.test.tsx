@@ -95,6 +95,24 @@ it("submits a Claude browser code through the owned local attempt", async () => 
   expect(host.textContent).not.toContain("claude auth login");
 });
 
+it("shows a verifying state after a Claude code is accepted instead of an empty field", async () => {
+  api.checkLocalLogin.mockResolvedValue({ status: "sign_in_required", authorizationUrl: "https://claude.ai/oauth/authorize?client_id=test" });
+  flushSync(() => root.render(<Harness provider="anthropic" />));
+  await vi.waitFor(() => expect(host.querySelector('input[aria-label="Authorization code"]')).not.toBeNull());
+  const input = host.querySelector('input[aria-label="Authorization code"]') as HTMLInputElement;
+  flushSync(() => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "fixture-code");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  flushSync(() => Array.from(host.querySelectorAll("button")).find((button) => button.textContent === "Submit code")?.click());
+  await vi.waitFor(() => expect(host.textContent).toContain("Code submitted. Verifying your sign-in"));
+  expect(host.querySelector('input[aria-label="Authorization code"]')).toBeNull();
+  expect(Array.from(host.querySelectorAll("button")).some((button) => button.textContent === "Submit code")).toBe(false);
+  api.checkLocalLogin.mockResolvedValue({ status: "ready" });
+  window.dispatchEvent(new Event("focus"));
+  await vi.waitFor(() => expect(host.textContent).toContain("is signed in"));
+});
+
 it("hides a failed device prompt and lets the user restart sign-in", async () => {
   api.checkLocalLogin.mockResolvedValue({ status: "sign_in_required", authorizationUrl: "https://auth.openai.com/codex/device", code: "OLD-CODE", error: "Sign-in ended. Start sign-in again." });
   flushSync(() => root.render(<Harness />));
