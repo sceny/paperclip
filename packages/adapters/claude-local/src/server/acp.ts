@@ -366,6 +366,10 @@ const ACPX_AUTH_REQUIRED_ERROR_CODE = "acpx_auth_required";
  */
 const CLAUDE_AUTH_REQUIRED_ERROR_CODE = "claude_auth_required";
 
+const GENERIC_TERMINAL_ACCESS_FAILURE = "ACP agent reported a terminal access failure.";
+const CLAUDE_SIGN_IN_AGAIN_MESSAGE =
+  "Claude sign-in expired or was rejected. Sign in again: open the agent's AI connection and choose Reconnect.";
+
 /**
  * Translate the generic acpx auth-required code into the Claude-specific code at
  * the claude-local boundary. The shared acpx engine reports the generic
@@ -379,12 +383,12 @@ export function mapClaudeAcpAuthErrorCode(
   result: AdapterExecutionResult,
 ): AdapterExecutionResult {
   if (result.errorCode !== ACPX_AUTH_REQUIRED_ERROR_CODE) return result;
+  const rewrite = (value: unknown) => (value === GENERIC_TERMINAL_ACCESS_FAILURE ? CLAUDE_SIGN_IN_AGAIN_MESSAGE : value);
   return {
     ...result,
     errorCode: CLAUDE_AUTH_REQUIRED_ERROR_CODE,
-    ...(result.errorMessage === "ACP agent reported a terminal access failure."
-      ? { errorMessage: "Claude sign-in failed. Sign in again and try again." }
-      : {}),
+    errorMessage: rewrite(result.errorMessage) as typeof result.errorMessage,
+    ...(result.summary !== undefined ? { summary: rewrite(result.summary) as typeof result.summary } : {}),
   };
 }
 
