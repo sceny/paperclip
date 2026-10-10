@@ -510,6 +510,42 @@ export function projectRoutes(db: Db) {
     res.json(project);
   });
 
+  async function setProjectManualPause(req: Request, res: Response, paused: boolean) {
+    assertBoard(req);
+    const id = req.params.id as string;
+    const existing = await getAccessibleResource(req, res, svc.getById(id), "Project not found");
+    if (!existing) return;
+    if (!(await assertProjectReadAllowed(req, res, existing))) return;
+    const result = await svc.setManualPause(id, paused);
+    if (!result) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+
+    if (result.changed) {
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId: result.project.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        action: paused ? "project.paused" : "project.resumed",
+        entityType: "project",
+        entityId: result.project.id,
+      });
+    }
+
+    res.json(result.project);
+  }
+
+  router.post("/projects/:id/pause", async (req, res) => {
+    await setProjectManualPause(req, res, true);
+  });
+
+  router.post("/projects/:id/resume", async (req, res) => {
+    await setProjectManualPause(req, res, false);
+  });
+
   router.get("/projects/:id/access-members", async (req, res) => {
     const id = req.params.id as string;
     const project = await getAccessibleResource(req, res, svc.getById(id), "Project not found");
