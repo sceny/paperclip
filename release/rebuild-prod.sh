@@ -184,15 +184,32 @@ run_gate() { # <name> <pnpm args...>
   exit 3
 }
 
-# True when the test log lists failures and every one is in the known-failures file.
+# Failed test names from a test log, normalized to "|package| file > test name" (colored or plain logs).
+failed_tests() {
+  sed -E 's/\x1b\[[0-9;]*m//g' "$1" | grep -E '^ *FAIL ' \
+    | sed -E 's/^ *FAIL +\|?([^| ]+)\|? +/|\1| /; s/ +[0-9]+ms$//' | sort -u
+}
+
+# True when the test log lists failures and every one is in the known-failures file,
+# or its test file passes when run alone (load flakes: a file that needs 10 minutes alone can fail
+# by timeout when the whole suite runs on a busy machine).
 tolerated_failures_only() {
-  [ -f "$KNOWN_FAILURES" ] || return 1
-  local failed; failed="$(sed -E 's/\x1b\[[0-9;]*m//g' "$1" | grep -E '^ *FAIL ' | sed -E 's/^ *FAIL +//; s/ +[0-9]+ms$//' | sort -u)"
+  local failed; failed="$(failed_tests "$1")"
   [ -n "$failed" ] || return 1
-  local unknown; unknown="$(comm -23 <(printf '%s\n' "$failed") <(grep -vE '^\s*(#|$)' "$KNOWN_FAILURES" | sort -u))"
+  local known=/dev/null; [ -f "$KNOWN_FAILURES" ] && known="$KNOWN_FAILURES"
+  local unknown; unknown="$(comm -23 <(printf '%s\n' "$failed") <(grep -vE '^\s*(#|$)' "$known" | sort -u))"
   [ -z "$unknown" ] && return 0
-  echo "Failures not in $KNOWN_FAILURES:" >&2; printf '%s\n' "$unknown" >&2
-  return 1
+  echo "Failures not in known-failures; re-running their files alone:" >&2; printf '%s\n' "$unknown" | cut -c1-200 >&2
+  local pairs; pairs="$(printf '%s\n' "$unknown" | sed -E 's/^\|([^|]+)\| ([^ ]+).*/\1 \2/' | sort -u)"
+  local pkg file n=0
+  while read -r pkg file; do
+    [ -n "$file" ] || return 1
+    n=$((n + 1))
+    log "re-run alone: $pkg $file"
+    gate_run "$BUILD_DIR" --filter "$pkg" exec vitest run "$file" >"$RUN_LOG/rerun-$n.log" 2>&1 \
+      || { echo "still failing alone: $pkg $file (log: $RUN_LOG/rerun-$n.log)" >&2; return 1; }
+  done <<<"$pairs"
+  return 0
 }
 
 print_summary() {

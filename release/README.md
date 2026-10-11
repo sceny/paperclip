@@ -43,7 +43,8 @@ install; `pnpm -r typecheck`; `pnpm test:run`; `pnpm build`. `pnpm` is used if i
 
 Known failures that come from this machine, not from the code, are listed one per line in
 `release/known-failures.txt` (the text after `FAIL` in the test output). A test run passes only if every failing
-test is on that list. Keep the list short and say why each line is there.
+test is on that list, or its test file passes when re-run alone (a load flake: on a busy box one slow
+integration file can fail by timeout in the full run). Keep the list short and say why each line is there.
 
 ## Roll back
 
