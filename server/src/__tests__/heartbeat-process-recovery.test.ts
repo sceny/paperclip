@@ -2376,6 +2376,40 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(result.continuationRequeued).toBe(0);
   });
 
+  it("leaves stranded work in a manually paused project untouched and recovers it after resume", async () => {
+    const { companyId, issueId } = await seedStrandedIssueFixture({
+      status: "todo",
+      runStatus: "failed",
+    });
+    const projectId = randomUUID();
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Paused project",
+      status: "in_progress",
+      pausedAt: new Date(),
+      pauseReason: "manual",
+    });
+    await db.update(issues).set({ projectId }).where(eq(issues.id, issueId));
+
+    const paused = await heartbeatService(db).reconcileStrandedAssignedIssues();
+
+    expect(paused.issueIds).not.toContain(issueId);
+    expect(paused.escalated).toBe(0);
+    const [stillTodo] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(stillTodo?.status).toBe("todo");
+    const pausedComments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(pausedComments).toHaveLength(0);
+
+    await db.update(projects).set({ pausedAt: null, pauseReason: null }).where(eq(projects.id, projectId));
+
+    const resumed = await heartbeatService(db).reconcileStrandedAssignedIssues();
+
+    expect(resumed.issueIds).toContain(issueId);
+    const resumedComments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(resumedComments.map((comment) => comment.body).join("\n")).not.toContain("over budget");
+  });
+
   async function seedPendingNativeFinalization(accept = true) {
     const fixture = await seedRunFixture({ runtimeMode: "native", adapterType: "paperclip_runner", processPid: 2_000_000_000 });
     const { companyId, agentId, issueId, runId } = fixture;
