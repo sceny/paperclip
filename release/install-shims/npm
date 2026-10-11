@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Install-time shim: `npm pack` of a staged bundled package would run its prepack (pnpm build) inside the
+# staging dir. The package is already built and staged, so skip lifecycle scripts for those packs only.
+if [ "$1" = pack ] && [[ "$2" == *workspace-package-* ]]; then exec /home/jca/.local/share/mise/installs/node/26.8.1/bin/npm "$@" --ignore-scripts; fi
+exec /home/jca/.local/share/mise/installs/node/26.8.1/bin/npm "$@"

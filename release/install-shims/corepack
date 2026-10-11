@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Install-time shim: the upstream `paperclipai install --ref` flow skips the staging that
+# scripts/release.sh does before packing (standalone packages, server/ui-dist, runtime skills).
+# It also unifies public package versions like release.sh does (workspace:* is rewritten to the server's own version).
+# Do that staging right after the server workspace build step.
+REAL=/home/jca/.local/share/paperclip-fork-tools/node_modules/.bin/corepack
+"$REAL" "$@" || exit $?
+if [ "$1" = pnpm ] && [ "$2" = -r ] && [ "${*: -2:1}" = run ] && [ "${*: -1}" = build ] && [ -f scripts/prepare-server-ui-dist.sh ]; then
+  set -e
+  [ -f scripts/build-standalone-public-packages.mjs ] && node scripts/build-standalone-public-packages.mjs
+  PAPERCLIP_RELEASE_REUSE_UI_DIST=1 bash scripts/prepare-server-ui-dist.sh
+  node scripts/release-package-map.mjs set-version "$(node -p "require('./cli/package.json').version")"
+  for d in server packages/adapters/claude-local packages/adapters/codex-local; do
+    rm -rf "$d/skills"; cp -r skills "$d/skills"
+  done
+fi
