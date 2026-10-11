@@ -609,7 +609,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
     // Agent status has its own admission gate and error code. Preserve a
     // manual pause without misclassifying it as a budget failure.
     if (scopeType !== "agent" && scope.paused && scope.pauseReason !== "budget") {
-      return { scopeType, scopeId, scopeName: scope.name, reason: `${scopeType === "company" ? "Company" : "Project"} is paused and cannot start new work.` };
+      return { scopeType, scopeId, scopeName: scope.name, manualPause: true, reason: `${scopeType === "company" ? "Company" : "Project"} is paused and cannot start new work.` };
     }
     if (scope.paused && scope.pauseReason === "budget" && !policies.length) {
       return { scopeType, scopeId, scopeName: scope.name, reason: "Budget pause requires a policy or an explicit operator resume." };
