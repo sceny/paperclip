@@ -10,3 +10,7 @@ branches:
     kind: upstream-request
     parent: PAP-22
     pr:
+  - branch: feat/manual-project-pause
+    kind: upstream-request
+    parent: PAP-9
+    pr:
