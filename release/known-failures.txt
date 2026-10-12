@@ -10,3 +10,6 @@
 
 # Temp dir is not classified as a proven non-git path in the gate runner's user namespace; fails the same way on every run.
 |@paperclipai/server| src/__tests__/heartbeat-workspace-session.test.ts > assertGitWorktreeBaseWorkspaceReady > marks a proven non-Git local path as an owner configuration conflict without changing the failure
+
+# Same cause as the heartbeat-workspace-session entry above: temp dir not classified as a proven non-git path in the gate runner's user namespace, so configurationReason is missing. Checked alone on plain upstream bfe7c6357 on 2026-10-11. Passes in some full runs, fails when run alone.
+|@paperclipai/server| src/__tests__/heartbeat-process-recovery.test.ts > heartbeat orphaned process recovery > keeps an explicit local-path/worktree conflict blocked with a board action and no Sentry event
