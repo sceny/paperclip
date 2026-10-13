@@ -1,7 +1,7 @@
 import { readWorkspaceBaseRefDiagnostic } from "./workspace-base-ref-diagnostics.js";
 import { getEnvironmentAcquisitionDiagnostic } from "./environment-acquisition-diagnostics.js";
 import type { heartbeatRuns } from "@paperclipai/db";
-import { readRunCancellation } from "./run-cancellation.js";
+import { readControllerLeaseLossCause, readRunCancellation } from "./run-cancellation.js";
 import { readProcessLossDiagnostic } from "./process-loss-diagnostics.js";
 import { WORKSPACE_RESTORE_FAILURE_CODES } from "@paperclipai/shared";
 import { redactDiagnosticText } from "@paperclipai/adapter-utils/command-redaction";
@@ -189,6 +189,8 @@ export function collectRunFailureDiagnostics(run: Run, options: RunFailureReport
     execution.cancellationSource = cancellation.source;
     execution.cancellationExpected = cancellation.expected;
     execution.cancellationInitiatorType = cancellation.initiator.type;
+    const leaseLossCause = readControllerLeaseLossCause(cancellation);
+    if (leaseLossCause) execution.controllerLeaseLossCause = leaseLossCause;
   } else if (run.status === "cancelled") {
     execution.cancellationSource = "unknown";
     execution.cancellationExpected = false;

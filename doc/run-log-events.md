@@ -262,11 +262,15 @@ section in the Observability contract.
 
 Cancelled runs retain `resultJson.cancellation`: a closed `source` label
 (`operator`, `queued_message`, `shutdown`, `provider`, `transport`,
-`control_plane`, or `unknown`), whether the stop was expected, the initiator,
-reason, and recording time. Recorded stop intent survives adapter completion.
+`control_plane`, `controller_lease`, or `unknown`), whether the stop was expected,
+the initiator, reason, and recording time. Recorded stop intent survives adapter
+completion. `controller_lease` means the host stopped its own legacy adapter
+after it lost the durable controller lease; the reason names a closed cause
+(`renewal_rejected`, `renewal_deadline`, or `renewal_error`).
 The local lifecycle event includes this evidence. Started cancellations without
 an expected stop are also reported to Sentry; its cancellation diagnostics contain
-only source, expectedness, and initiator type, never initiator IDs or reason text.
+only source, expectedness, initiator type, and the closed lease-loss cause, never
+initiator IDs or reason text.
 Historical ambiguous cancellations stay `unknown` and do not authorize replay.
 
 Provider tool-definition validation failures use

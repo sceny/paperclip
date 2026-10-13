@@ -28,6 +28,7 @@ vi.mock("../../log-redaction.js", async (importOriginal) => {
 });
 
 import { reportRunFailure, waitForPendingRunFailureReports } from "../run-failure-report.js";
+import { controllerLeaseLossCancellation } from "../run-cancellation.js";
 import { REDACTED_EVENT_VALUE } from "../../redaction.js";
 
 const testDatabaseUrl = process.env.PAPERCLIP_TEST_DATABASE_URL;
@@ -708,6 +709,15 @@ describeEmbeddedPostgres("reportRunFailure", () => {
     expect(mockCaptureRunFailure.mock.calls[0][0]).toMatchObject({ runStatus: "cancelled",
       diagnostics: { execution: { cancellationSource: source, cancellationExpected: false } } });
     expect(JSON.stringify(mockCaptureRunFailure.mock.calls)).not.toMatch(/private-actor|private-reason/);
+  });
+  it("labels a host controller lease loss with its closed cause", async () => {
+    await seedCompanyAndAgent();
+    await reportRunFailure(db, buildRun({ status: "cancelled", startedAt: new Date(0), finishedAt: new Date(1000),
+      resultJson: { cancellation: controllerLeaseLossCancellation("renewal_deadline") } }));
+    expect(mockCaptureRunFailure).toHaveBeenCalledOnce();
+    expect(mockCaptureRunFailure.mock.calls[0][0]).toMatchObject({ diagnostics: { execution: {
+      cancellationSource: "controller_lease", cancellationExpected: false, controllerLeaseLossCause: "renewal_deadline" } } });
+    expect(JSON.stringify(mockCaptureRunFailure.mock.calls)).not.toMatch(/Legacy controller lease lost/);
   });
   it("does not report an operator's Stop as a failure", async () => {
     await seedCompanyAndAgent();
