@@ -49,6 +49,15 @@ workflow reads GitHub metadata without checking out or executing PR code. Its au
 repository, head, and merge validation still decide whether tests can use AWS.
 Unapproved test workloads continue to use GitHub-hosted runners.
 
+The routing workflow also selects the CI scope. Middle PRs in a stack and PRs
+whose diff changes only release notes (`releases/v*.md` or
+`releases/beta/v*.md`) skip the build, test, and e2e lanes. The `policy` job
+and the `verify` and `e2e` aggregate checks still run. The release-notes check
+reads the diff between the event's base and head commits. If that lookup
+fails, or the diff is empty or may be truncated, the PR runs full CI. A
+notes-only PR stacked above other PRs also runs full CI, because its own diff
+does not include the lower PRs' code.
+
 The routing Fleet has two warm On-Demand runners and a four-runner ceiling.
 Test fleets cannot consume its runner slots. Hosted test queues therefore do
 not block AWS runner selection. A manual dispatch of `ci-routing.yml` on master

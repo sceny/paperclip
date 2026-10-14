@@ -14,6 +14,31 @@ session and issue-thread surfaces, a public browser/React SDK, a standalone
 adapter demo, and a deterministic mock control plane. None of these surfaces
 imports or starts Paperclip's server, UI, CLI, or production database.
 
+## Execution environment lifecycle
+
+`RunnerExecutionDriver` defines the environment hooks shared by coding harnesses
+and external bot harnesses. The server's `createNativeRunnerExecutionDriver`
+supplies this contract for local, SSH, and sandbox execution. Provider-specific
+session setup stays separate from environment selection.
+
+Connection registration prepares remote resources and returns the process's
+connection configuration before launch. Local Runners connect to Core over
+loopback WS. SSH Runners and eligible sandboxes connect to the configured Core
+WSS endpoint. Sandboxes with authorized WebSocket ingress listen inside the
+sandbox; Core connects through the provider endpoint after process dispatch.
+Ingress selection fails closed and does not fall back to outbound WSS.
+
+The returned activation, readiness, failure, checkpoint, and release hooks feed
+the existing shared PRP control plane. PRP owns authentication, commands, replay,
+tool authority, and run transitions. Process ownership hooks provide launch,
+verified adoption, and durable state access. A lost connection does not prove
+process termination, and a required checkpoint failure must prevent lease release.
+
+The driver is an in-process interface. Its filesystem paths and process launch
+specifications are internal to built-in execution; they are not a plugin wire
+contract. Existing flat transport options remain compatible through this shared
+interface. This refactor does not add Launcher APIs or change harness capabilities.
+
 Connection continuations inspect the harness descriptor's optional
 `toolRefreshOnResume` capability. Native Codex, Claude Managed Agents, AgentCore,
 OpenCode, and qualified Claude/Codex/Grok ACPX profiles expose it; unqualified

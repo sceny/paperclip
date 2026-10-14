@@ -1,3 +1,4 @@
+import type { RunnerExecutionDriver } from "../../control-plane/runner-execution-driver.js";
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
@@ -8,27 +9,23 @@ import type { PrpEvent } from "../../protocol/replay-contract.js";
 import { validatePrpStructuredRunResult } from "../../protocol/replay-contract.js";
 import { DurablePrpControlPlane, spawnRunner, type RunnerProcessHandle } from "../../control-plane/durable-prp-control-plane.js";
 import type { DurableRecoveryIdentity } from "../../contracts/durable-recovery.js";
-import { authorizedToolSetForProvider, defaultCapabilityRunnerdBinary, readRunnerdArtifactBinding, type CapabilityRunnerdCodexTransportOptions } from "../../live/runnerd-codex-transport.js";
+import { authorizedToolSetForProvider, defaultCapabilityRunnerdBinary, readRunnerdArtifactBinding } from "../../live/runnerd-codex-transport.js";
 import { codexSemanticToolSpecs } from "../codex/codex-driver-values.js";
 import { nativeSystemInstructions } from "../../backends/runtime-context.js";
 import type { CodexNativeSessionBackendOptions } from "../../backends/codex-native-backend.js";
 
-export interface RunnerdDotDriverOptions {
+export interface RunnerdDotDriverOptions extends Pick<RunnerExecutionDriver, "runnerStateDirectory" | "runnerProcessLauncher" | "controlPlaneRegistration" | "adoptExistingRunner"> {
   execution: NativeExecutionInputV6;
   stateDirectory: string;
   identity: DurableRecoveryIdentity;
   port: ExternalProviderPort;
   runnerBinary?: string;
-  runnerStateDirectory?: string;
-  runnerProcessLauncher?: CapabilityRunnerdCodexTransportOptions["runnerProcessLauncher"];
   /** Reads the checkpoint from the execution target. Missing state cannot authorize replay. */
   readProviderState?: () => Promise<Record<string, unknown> | null>;
-  controlPlaneRegistration?: CapabilityRunnerdCodexTransportOptions["controlPlaneRegistration"];
   onSpawn?: CodexNativeSessionBackendOptions["onSpawn"];
   dynamicTools?: CodexNativeSessionBackendOptions["dynamicTools"];
   dynamicToolHandler?: CodexNativeSessionBackendOptions["dynamicToolHandler"];
   completionFeedback?: CodexNativeSessionBackendOptions["completionFeedback"];
-  adoptExistingRunner?: CapabilityRunnerdCodexTransportOptions["adoptExistingRunner"];
 }
 
 /** Keep the remote monitor's closed failure code without logging its stderr,

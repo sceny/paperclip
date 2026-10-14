@@ -1,3 +1,4 @@
+import type { RunnerExecutionDriver } from "../control-plane/runner-execution-driver.js";
 import { resolvePinnedOpenCodeCommand } from "../drivers/opencode/opencode-server-driver.js";
 import { ACPX_CAPABILITY_PROFILES } from "../drivers/acpx/capability-profiles.js";
 import { admittedPiThinkingLevel, resolvePiThinkingLevel } from "../drivers/acpx/pi-thinking.js";
@@ -64,7 +65,6 @@ import {
   waitForProcess,
   type RunnerProcessHandle,
   type RunnerProcessConnection,
-  type RunnerProcessLaunchSpec,
   type DurablePrpControlPlaneOptions,
 } from "../control-plane/durable-prp-control-plane.js";
 import {
@@ -1228,7 +1228,7 @@ export interface CapabilityRunnerdProcessEvidence {
   diagnostics: string[];
 }
 
-export interface CapabilityRunnerdCodexTransportOptions {
+export interface CapabilityRunnerdCodexTransportOptions extends RunnerExecutionDriver {
   provider?: "codex" | "opencode" | "claude_managed" | "aws_agentcore" | "acpx";
   opencodePermissionMode?: NativeOpenCodePermissionMode;
   acpxAgent?: QualifiedAcpxAgent;
@@ -1354,25 +1354,6 @@ export interface CapabilityRunnerdCodexTransportOptions {
     turnId: string;
     itemId: string;
   };
-  /** Registers the run-bound PRP authority on Paperclip's shared HTTP server. */
-  controlPlaneRegistration?: (
-    authority: DurablePrpControlPlane,
-    identity?: DurableRecoveryIdentity,
-    signal?: AbortSignal,
-  ) => Promise<{
-    connectUrl?: string;
-    connection?: RunnerProcessConnection;
-    activate?: () => Promise<void> | void;
-    ready?: () => Promise<void>;
-    failure?: Promise<never>;
-    startupFailureCode?:
-      | "runner_local_connect_failed"
-      | "runner_direct_wss_failed"
-      | "runner_ingress_unavailable";
-    /** Persists only exact, independently verified suspended remote state. */
-    checkpoint?: (settlement: "settled" | "unsettled") => Promise<void> | void;
-    release: () => Promise<void> | void;
-  }>;
   /** Existing server-owned routes only; never provision two ingress owners. */
   warmTransitionRegistrationMode?: "routed_connect";
   /** Rechecks the server-owned recovery claim after each asynchronous boundary. */
@@ -1383,35 +1364,6 @@ export interface CapabilityRunnerdCodexTransportOptions {
   onWarmTransitionRecoveryCompleted?: (input: {
     transitionId: string;
   }) => void | Promise<void>;
-  /** Optional remote process owner used only by the new runner coordinator. */
-  runnerProcessLauncher?: (
-    spec: RunnerProcessLaunchSpec,
-  ) => RunnerProcessHandle;
-  /** Durable runner state path in the process owner's filesystem. */
-  runnerStateDirectory?: string;
-  /** Read the live durable runner state when runnerd owns a remote filesystem. */
-  readRunnerState?: () => Promise<Record<string, unknown>>;
-  /** Materializes a verified external checkpoint before authority rotation. */
-  prepareExternalRunnerState?: () => Promise<void>;
-  /** Idempotently archives and returns the verified suspended runner binding. */
-  archiveExternalRunnerState?: (input: {
-    archiveKey: string;
-    priorIdentity: DurableRecoveryIdentity;
-  }) => Promise<Record<string, unknown>>;
-  /** Active-connection recovery budget. Omitted for the existing local mode. */
-  runnerReconnectGraceMs?: number;
-  /**
-   * A verified local runner that outlived its controller. Adoption registers
-   * the durable authority and waits for this exact process to reconnect; it
-   * never calls the process launcher while the process remains alive.
-   */
-  adoptExistingRunner?: {
-    pid: number;
-    processGroupId: number | null;
-    startedAt: string;
-    isAlive: () => Promise<boolean> | boolean;
-    signal?: (signal: NodeJS.Signals) => Promise<boolean> | boolean;
-  };
 }
 
 export type RunnerdCodexTransportOptions =
