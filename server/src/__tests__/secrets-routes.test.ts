@@ -272,6 +272,25 @@ describe("secret routes", () => {
     expect(JSON.stringify(mockLogActivity.mock.calls)).not.toContain("\"board\"");
   });
 
+  it("returns 409 and logs nothing when a user-secret definition is used by a connection", async () => {
+    mockSecretService.removeUserSecretDefinition.mockRejectedValue(
+      new HttpError(409, "Used by connection Work. Disconnect or reconnect it first."),
+    );
+
+    const res = await request(createApp()).delete(
+      "/api/companies/company-1/user-secret-definitions/definition-1",
+    );
+
+    expect(res.status).toBe(409);
+    expect(mockSecretService.removeUserSecretDefinition).toHaveBeenCalledWith(
+      "company-1",
+      "definition-1",
+      { userId: "user-1", agentId: null },
+      { rejectWhenUsedByConnection: true },
+    );
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
   it("logs patched user-secret definition deletion as deletion activity", async () => {
     mockSecretService.updateUserSecretDefinition.mockResolvedValue({
       id: "definition-1",
@@ -1028,6 +1047,7 @@ describe("secret routes", () => {
     expect(res.body).toEqual({ ok: true });
     expect(mockSecretService.remove).toHaveBeenCalledWith(
       "33333333-3333-4333-8333-333333333333",
+      { rejectWhenUsedByConnection: true },
     );
     expect(mockLogActivity).toHaveBeenCalledWith(
       expect.anything(),
