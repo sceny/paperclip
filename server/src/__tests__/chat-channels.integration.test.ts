@@ -4108,21 +4108,52 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       expect((await context.service.listResources(context.endpoint.id)).every(resource => !resource.enabled)).toBe(true);
       expect(await management.configuration(context.endpoint.id, "owner-user")).toMatchObject({ revision: 1, configuration: { toolsEnabled: false } });
     });
-    it.each(["current", "foreign", "invalid_signature"] as const)("verifies a repaired GitHub webhook only from a %s installation delivery", async kind => {
+    it.each([
+      ["active", "current", "enabled"], ["active", "foreign", "enabled"], ["active", "invalid_signature", "enabled"], ["active", "missing_installation", "enabled"],
+      ["attention", "current", "enabled"], ["attention", "foreign", "enabled"], ["attention", "invalid_signature", "enabled"], ["attention", "missing_installation", "enabled"],
+      ["attention", "current", "disabled"], ["attention", "current", "unavailable"],
+    ] as const)("verifies a repaired GitHub webhook in %s only from a %s installation delivery with %s repository", async (status, kind, resourceState) => {
       const f = await reviewBotFixture();
       const [endpoint] = await readChatEndpointsById(f.endpoint.id);
-      await db.update(chatEndpoints).set({ setup: { ...endpoint.setup, webhookVerifiedAt: null } }).where(eq(chatEndpoints.id, endpoint.id));
+      if (resourceState !== "enabled") {
+        await db.update(chatEndpointResources).set(resourceState === "disabled" ? { enabled: false } : { availability: "unavailable" }).where(eq(chatEndpointResources.endpointId, endpoint.id));
+      }
+      if (status === "attention") await db.update(toolConnections).set({ status: "disabled", enabled: false }).where(eq(toolConnections.id, endpoint.connectionId));
+      const resourcesBefore = await f.service.listResources(endpoint.id);
+      const conversationsBefore = await readChatConversationsByEndpointId(endpoint.id);
+      const actionsBefore = await db.select().from(chatActions).where(eq(chatActions.endpointId, endpoint.id));
+      f.wakeup.mockClear();
+      await db.update(chatEndpoints).set({ status, setup: { ...endpoint.setup, webhookVerifiedAt: null } }).where(eq(chatEndpoints.id, endpoint.id));
       const response = await f.service.handleWebhook(endpoint.publicId, "github", signedGitHubWebhookRequest({
         event: "issue_comment", delivery: randomUUID(), webhookSecret: kind === "invalid_signature" ? "wrong-secret" : f.webhookSecret,
-        payload: { action: "created", installation: { id: kind === "foreign" ? 9999 : 2468 },
+        payload: { action: "created", ...(kind === "missing_installation" ? {} : { installation: { id: kind === "foreign" ? 9999 : 2468 } }),
           repository: { id: 97531, full_name: "paperclipai/paperclip", owner: { id: 1357, login: "paperclipai" } },
-          issue: { number: 418 }, comment: { id: 41801, body: "Ordinary comment", user: { id: 42, login: "octocat" } }, sender: { id: 42, login: "octocat" } },
+          issue: { number: 418 }, comment: { id: 41801, body: status === "attention" ? `@${endpoint.botUsername} please review` : "Ordinary comment", user: { id: 42, login: "octocat" } }, sender: { id: 42, login: "octocat" } },
       }));
       if (kind === "invalid_signature") expect(response.status).toBe(401);
       else expect(response.status).toBeLessThan(300);
       const current = await f.service.get(endpoint.id);
       if (kind === "current") expect(current.setup.webhookVerifiedAt).toEqual(expect.any(String));
       else expect(current.setup.webhookVerifiedAt).toBeNull();
+      if (status === "attention") {
+        expect(current.status).toBe("attention");
+        expect(await f.service.listResources(endpoint.id)).toEqual(resourcesBefore);
+        expect(await readChatConversationsByEndpointId(endpoint.id)).toEqual(conversationsBefore);
+        expect(await db.select().from(chatActions).where(eq(chatActions.endpointId, endpoint.id))).toEqual(actionsBefore);
+        expect(f.wakeup).not.toHaveBeenCalled();
+        if (kind === "current") {
+          expect(current.setup.step).toBe("provider_setup");
+          await f.service.handleWebhook(endpoint.publicId, "github", signedGitHubWebhookRequest({
+            event: "installation_repositories", delivery: randomUUID(), webhookSecret: f.webhookSecret,
+            payload: { action: "added", installation: { id: 2468 }, repositories_added: [], repositories_removed: [] },
+          }));
+          expect((await f.service.get(endpoint.id)).status).toBe("attention");
+          expect((await readToolConnectionsById(endpoint.connectionId))[0]).toMatchObject({ status: "disabled", enabled: false });
+          expect(f.wakeup).not.toHaveBeenCalled();
+          const configured = await f.service.configure(endpoint.id, { action: "reconnect" }, "owner-user");
+          expect(configured.status).toBe("verifying");
+        }
+      }
     });
     it("stack rejects forged raw gateway deliveries without changing verification or waking an agent", async () => {
       const f = await reviewBotFixture();
