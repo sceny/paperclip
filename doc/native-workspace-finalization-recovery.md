@@ -35,6 +35,14 @@ leave tar/Git children alive, so incomplete copyback requires operator stop
 verification even on the same host. PID reuse is checked against its recorded
 start time rather than trusted by PID alone.
 
+When PostgreSQL configures an idle-transaction timeout, the owner probes its
+dedicated lock transaction at one third of that interval, capped at
+30 seconds. The probe stops and joins before the transaction is released. This
+keeps a live copyback from losing its lock only because filesystem work has no
+database statements. It does not disable the database timeout or reconnect a
+failed lock session. Publication still requires the physical connection and
+the exact durable owner token. A disabled timeout adds no periodic probe.
+
 ## Automatic cloud recovery
 
 New Railway copyback receipts record the exact project, environment, service and

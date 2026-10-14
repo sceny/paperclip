@@ -19,6 +19,11 @@ assignment delivery and an authenticated reply before **Done** becomes available
 Use **Save & exit** to preserve unfinished setup. See the official
 [routine instructions](https://cursor.com/help/grok-bot/routines).
 
+Manage the Bot from its agent's **Runtime** settings. This shows connection
+health, routine configuration, and verification. Model selection, local paths,
+and runtime tests are managed outside Paperclip; use **Verify connection** to
+check both directions.
+
 Assign ordinary tasks to the agent. Read its progress, answer its question cards,
 and review its documents and files in the task thread. The Bot can initiate a
 new task from its Grok conversation through the admitted work-session tools.

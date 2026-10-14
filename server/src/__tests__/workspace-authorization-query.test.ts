@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/postgres-js";
 import { agents, authUsers, companies, companyMemberships, createDb, executionWorkspaces, issueAccessGrants,
   issues, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@paperclipai/db";
 import { executionWorkspaceReadSqlCondition, type AuthorizationActor } from "../services/authorization.js";
+import { assertTaskWorkspaceAccess } from "../services/task-workspace-source-access.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -64,6 +66,40 @@ const support = await getEmbeddedPostgresTestSupport();
     // A single source should not make admission authorize 1,200 unrelated tasks
     // for both the agent and its responsible user under the company-wide lock.
     expect(privacyTraversals(result["QUERY PLAN"][0].Plan)).toBeLessThan(100);
+  });
+
+  it("enumerates attached and retained source tasks without scanning unrelated history", async () => {
+    await retain(sourceId);
+    const [attached] = await db.insert(issues).values({ companyId, title: "Attached source", executionWorkspaceId: workspaceId })
+      .returning({ id: issues.id });
+    try {
+      const statements: Array<{ sql: string; params: unknown[] }> = [];
+      const recorded = drizzle(db.$client, {
+        schema: db._.fullSchema,
+        logger: { logQuery: (query, params) => statements.push({ sql: query, params }) },
+      }) as unknown as typeof db;
+      await assertTaskWorkspaceAccess(recorded, { type: "board", source: "local_implicit", userId: "local-board" }, companyId, workspaceId);
+      const query = statements.find(statement => statement.sql.startsWith('select "id" from "issues"')
+        && statement.sql.includes('"execution_workspace_id"'));
+      expect(query).toBeDefined();
+      const rows = await db.$client.unsafe(query!.sql, query!.params as never[]);
+      expect(rows.map(row => row.id).sort()).toEqual([attached.id, sourceId].sort());
+      for (const invalidId of [sourceId.toUpperCase(), "not-a-uuid"]) {
+        const params = query!.params.map(value => value === sourceId ? invalidId : value);
+        const noncanonical = await db.$client.unsafe(query!.sql, params as never[]);
+        expect(noncanonical.map(row => row.id)).toEqual([attached.id]);
+      }
+      const [result] = await db.$client.unsafe(`EXPLAIN (ANALYZE, FORMAT JSON) ${query!.sql}`, query!.params as never[]);
+      type Plan = { "Relation Name"?: string; "Actual Rows": number; "Actual Loops": number; "Rows Removed by Filter"?: number; Plans?: Plan[] };
+      function issueRowsExamined(plan: Plan): number {
+        return (plan["Relation Name"] === "issues"
+          ? (plan["Actual Rows"] + (plan["Rows Removed by Filter"] ?? 0)) * plan["Actual Loops"] : 0)
+          + (plan.Plans ?? []).reduce((sum, child) => sum + issueRowsExamined(child), 0);
+      }
+      expect(issueRowsExamined(result["QUERY PLAN"][0].Plan)).toBeLessThan(100);
+    } finally {
+      await db.delete(issues).where(eq(issues.id, attached.id));
+    }
   });
 
   it.each(["missing", "malformed", "uppercase", "foreign"])("denies a %s retained source without throwing a UUID parse error", async kind => {

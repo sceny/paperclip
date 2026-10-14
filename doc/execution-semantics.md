@@ -841,6 +841,15 @@ On startup and on the periodic recovery loop, Paperclip performs the following r
 
 The stranded-work pass closes the gap where issue state survives a crash but the wake/run path does not. The silent-run scan covers the separate case where a live process exists but has stopped producing observable output.
 
+Startup health (`/api/health`) reports `starting` until these recovery passes and
+the other startup steps that serving requests depends on finish. Housekeeping
+that every scheduler tick repeats does not delay it: the custom-image setup
+cleanup, tool connection health, decision expiry, adapter and setup-token login
+reapers, environment lease cleanup, and the retention sweep run after readiness.
+A failed housekeeping step is logged as `startup housekeeping step failed` and
+the next step still runs. The heartbeat scheduler interval starts after
+housekeeping, so the reapers still finish before the first timer tick.
+
 The stale-lock sweep leaves native runs with their finalization coordinator while
 same-session recovery or accepted-result finalization is pending. A provider can
 exit before workspace copy-back, assessment, or arbitration completes. An expired

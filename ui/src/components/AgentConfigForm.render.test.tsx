@@ -73,6 +73,12 @@ vi.mock("../api/agents", () => ({
   agentsApi: mockAgentsApi,
 }));
 
+vi.mock("../api/grokBot", () => ({
+  grokBotApi: {
+    connection: async () => ({ enabled: true, canConfigureConnection: true, binding: null }),
+  },
+}));
+
 vi.mock("../api/adapters", () => ({
   adaptersApi: { list: async () => [{ type: "codex_local", supportedRunners: ["legacy", "paperclip"], defaultRunner: "legacy" }] },
 }));
@@ -312,6 +318,7 @@ async function renderForm(
   options: {
     showAdapterTestEnvironmentButton?: boolean;
     showAdapterTypeField?: boolean;
+    compactTestFeedback?: boolean;
     content?: "configuration" | "secrets";
     environmentVariablesPlacement?: "configuration" | "secrets";
     hideInlineSave?: boolean;
@@ -335,6 +342,7 @@ async function renderForm(
         agent={makeAgent(agentOverrides)}
         onSave={onSave}
         hidePromptTemplate
+        compactTestFeedback={options.compactTestFeedback}
         content={options.content}
         environmentVariablesPlacement={options.environmentVariablesPlacement}
         hideInlineSave={options.hideInlineSave}
@@ -839,6 +847,25 @@ describe("AgentConfigForm environment selector", () => {
     roots = [];
     document.body.innerHTML = "";
     vi.clearAllMocks();
+  });
+
+  it.each([false, true])("uses Grok connection verification without native controls (compact: %s)", async compactTestFeedback => {
+    const result = await renderForm([], {
+      adapterType: "paperclip_runner",
+      adapterConfig: { provider: "grok_bot", cwd: "/old/local/path", model: "old-model" },
+    }, { showAdapterTypeField: true, showAdapterTestEnvironmentButton: true, compactTestFeedback });
+    roots.push(result.root);
+
+    expect(result.container.querySelector('[aria-label="Grok Bot connection"]')).not.toBeNull();
+    expect(result.container.textContent).toContain("Reconnect agent access");
+    expect(result.container.querySelector('[data-config-section="adapter"]')?.textContent).toContain("Grok Bot");
+    expect(result.container.querySelector('[aria-label="Model"]')).toBeNull();
+    expect(result.container.textContent).not.toContain("AI connection");
+    expect(result.container.textContent).not.toContain("Working directory");
+    expect(result.container.textContent).not.toContain("Test your agent");
+    expect(findButton(result.container, "Test")).toBeUndefined();
+    expect(mockAgentsApi.adapterModels).not.toHaveBeenCalled();
+    expect(mockAgentsApi.testEnvironment).not.toHaveBeenCalled();
   });
 
   it("promotes environment drafts through the page Save action and discards them through the page Discard action", async () => {

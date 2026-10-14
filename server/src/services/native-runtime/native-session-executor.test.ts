@@ -1,3 +1,5 @@
+import { trace } from "@opentelemetry/api";
+import { InMemorySpanExporter, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
 import { configuredEnvironmentProjection } from "../../vendor/paperclip-runner/index.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
@@ -10060,33 +10062,54 @@ describe("runnerd provider runtime wiring", () => {
   });
 
   it("keeps assigned MCP credentials on the control plane for remote Codex", async () => {
-    const assignedMcpTools = { definitions: () => [], has: () => false, execute: vi.fn() };
-    state.createAssignedMcpTools.mockResolvedValueOnce(assignedMcpTools);
-    state.createBackend.mockClear();
-    state.createTransport.mockClear();
-    state.toolAuthorityDefinitions.mockClear();
-    await createRunnerdBackend({
-      db: leaseDb(execution), execution, runnerInstanceId: "runner-assigned-mcp",
-      runnerEnvironment: {
-        PAPERCLIP_NATIVE_MCP_NAME: "paperclip-assigned",
-        PAPERCLIP_NATIVE_MCP_URL: "http://127.0.0.1:3217/mcp/gateways/assigned-test",
-        PAPERCLIP_NATIVE_MCP_TOKEN: "private-run-token",
-      },
-      runnerExecutionTarget: {
-        kind: "remote", transport: "sandbox", providerKey: "daytona",
-        leaseId: "lease-assigned-mcp", remoteCwd: "/home/daytona/paperclip-workspace",
-        runner: { execute: vi.fn() },
-      } as never,
-    });
-    expect(state.createAssignedMcpTools).toHaveBeenCalledWith(expect.objectContaining({
-      gatewayPublicId: "assigned-test", bearerToken: "private-run-token",
-    }));
-    expect(state.toolAuthorityDefinitions).toHaveBeenCalledWith(expect.objectContaining({ assignedMcpTools }));
-    state.createBackend.mock.calls[0]![1].codexTransportFactory!();
-    const options = state.createTransport.mock.calls[0]![0] as { environment: NodeJS.ProcessEnv };
-    expect(options.environment.PAPERCLIP_NATIVE_MCP_NAME).toBeUndefined();
-    expect(options.environment.PAPERCLIP_NATIVE_MCP_URL).toBeUndefined();
-    expect(options.environment.PAPERCLIP_NATIVE_MCP_TOKEN).toBeUndefined();
+    const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    vi.stubEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.test");
+    const exporter = new InMemorySpanExporter();
+    const provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
+    expect(trace.setGlobalTracerProvider(provider)).toBe(true);
+    try {
+      const assignedMcpTools = { definitions: () => [], has: () => false, execute: vi.fn() };
+      state.createAssignedMcpTools.mockResolvedValueOnce(assignedMcpTools);
+      state.createBackend.mockClear();
+      state.createTransport.mockClear();
+      state.toolAuthorityDefinitions.mockClear();
+      await createRunnerdBackend({
+        db: leaseDb(execution), execution, runnerInstanceId: "runner-assigned-mcp",
+        runnerEnvironment: {
+          PAPERCLIP_NATIVE_MCP_NAME: "paperclip-assigned",
+          PAPERCLIP_NATIVE_MCP_URL: "http://127.0.0.1:3217/mcp/gateways/assigned-test",
+          PAPERCLIP_NATIVE_MCP_TOKEN: "private-run-token",
+        },
+        runnerExecutionTarget: {
+          kind: "remote", transport: "sandbox", providerKey: "daytona",
+          leaseId: "lease-assigned-mcp", remoteCwd: "/home/daytona/paperclip-workspace",
+          runner: { execute: vi.fn() },
+        } as never,
+      });
+      expect(state.createAssignedMcpTools).toHaveBeenCalledWith(expect.objectContaining({
+        gatewayPublicId: "assigned-test", bearerToken: "private-run-token",
+      }));
+      expect(state.toolAuthorityDefinitions).toHaveBeenCalledWith(expect.objectContaining({ assignedMcpTools }));
+      state.createBackend.mock.calls[0]![1].codexTransportFactory!();
+      const options = state.createTransport.mock.calls[0]![0] as { environment: NodeJS.ProcessEnv };
+      expect(options.environment.PAPERCLIP_NATIVE_MCP_NAME).toBeUndefined();
+      expect(options.environment.PAPERCLIP_NATIVE_MCP_URL).toBeUndefined();
+      expect(options.environment.PAPERCLIP_NATIVE_MCP_TOKEN).toBeUndefined();
+      await provider.forceFlush();
+      const spans = exporter.getFinishedSpans();
+      expect(spans.map(span => span.name)).toEqual(expect.arrayContaining([
+        "native.controller.assigned_mcp", "native.controller.tool_authority",
+        "native.controller.wake_binding", "native.controller.companion_selection",
+      ]));
+      for (const span of spans) {
+        expect(Object.keys(span.attributes)).toEqual(["paperclip.task.run.run_id"]);
+        expect(JSON.stringify(span.attributes)).not.toContain("private-run-token");
+      }
+    } finally {
+      vi.stubEnv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint);
+      trace.disable();
+      await provider.shutdown();
+    }
   });
 
   it("makes remote authority archival idempotent and returns the archived state", async () => {

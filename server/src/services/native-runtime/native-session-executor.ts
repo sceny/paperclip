@@ -1,3 +1,4 @@
+import { createRunPreparationTiming } from "../execution-preparation-timing.js";
 import { configuredEnvironment } from "../../vendor/paperclip-runner/index.js";
 import { apiKeyBillingType } from "@paperclipai/adapter-utils/api-billing-type";
 import { agents } from "@paperclipai/db";
@@ -7673,6 +7674,7 @@ async function executePaperclipNativeSessionWithinScope(
       "paperclip_runner_provider_unsupported: ACPX candidate requires exact host qualification authorization",
     );
   }
+  const timeController = createRunPreparationTiming(input.execution.binding.runId, "native.controller");
   const preparationSpans = input.preparationSpans ?? [];
   const preparationStarts = nativeRunPreparationStarts(
     preparationSpans,
@@ -8609,24 +8611,24 @@ async function executePaperclipNativeSessionWithinScope(
   try {
     if (input.managedGitHub && input.execution.schema !== "paperclip.native-execution-input.v6") {
       if (!input.execution.workspace.cwd) throw new Error("native_workspace_required");
-      githubAccess ??= await createNativeGitHubAccess({
+      githubAccess ??= await timeController("github_access", () => createNativeGitHubAccess({
         scope: input.execution.binding,
         target: input.runnerExecutionTarget,
-        cwd: input.execution.workspace.cwd,
+        cwd: input.execution.workspace.cwd!,
         env: resolveNativeProviderEnvironment(input.execution.provider, input.runnerEnvironment),
         resolveCredentials: (binding) => resolveGitHubOperationCredentials(input.db, binding),
         onLog: input.onLog,
-      });
+      }));
       releaseGitHubRun = githubAccess.activate(input.execution.binding);
       input = { ...input, runnerEnvironment: { ...input.runnerEnvironment, ...githubAccess.env } };
     }
-    const expectedCurrentWakeComments = await resolveCurrentWakeCommentsBinding(
+    const expectedCurrentWakeComments = await timeController("wake_binding", () => resolveCurrentWakeCommentsBinding(
       input.db,
       input.execution.binding,
-    );
+    ));
     const runnerdBackend =
       input.useRunnerd && input.backend === undefined
-        ? await createRunnerdBackend({
+        ? await timeController("backend_setup", () => createRunnerdBackend({
             ...input,
             // Durable scope and prior-run verification use the controller's
             // canonical workspace identity. createRunnerdBackend separately
@@ -8636,7 +8638,7 @@ async function executePaperclipNativeSessionWithinScope(
             durableEnvironmentLeaseId: durableRunnerBinding?.environmentLeaseId,
             trace,
             toolTrace,
-          })
+          }))
         : null;
     const remoteCleanupLease = input.runnerExecutionTarget?.kind === "remote" &&
         input.runnerExecutionTarget.transport === "sandbox" && input.runnerExecutionTarget.leaseId
@@ -8966,7 +8968,7 @@ async function executePaperclipNativeSessionWithinScope(
       // A durable result remains successful if optional credential refresh
       // fails. Retire this owner so it cannot keep stale auth on a warm turn.
       if (warmSessionId !== null && lifecyclePolicy.mode === "warm") {
-        await releaseWarmNativeSession(warmSessionId, warmSessionOwnerToken, lifecyclePolicy.idleTimeoutMs, true);
+        await timeController("warm_release", () => releaseWarmNativeSession(warmSessionId, warmSessionOwnerToken, lifecyclePolicy.idleTimeoutMs, true));
       }
       await input.onLog?.("stderr", "[paperclip-runner] managed credential refresh failed; provider session retired.\n");
     }
@@ -9094,7 +9096,7 @@ async function executePaperclipNativeSessionWithinScope(
           if (settled) {
             await stoppedLeaseRenewal;
             if (warmSessionId !== null && lifecyclePolicy.mode === "warm") {
-              await releaseWarmNativeSession(warmSessionId, warmSessionOwnerToken, lifecyclePolicy.idleTimeoutMs, true);
+              await timeController("warm_release", () => releaseWarmNativeSession(warmSessionId, warmSessionOwnerToken, lifecyclePolicy.idleTimeoutMs, true));
             }
             error = new NativeCancellationPendingRecoveryError();
           }
@@ -9470,7 +9472,7 @@ async function executePaperclipNativeSessionWithinScope(
     // A startup failure or onSession(null) must not leak a transport. A warm
     // owner retains only the inactive broker until its normal retirement.
     if (githubAccess && (!warmSessionId || warmNativeSessions.get(warmSessionId)?.githubAccess !== githubAccess)) {
-      await githubAccess.stop();
+      await timeController("github_stop", () => githubAccess!.stop());
     }
   }
   if (
@@ -9499,7 +9501,7 @@ async function executePaperclipNativeSessionWithinScope(
     }
   }
   const releaseNow = new Date();
-  const released = await input.db
+  const released = await timeController("coordinator_release", () => input.db
     .update(nativeRunFinalizations)
     .set({
       leaseOwner: null,
@@ -9525,7 +9527,7 @@ async function executePaperclipNativeSessionWithinScope(
       ),
     )
     .returning({ runId: nativeRunFinalizations.runId })
-    .then((rows) => rows[0] ?? null);
+    .then((rows) => rows[0] ?? null));
   if (!released) throw new Error("native_session_lease_lost");
   const finalization: NativeFinalizationResult = {
     schema: "paperclip.native-finalization.v1",
@@ -9558,7 +9560,7 @@ async function executePaperclipNativeSessionWithinScope(
     let collectInstructions: boolean;
     try {
       collectInstructions = Boolean(instructionCopy && ownedSession?.ownerToken === warmSessionOwnerToken &&
-        (instructionCopy.checkpointWarm ? !await instructionCopy.checkpointWarm() : await instructionCopy.hasChanges()));
+        (instructionCopy.checkpointWarm ? !await timeController("instruction_checkpoint", () => instructionCopy.checkpointWarm!()) : await timeController("instruction_changes", () => instructionCopy.hasChanges())));
     } catch (error) {
       // A checkpoint or its receipt callback can reject. Retire this owner
       // before heartbeat stops the sandbox, preserving the initiating error.
@@ -9573,13 +9575,13 @@ async function executePaperclipNativeSessionWithinScope(
       // requires the existing checkpoint-and-close boundary before collection.
       ownedSession.closeOnReleaseReason = "registered instruction edits require stopped-provider collection";
     }
-    await releaseWarmNativeSession(
+    await timeController("warm_release", () => releaseWarmNativeSession(
       warmSessionId,
       warmSessionOwnerToken,
       lifecyclePolicy.idleTimeoutMs,
       !retainSession,
-    );
-    if (collectInstructions && !collectedByOwner) await instructionCopy!.collectStopped();
+    ));
+    if (collectInstructions && !collectedByOwner) await timeController("instruction_collection", () => instructionCopy!.collectStopped());
   }
   const providerFailure = providerFailureObservation.forTerminal(native.turnId, native.terminal);
   const adapterResult: AdapterExecutionResult = {
@@ -11297,6 +11299,7 @@ async function createRunnerdBackendWithinSessionClaim(
   sessionScopeId: string,
   retainedTransition?: VerifiedWarmTransitionBinding,
 ): Promise<NativeSessionBackend & { bindManagedSession(session: NativeSession): NativeSession }> {
+  const timeController = createRunPreparationTiming(input.execution.binding.runId, "native.controller");
   let recoveryPending = retainedTransition !== undefined;
   const target = input.runnerExecutionTarget ?? { kind: "local" as const };
   const remoteTarget = target.kind === "remote" ? target : null;
@@ -11313,13 +11316,13 @@ async function createRunnerdBackendWithinSessionClaim(
       "runner_transport_ineligible: remote process runner is unavailable",
     );
   }
-  const currentWakeComments = await resolveCurrentWakeCommentsBinding(
+  const currentWakeComments = await timeController("wake_binding", () => resolveCurrentWakeCommentsBinding(
     input.db,
     input.execution.binding,
-  );
+  ));
   const pinnedSkills = new Set("runtimeContext" in input.execution ? input.execution.runtimeContext.skills.map((skill) => skill.key) : []);
   const connectorAssignments = [...pinnedSkills].some(isConnectorSkill)
-    ? await resolveConnectorAssignments(input.db, input.execution.binding) : [];
+    ? await timeController("connector_assignments", () => resolveConnectorAssignments(input.db, input.execution.binding)) : [];
   const reviewRun = await input.db.select({ contextSnapshot: heartbeatRuns.contextSnapshot })
     .from(heartbeatRuns).where(and(
       eq(heartbeatRuns.id, input.execution.binding.runId),
@@ -11347,12 +11350,12 @@ async function createRunnerdBackendWithinSessionClaim(
     throw new Error("assigned native MCP gateway path is invalid");
   }
   const assignedMcpTools = relayAssignedMcp && !nativeReview && assignedMcpUrl && assignedMcpToken
-    ? await createAssignedMcpTools({
+    ? await timeController("assigned_mcp", () => createAssignedMcpTools({
         gateway: getAssignedMcpGateway(input.db),
         gatewayPublicId: assignedGatewayPublicId!,
         bearerToken: assignedMcpToken,
         workMode: input.execution.task.workMode,
-      })
+      }))
     : undefined;
   const dotAttachmentActor = input.execution.schema === "paperclip.native-execution-input.v6"
     ? await input.db.select({ config: agents.adapterConfig }).from(agents).where(and(
@@ -11398,7 +11401,7 @@ async function createRunnerdBackendWithinSessionClaim(
     ReturnType<SessionToolAuthorityEpoch["definitions"]>
   >;
   try {
-    dynamicTools = await authorityEpoch.definitions();
+    dynamicTools = await timeController("tool_authority", () => authorityEpoch.definitions());
   } catch (error) {
     authorityEpoch.revoke();
     throw error;
@@ -11429,7 +11432,7 @@ async function createRunnerdBackendWithinSessionClaim(
     const backend = createNativeSessionBackend(input.execution, {
       onSpawn: input.onSpawn, dynamicTools,
       dynamicToolHandler: async call => { await dotRunnerBroker(input.db).assertRunAuthority(input.execution as import("../../vendor/paperclip-runner/index.js").NativeExecutionInputV6); return authorityEpoch.execute(call); },
-      completionFeedback: async result => { await dotRunnerBroker(input.db).assertRunAuthority(input.execution as import("../../vendor/paperclip-runner/index.js").NativeExecutionInputV6); await authorityEpoch.definitions(); return nativeCompletionFeedback(input.db, input.execution.binding.runId, result); },
+      completionFeedback: async result => { await dotRunnerBroker(input.db).assertRunAuthority(input.execution as import("../../vendor/paperclip-runner/index.js").NativeExecutionInputV6); await timeController("tool_authority", () => authorityEpoch.definitions()); return nativeCompletionFeedback(input.db, input.execution.binding.runId, result); },
       dotRunnerOptions: {
         stateDirectory: root, runnerBinary: remoteDot?.runnerBinary ?? resolvePaperclipRunnerBinary(),
         ...(remoteDot ?? {}),
@@ -11464,11 +11467,11 @@ async function createRunnerdBackendWithinSessionClaim(
   // Pi's explicit operator import supplies the target-platform authority. Never
   // substitute a Mac controller daemon or trust an image's self-reported hashes.
   // Existing explicit overrides and every other provider keep their old path.
-  const remotePiCompanion = await selectRemotePiCompanion({
+  const remotePiCompanion = await timeController("companion_selection", () => selectRemotePiCompanion({
     provider: input.execution.provider, remote: remoteTarget !== null,
     binaryOverride: input.runnerRemoteBinaryPath, packOverride: input.runnerRemoteProviderPackPath,
-    workspaceRoot: input.execution.workspace.cwd,
-  });
+    workspaceRoot: input.execution.workspace.cwd!,
+  }));
   const configuredProviderPackRoot =
     input.runnerRemoteProviderPackPath?.trim() || remotePiCompanion?.providerPack || null;
   let expectedProviderPackManifest: RemoteProviderPackManifest | null = null;
@@ -11505,7 +11508,7 @@ async function createRunnerdBackendWithinSessionClaim(
   // these exact bytes at remoteBinary before launch.
   const targetMatchedCodexArtifact = remoteTarget !== null && input.execution.provider.kind === "codex";
   const controllerRunnerBinary = targetMatchedCodexArtifact
-    ? await resolveRemotePaperclipRunnerBinary({ runner: remoteCommandRunner!, remoteCwd: remoteTarget.remoteCwd, configuredPath: input.runnerRemoteBinaryPath })
+    ? await timeController("runner_binary", () => resolveRemotePaperclipRunnerBinary({ runner: remoteCommandRunner!, remoteCwd: remoteTarget.remoteCwd, configuredPath: input.runnerRemoteBinaryPath }))
     : remoteTarget
     ? input.runnerRemoteBinaryPath?.trim() || remotePiCompanion?.runnerBinary || (useBundledRemoteImageAssets ? bundledRemoteRunnerBinary() : resolvePaperclipRunnerBinary())
     : resolvePaperclipRunnerBinary();

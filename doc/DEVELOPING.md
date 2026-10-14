@@ -679,6 +679,18 @@ Activity-only reorderings wait for one second without further activity changes;
 new and removed tasks appear immediately. Titles, status, and live indicators stay
 current during that delay.
 
+### Local Linux runner qualification
+
+Before serving requests, the server reads `getconf GNU_LIBC_VERSION` once with
+an asynchronous subprocess, a one-second timeout, and a 1 KiB output limit.
+Runner discovery reuses those immutable platform facts. This check does not
+generate a Node diagnostic report or resolve socket hostnames.
+
+If `getconf` is missing, fails, times out, or returns an unrecognized version,
+the local libc remains unknown and automatic GNU/Linux runner selection stays
+disabled. Qualified Linux targets still require GNU libc 2.39 or newer. Existing
+saved execution choices remain unchanged.
+
 ### OpenCode native runtime
 
 Paperclip Runner resolves the pinned OpenCode platform package installed with
@@ -1440,6 +1452,10 @@ as they are available, so later setup failures still clean up acquired resources
 Busy-account deferral returns explicitly before session/workspace preparation.
 Public-path tests are in `server/src/__tests__/heartbeat-execution-configuration.test.ts`.
 
+Browser Use skill assignment first checks for an enabled, active Browser Use
+connection in the run's company. With none, it skips full tool discovery.
+With one, the existing task, tool-policy and credential-grant checks still apply.
+
 Session preparation is in `server/src/services/heartbeat/session-preparation.ts`.
 It selects fresh or resumable sessions from effective config and managed-account
 identity, then resolves adapter session identity and compaction after workspace
@@ -1883,6 +1899,10 @@ automatically alongside it; see [Agent commentary](agent-commentary.md).
 Other runtime skills remain controlled by
 `paperclipSkillSync.desiredSkills`. The native `paperclip_runner` does not use
 this legacy default because its protocol supplies the control-plane contract.
+An empty native runtime selection returns before company skill inventory work.
+An explicit empty stored key set does the same. Nonempty selections still use
+the current inventory, version and access checks. Legacy automatic selections
+still resolve their operational and feedback skills.
 
 Validate the catalog without writing the manifest:
 
@@ -2359,7 +2379,9 @@ finished task does not hold gigabytes while it waits for the reaper (or forever,
 when it has no merged pull request or has leftover files).
 
 The reaper compacts a workspace once per terminal cycle, after
-`PAPERCLIP_WORKSPACE_COMPACTION_DELAY_HOURS`, when all of these hold:
+`PAPERCLIP_WORKSPACE_COMPACTION_DELAY_HOURS`. Server startup waits for the
+reaper's first sweep, so that sweep never compacts; later sweeps do. A workspace
+qualifies when all of these hold:
 
 - the workspace is an isolated linked Git worktree (never a shared workspace or a
   project's main checkout);

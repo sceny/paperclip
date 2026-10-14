@@ -53,6 +53,12 @@ reads while holding its company provenance lock, so that plan can delay other
 agent launches. Missing, malformed, noncanonical, and foreign-company source
 IDs still deny access.
 
+The subsequent source-task enumeration also keeps `issues.id` as a UUID. Its
+OR predicate combines the workspace binding index with the task primary key.
+Casting that ID to text forces another scan of company history even after the
+workspace privacy query has passed. The workspace authorization regression
+suite checks both plans and verifies the attached and retained source results.
+
 To compare this query on a disposable fixture with 13,429 tasks:
 
 ```sh

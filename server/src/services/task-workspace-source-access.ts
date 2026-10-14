@@ -3,6 +3,7 @@ import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { forbidden } from "../errors.js";
 import { accessService } from "./access.js";
 import { executionWorkspaceReadSqlCondition, type AuthorizationActor } from "./authorization.js";
+import { canonicalExecutionUuid } from "./execution-identity.js";
 
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type WorkspaceAccessContext = { write?: boolean; issueId?: string | null; parentIssueId?: string | null; assigneeAgentId?: string | null; assigneeUserId?: string | null };
@@ -46,7 +47,7 @@ export async function assertTaskWorkspaceAccess(
   const sources = await db.select({ id: issues.id }).from(issues).where(and(
     eq(issues.companyId, companyId),
     or(eq(issues.executionWorkspaceId, workspaceId), retainedIssueIds.length > 0
-      ? inArray(sql<string>`${issues.id}::text`, retainedIssueIds) : undefined),
+      ? inArray(sql`${issues.id}`, retainedIssueIds.map(id => canonicalExecutionUuid(sql`${id}::text`))) : undefined),
   ));
   const sourceIds = new Set(sources.map(source => source.id));
   if (retainedIssueIds.some(id => !sourceIds.has(id))) throw forbidden("Task workspace source is no longer accessible");
