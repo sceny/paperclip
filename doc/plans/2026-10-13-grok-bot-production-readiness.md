@@ -156,3 +156,20 @@ The supporting Cloud ingress candidate passes typecheck, routing smoke and its f
 The next review corrections apply the native deliverable catalog's current work-mode policy to upload-ticket issuance and use. Confirmed rejected deliveries have an explicit operator retry; each retry retains the prior receipt, reserves one idempotent new intent and rechecks binding, grant, routine revision and work-session authority. Unknown or accepted delivery remains single-send. Thread Stop uses the selected run and its agent. Recovery locks all of the agent's current and retired bindings before routine rows. Historical Copilot v17 inputs remain decodable while new launch admission stays pinned to v18.
 
 The focused rendered UI regressions pass (144 tests), as do OpenAPI route coverage (21 tests) and Runner contract/integrity/history checks (82 tests). The current server fixture attempt could not initialize PostgreSQL because the host exhausted its shared-memory slots; no server-test pass is inferred from that attempt. Clean-worker CI must execute the file-policy, rejected-feedback and lock-order regressions before hand-off.
+
+
+## October 14 setup qualification follow-up
+
+The merged candidate passed source checks and was deployed to the approved staging
+workspace. The natural Grok picker and Save & exit recovery were observed there.
+The actual Grok desktop client reused its custom MCP plugin and opened the shared
+agent authorization flow with its registered Cursor client identity.
+
+Setup stopped before granting access: the masked pairing field lacked a Copy
+button, and the pending authorization action still named Dot. Add an explicit
+Copy code control through the shared clipboard helper, keep the code masked and
+out of setup prompts, and use a provider-neutral approval action. Preserve the
+fixed company, agent, authorizing person and permissions preview. Requalify the
+rendered copy and authorization path on the deployed follow-up candidate before
+running work cases. This is not yet evidence of an authenticated candidate reply
+or a completed managed Runner journey.
