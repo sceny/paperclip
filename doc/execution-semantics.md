@@ -1628,6 +1628,13 @@ URL, and token together through the launch allowlist; unrelated environment
 secrets remain excluded. This does not restrict arbitrary network access to a
 public service outside the gateway.
 
+Tool discovery collapses identical descriptors with the same gateway name for
+every provider. Native assigned-tool projection applies the same rule at startup
+and during fresh discovery. A name with conflicting schemas, risk, or source
+bindings remains an error; distinct names retain separate tools. Discovery does
+not grant execution authority: calls still use the existing gateway policy,
+approval, revocation, and audit paths.
+
 
 ### Use real connection requests (2026-09-14)
 

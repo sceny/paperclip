@@ -77,7 +77,7 @@ it("honors an operator sampler that disables root traces even when the trigger i
   }
 });
 
-it("stays silent and preserves values and errors without a tracer provider", async () => {
+it.each(["workspace", "configuration_ai_runtime", "configuration_skills", "configuration_agent_identity"] as const)("stays silent and preserves values and errors without a tracer provider for %s", async phase => {
   trace.disable();
   context.disable();
   const messages = ["log", "info", "warn", "error", "debug"] as const;
@@ -85,12 +85,12 @@ it("stays silent and preserves values and errors without a tracer provider", asy
   try {
     const time = createHeartbeatPreparationTiming("unconfigured-run");
     const result = {};
-    await expect(time("workspace", async () => {
+    await expect(time(phase, async () => {
       expect(trace.getActiveSpan()?.isRecording()).not.toBe(true);
       return result;
     })).resolves.toBe(result);
     const error = new Error("original failure");
-    await expect(time("instructions", async () => { throw error; })).rejects.toBe(error);
+    await expect(time(phase, async () => { throw error; })).rejects.toBe(error);
     for (const spy of spies) expect(spy).not.toHaveBeenCalled();
   } finally {
     for (const spy of spies) spy.mockRestore();

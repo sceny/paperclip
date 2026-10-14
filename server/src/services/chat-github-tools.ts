@@ -241,7 +241,9 @@ export async function githubBotToolsForSession(
 ): Promise<ToolGatewayDescriptor[]> {
   if (!session.agentId || !session.issueId || !session.runId) return [];
   const rows = await db
-    .select({
+    // A PR task can also own inline finding threads. They share one endpoint
+    // and catalog, so discovery must not emit a tool once per conversation.
+    .selectDistinct({
       endpoint: chatEndpoints,
       connection: toolConnections,
       entry: toolCatalogEntries,

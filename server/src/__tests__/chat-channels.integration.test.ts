@@ -2555,6 +2555,20 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       const session = { companyId: f.companyId, agentId: f.assignedAgentId, issueId: conversation.issueId, runId: run.id };
       return { ...f, conversation, run, session };
     }
+    it("lists each GitHub bot tool once when an inline thread shares the task", async () => {
+      const f = await toolReplyFixture("github:paperclipai/paperclip:418");
+      const { id: _id, ...conversation } = f.conversation;
+      await db.insert(chatConversations).values({
+        ...conversation,
+        externalThreadId: "github:paperclipai/paperclip:418:rc:41901",
+        providerUrl: "https://github.com/paperclipai/paperclip/pull/418#discussion_r41901",
+      });
+      const tools = await githubBotToolsForSession(db, f.session);
+      expect(tools).toHaveLength(7);
+      expect(new Set(tools.map(tool => tool.name)).size).toBe(7);
+      expect(await githubBotToolsForSession(db, { ...f.session, issueId: randomUUID() })).toEqual([]);
+      expect(await readChatConversationsByEndpointId(f.endpoint.id)).toHaveLength(2);
+    });
     it.each([
       { label: "returns the confirmed GitHub assessment when publication takes longer than ten seconds", delayMs: 11_000, timeoutMs: undefined },
       { label: "preserves an explicit shorter GitHub tool deadline and reconciles without duplicate publication", delayMs: 200, timeoutMs: 50 },
@@ -69270,6 +69284,72 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       expect(JSON.stringify(runtime.edits)).not.toMatch(
         /PRIVATE|token=|scheduler/,
       );
+    } finally {
+      await context.service.shutdown();
+    }
+  });
+
+  it.each(["not-a-uuid", "", "uppercase"])("skips a pre-run FIFO candidate with a noncanonical coalesced owner id (%s)", async (ownerId) => {
+    const context = await deferredChatQueueFixture();
+    try {
+      const [receipt] = await db
+        .select()
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, context.action.id));
+      await db
+        .update(agentWakeupRequests)
+        .set({
+          payload: {
+            ...receipt.payload,
+            coalescedIntoWakeupRequestId: ownerId === "uppercase" ? context.action.id.toUpperCase() : ownerId,
+          },
+        })
+        .where(eq(agentWakeupRequests.id, context.action.id));
+      await expect(
+        context.service.enqueueInboundWakeupPublications(),
+      ).resolves.toBe(0);
+      await expect(
+        db
+          .select()
+          .from(chatPublications)
+          .where(eq(chatPublications.endpointId, context.endpoint.id)),
+      ).resolves.toEqual([]);
+    } finally {
+      await context.service.shutdown();
+    }
+  });
+
+  it("keeps the pre-run FIFO sweep running when a valid owner's action has comment ids that are not uuids", async () => {
+    const context = await deferredChatQueueFixture();
+    try {
+      // Publish the queued notice first. The removed-comment and queued-notice
+      // checks then have real rows to compare the malformed ids against.
+      await context.service.processPendingPublications();
+      await expect(
+        db
+          .select({ state: chatPublications.state })
+          .from(chatPublications)
+          .where(eq(chatPublications.endpointId, context.endpoint.id)),
+      ).resolves.toEqual([{ state: "published" }]);
+      await db
+        .update(chatActions)
+        .set({
+          payload: {
+            ...context.action.payload,
+            issueId: "not-a-uuid",
+            commentId: "not-a-uuid",
+          },
+        })
+        .where(eq(chatActions.id, context.action.id));
+      await expect(
+        context.service.enqueueInboundWakeupPublications(),
+      ).resolves.toBe(0);
+      await expect(
+        db
+          .select({ state: chatPublications.state })
+          .from(chatPublications)
+          .where(eq(chatPublications.endpointId, context.endpoint.id)),
+      ).resolves.toEqual([{ state: "published" }]);
     } finally {
       await context.service.shutdown();
     }

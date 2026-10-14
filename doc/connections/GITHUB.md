@@ -243,6 +243,12 @@ an agent runtime can execute a review.
 
 ### One editable response per request
 
+A pull request task can retain both its main discussion and inline finding
+threads. Bot tool discovery lists each endpoint/catalog tool once across those
+threads. Publishing an inline finding therefore does not duplicate the tool
+catalog on the task's next run. Both conversation mappings remain available for
+authorized follow-up replies.
+
 After accepting authorized GitHub work, Paperclip posts **Working on this…**
 before starting the agent. Issue and PR discussion comments use the same GitHub
 comment API; inline-review conversations receive an inline reply. Description

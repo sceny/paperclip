@@ -22,6 +22,7 @@ import { extractRemoteMcpPending } from "./remote-mcp-pending.js";
 import { logger } from "../middleware/logger.js";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   and,
   asc,
@@ -352,6 +353,22 @@ export class ToolGatewayHttpError extends Error {
   ) {
     super(message);
   }
+}
+
+/** Repeated discovery rows are one tool; conflicting bindings stay ambiguous. */
+export function deduplicateToolDescriptors(tools: readonly ToolGatewayDescriptor[]): ToolGatewayDescriptor[] {
+  const unique = new Map<string, ToolGatewayDescriptor>();
+  for (const tool of tools) {
+    const previous = unique.get(tool.name);
+    if (previous) {
+      if (!isDeepStrictEqual(previous, tool)) {
+        throw new ToolGatewayHttpError(409, "Conflicting tool definitions share the same name.", "tool_name_collision");
+      }
+      continue;
+    }
+    unique.set(tool.name, tool);
+  }
+  return [...unique.values()];
 }
 
 interface ExecuteGatewayToolInput {
@@ -3084,7 +3101,7 @@ export function createToolGatewayService(
         visibleTools.push(...VIRTUAL_TOOLS);
       }
     }
-    return visibleTools;
+    return deduplicateToolDescriptors(visibleTools);
   }
 
   async function executeBuiltinTool(
@@ -9036,12 +9053,14 @@ export function createToolGatewayService(
           tool,
         }),
       );
-      return decisions
+      const visibleTools = decisions
         .filter(
           ({ decision }) =>
             decision.allowed || decision.decision === "require_approval",
         )
-        .map(({ tool }) => {
+        .map(({ tool }) => tool);
+      return deduplicateToolDescriptors(visibleTools)
+        .map((tool) => {
           const {
             providerType: _providerType,
             risk: _risk,

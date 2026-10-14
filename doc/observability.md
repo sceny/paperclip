@@ -170,6 +170,15 @@ and launcher preparation, run output initialization, workspace validation,
 runtime services, instruction files, and runtime selection. Database and HTTP
 instrumentation can attach child spans during each awaited operation.
 
+Execution configuration also records separate phases for mentioned skills,
+GitHub identity selection, secret resolution, managed AI runtime preparation,
+skill inventory, connector assignments, connector skill preparation and delivery,
+connection instructions, and agent identity. Their names are
+`heartbeat.prepare.configuration_<step>`, using the closed names in
+`server/src/services/heartbeat/preparation-timing.ts`. These intervals are inside
+`execution_configuration`; do not add them to its duration. They remain available
+when a later setup step fails before the provider lifecycle trace starts.
+
 Each phase starts a new root trace and links to the active trigger span when
 one exists. An unsampled HTTP request must not suppress diagnostics for the
 background run it starts. Root traces still follow the operator's configured

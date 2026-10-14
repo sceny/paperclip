@@ -2,6 +2,32 @@
 
 Paperclip uses PostgreSQL via [Drizzle ORM](https://orm.drizzle.team/). There are three ways to run the database, from simplest to most production-ready.
 
+### Task query performance
+
+Run-context lookups use expression indexes for both `context_snapshot.issueId`
+and `context_snapshot.paperclipIssue.id`. Task creation provenance has its own
+company-scoped expression index that follows the query's native issue ID and
+legacy `issueId`/`taskId`/`taskKey` precedence. Migration 0345 builds the two new
+indexes concurrently and can resume an interrupted build without blocking run
+writes for the full build. The indexes add storage and run-write overhead; they
+do not change task visibility or secret redaction.
+
+The chat wake-notice sweep compares UUID columns directly against guarded,
+canonical lowercase UUID payload values. Malformed and noncanonical payloads
+still match nothing. The query can use existing primary keys without adding a
+wakeup-history index.
+
+To compare all three queries on the same disposable local PostgreSQL fixture:
+
+```sh
+pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-slow-queries.ts --baseline-ref=origin/master
+```
+
+Use a revision before these fixes for `--baseline-ref` after they merge. The
+benchmark loads that revision's chat query, uses synthetic data only, compares
+complete returned rows, and prints timings and `EXPLAIN (ANALYZE, BUFFERS)` plans.
+Local results measure query execution, not staging request latency.
+
 ## 1. Embedded PostgreSQL — zero config
 
 If you don't set `DATABASE_URL`, the server automatically starts an embedded PostgreSQL instance and manages a local data directory.
