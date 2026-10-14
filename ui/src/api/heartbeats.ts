@@ -23,6 +23,8 @@ export interface ActiveRunForIssue {
   execution?: HeartbeatRun["execution"];
   id: string;
   runtimeMode?: "legacy" | "native";
+  wakeupRequestId?: string | null;
+  queuedCommentSourceWakeIds?: string[] | null;
   status: string;
   invocationSource: string;
   triggerDetail: string | null;
@@ -56,6 +58,8 @@ export interface LiveRunForIssue {
   execution?: HeartbeatRun["execution"];
   id: string;
   runtimeMode?: "legacy" | "native";
+  wakeupRequestId?: string | null;
+  queuedCommentSourceWakeIds?: string[] | null;
   status: string;
   invocationSource: string;
   triggerDetail: string | null;

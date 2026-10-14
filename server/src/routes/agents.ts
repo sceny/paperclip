@@ -7401,6 +7401,8 @@ export function agentRoutes(
       .select({
         id: heartbeatRuns.id,
         runtimeMode: heartbeatRuns.runtimeMode,
+        wakeupRequestId: heartbeatRuns.wakeupRequestId,
+        queuedCommentSourceWakeIds: sql<string[] | null>`${heartbeatRuns.contextSnapshot} -> 'queuedCommentSourceWakeIds'`.as("queuedCommentSourceWakeIds"),
         status: heartbeatRuns.status,
         invocationSource: heartbeatRuns.invocationSource,
         triggerDetail: heartbeatRuns.triggerDetail,

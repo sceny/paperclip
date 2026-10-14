@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  agentWakeupRequests,
   agentTaskSessions,
   companies,
   createDb,
@@ -120,6 +121,24 @@ describePostgres("heartbeat run state database wiring", () => {
     const [issue] = await db.insert(issues).values({ companyId, title: "Session task", assigneeAgentId: agent.id }).returning();
     return { companyId, agent, issue, state: extracted.createHeartbeatRunState(db) };
   }
+
+  it("retains the consumed queue identity in issue polling summaries", async () => {
+    const { companyId, agent, issue, state } = await fixture();
+    const [wake] = await db.insert(agentWakeupRequests).values({
+      companyId, agentId: agent.id, source: "issue", status: "claimed",
+    }).returning();
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId, agentId: agent.id, issueId: issue.id, status: "running",
+      startedAt: new Date(), wakeupRequestId: wake.id,
+      contextSnapshot: { issueId: issue.id, commentId: "delivered-message", queuedCommentSourceWakeIds: ["coalesced-queue"] },
+    }).returning();
+    for (const summary of [
+      await state.getRunIssueSummary(run.id),
+      await state.getActiveRunIssueSummaryForAgent(agent.id),
+    ]) {
+      expect(summary).toMatchObject({ id: run.id, wakeupRequestId: wake.id, contextCommentId: "delivered-message", queuedCommentSourceWakeIds: ["coalesced-queue"] });
+    }
+  });
 
   it("bounds history at the service boundary and keeps company and agent scope", async () => {
     const { companyId, agent, state } = await fixture();
