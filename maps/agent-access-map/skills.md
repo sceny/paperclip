@@ -146,8 +146,12 @@ admitted skill-test JWT scope.
 Project-source API additions: GET `/api/companies/{companyId}/skill-sources/project-repositories`,
 POST `/api/companies/{companyId}/skill-sources/adopt-project` with `workspaceId`, and
 PATCH `/api/companies/{companyId}/skill-sources/{sourceId}/settings` with expected revision
-and update/connection preferences. `trackingRef: "HEAD"` explicitly restores an independent
-source's default-branch tracking; active project bindings must be edited through their
+and update/connection preferences. `trackingRef` accepts a branch or explicit ref;
+`"HEAD"` keeps default-branch tracking. GET `/api/companies/{companyId}/skill-sources/{sourceId}/branches`
+returns a bounded branch list and the default branch, with optional `connectionId` for
+connection repair. It requires source access and `skills.edit`, and reads only through
+the caller's authorized GitHub grant. Saving validates the requested ref before changing
+an independent source; active project bindings must be edited through their
 project configuration. Responses identify branch, connection, or retry repair and distinguish
 queued imports from imports under an active worker lease. Native API discovery uses the OpenAPI registration.
 

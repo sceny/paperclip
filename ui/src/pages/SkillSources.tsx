@@ -1,5 +1,6 @@
 import { ProjectSkillRepositoryRow } from "@/components/skill-studio/ProjectSkillRepositoryRow";
 import { SkillSourceConnectionRepair } from "@/components/skill-studio/SkillSourceConnectionRepair";
+import { SkillSourceBranchRepair } from "@/components/skill-studio/SkillSourceBranchRepair";
 import { SkillSourceSyncControls } from "@/components/skill-studio/SkillSourceSyncControls";
 import { GithubIcon } from "@/components/icons/github-icon";
 import { useEffect, useRef, useState } from 'react';
@@ -38,11 +39,13 @@ export function SkillSources() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const [results, setResults] = useState<Record<string, { message: string; failedAt: number; operation: 'refresh' | 'settings' } | null>>({});
   const [repairSourceId, setRepairSourceId] = useState<string | null>(null);
+  const [branchSourceId, setBranchSourceId] = useState<string | null>(null);
   const [disconnectSource, setDisconnectSource] = useState<SkillSource | null>(null);
   const companyId = selectedCompanyId ?? '';
   useEffect(() => { setBreadcrumbs([{ label: 'Skills', href: '/skills' }, { label: 'Sources' }]); }, [setBreadcrumbs]);
   const query = useQuery({ queryKey: sourceKey(companyId), queryFn: () => skillSourcesApi.list(companyId), enabled: Boolean(companyId), refetchInterval: 5000 });
   const repairSource = query.data?.find(source => source.id === repairSourceId);
+  const branchSource = query.data?.find(source => source.id === branchSourceId);
   const projectRepositories = useQuery({ queryKey: queryKeys.skillSources.projects(companyId), queryFn: () => skillSourcesApi.projectRepositories(companyId), enabled: Boolean(companyId), refetchInterval: 5000 });
   async function invalidate() {
     await Promise.all([client.invalidateQueries({ queryKey: queryKeys.skillSources.projects(companyId) }), client.invalidateQueries({ queryKey: sourceKey(companyId) }), client.invalidateQueries({ queryKey: queryKeys.companySkills.list(companyId) })]);
@@ -56,9 +59,6 @@ export function SkillSources() {
   const settings = useMutation({ mutationFn: ({ source, enabled }: { source: SkillSource; enabled: boolean }) => skillSourcesApi.settings(companyId, source.id, { revision: source.revision, automaticUpdates: enabled }),
     onSuccess: async (_result, variables) => { setResults(prev => ({ ...prev, [variables.source.id]: null })); await invalidate(); },
     onError: (error, variables) => setResults(prev => ({ ...prev, [variables.source.id]: { message: error.message, failedAt: Date.now(), operation: 'settings' } })) });
-  const repairBranch = useMutation({ mutationFn: (source: SkillSource) => skillSourcesApi.settings(companyId, source.id, { revision: source.revision, trackingRef: 'HEAD' }),
-    onSuccess: async (_result, source) => { setResults(prev => ({ ...prev, [source.id]: null })); await invalidate(); sourceActionButtons.current[source.id]?.focus(); },
-    onError: (error, source) => { setResults(prev => ({ ...prev, [source.id]: { message: error.message, failedAt: Date.now(), operation: 'settings' } })); void invalidate(); } });
   const availableProjects = groupProjectSkillRepositories(Array.isArray(projectRepositories.data) ? projectRepositories.data.filter(repo => !repo.sourceId) : []);
   const groupSource = (group: typeof availableProjects[number]) => query.data?.find(source => source.repositoryUrl.toLowerCase() === group.repository.repositoryUrl.toLowerCase() && source.trackingRef === group.repository.trackingRef);
   const uninstalledProjects = availableProjects.filter(group => !groupSource(group));
@@ -131,6 +131,7 @@ export function SkillSources() {
                   onCheckedChange={enabled => settings.mutate({ source, enabled })}>Automatic updates</DropdownMenuCheckboxItem>
                 <DropdownMenuItem onSelect={() => navigate(`/skills/sources/${source.id}`)}>Select skills</DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => setRepairSourceId(source.id)}>Choose connection</DropdownMenuItem>
+                {source.accessScope !== 'projects' && !source.projects?.some(project => project.active) && <DropdownMenuItem onSelect={() => setBranchSourceId(source.id)}>Choose a new branch</DropdownMenuItem>}
                 <DropdownMenuItem variant="destructive" disabled={disconnect.isPending} onSelect={() => { disconnect.reset(); reloadRemoval.reset(); setDisconnectSource(source); }}>{source.enabled ? 'Disconnect source' : 'Remove source'}</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -157,12 +158,13 @@ export function SkillSources() {
           {source.lastError && (source.repairAction === 'connection' || (!source.repairAction && !source.connectionId)) && <Button variant="outline" size="sm" className="self-start" onClick={() => setRepairSourceId(source.id)}>Choose connection</Button>}
           {source.lastError && source.repairAction === 'branch' && (source.accessScope === 'projects' || source.projects?.some(project => project.active)
             ? <div className="flex flex-wrap gap-3">{source.projects?.filter(project => project.active).map(project => <Link key={project.id} to={`/projects/${project.id}`} className="text-sm underline">Update {project.name} repository</Link>)}</div>
-            : <Button variant="outline" size="sm" className="self-start" disabled={repairBranch.isPending} onClick={() => repairBranch.mutate(source)}>
-              {repairBranch.isPending && repairBranch.variables.id === source.id ? 'Updating branch…' : 'Use default branch'}</Button>)}
+            : <Button variant="outline" size="sm" className="self-start" onClick={() => setBranchSourceId(source.id)}>Choose a new branch</Button>)}
           {source.connectionId && <Link to={`/apps/${source.connectionId}/permissions`} className="text-xs text-muted-foreground hover:text-foreground">Manage GitHub connection</Link>}
         </section>;
       })}
     </div>
+    {branchSource && <SkillSourceBranchRepair companyId={companyId} source={branchSource} onClose={() => setBranchSourceId(null)}
+      onReturnFocus={() => sourceActionButtons.current[branchSource.id]?.focus()} onSaved={async () => { setResults(prev => ({ ...prev, [branchSource.id]: null })); await invalidate(); }} />}
     {repairSource && <SkillSourceConnectionRepair companyId={companyId} source={repairSource} onClose={() => setRepairSourceId(null)} onReturnFocus={() => sourceActionButtons.current[repairSource.id]?.focus()} onSaved={async () => {
       setResults(prev => ({ ...prev, [repairSource.id]: null })); await invalidate();
     }} />}

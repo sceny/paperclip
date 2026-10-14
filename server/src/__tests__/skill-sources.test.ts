@@ -61,6 +61,56 @@ describe.skipIf(!support.supported)('skill source persistence', () => {
     expect(refreshed.source.trackingRef).toBe('HEAD');
     expect(refreshed.source.entries[0]?.skillId).toBe(created.source.entries[0]?.skillId);
   });
+  it('validates the selected branch and retains installed content until a successful refresh', async () => {
+    const isolatedCompany = randomUUID();
+    await db.insert(companies).values({ id: isolatedCompany, name: 'Selected branch', issuePrefix: 'SBR' });
+    const service = skillSourceService(db);
+    const created = await service.create(isolatedCompany, { repositoryUrl: 'https://github.com/acme/skills', trackingRef: 'main', commitSha: sha, selectedPaths: ['deep/one/SKILL.md'], excludedFolders: ['elsewhere'] }, context);
+    const versions = await db.select().from(companySkillVersions).where(eq(companySkillVersions.companyId, isolatedCompany));
+    const read = vi.fn(githubFixture(initial));
+    const repaired = await service.settings(isolatedCompany, created.source.id, { revision: created.source.revision, trackingRef: 'feature/New' }, { ...context, read: () => read });
+    expect(read).toHaveBeenCalledWith('/repos/acme/skills/commits/feature%2FNew');
+    expect(repaired.trackingRef).toBe('feature/New');
+    expect(repaired.entries).toEqual(created.source.entries);
+    expect(repaired.excludedFolders).toEqual(['elsewhere']);
+    expect(repaired.lastScanCommit).toBe(created.source.lastScanCommit);
+    await expect(service.settings(isolatedCompany, created.source.id, { revision: created.source.revision, automaticUpdates: false }, context))
+      .rejects.toMatchObject({ status: 409, details: { code: 'skill_source_settings_changed' } });
+    expect(await db.select().from(companySkillVersions).where(eq(companySkillVersions.companyId, isolatedCompany))).toEqual(versions);
+    const changed = githubFixture({ 'deep/one/SKILL.md': md('new branch version') }, {}, 'f'.repeat(40));
+    await service.refresh(isolatedCompany, repaired.id, { ...context, read: () => changed });
+    const skillId = repaired.entries.find(entry => entry.skillId)!.skillId!;
+    const current = await companySkillService(db).getById(isolatedCompany, skillId);
+    expect(current!.sourceRef).toBe('f'.repeat(40));
+    expect(current!.currentVersionId).not.toBe(versions[0]!.id);
+    expect(await companySkillService(db).getVersion(isolatedCompany, skillId, versions[0]!.id)).not.toBeNull();
+  });
+  it('rejects an unavailable selected branch without changing the source or recording a successful audit', async () => {
+    const isolatedCompany = randomUUID();
+    await db.insert(companies).values({ id: isolatedCompany, name: 'Unavailable branch', issuePrefix: 'UBR' });
+    const service = skillSourceService(db);
+    const created = await service.create(isolatedCompany, { repositoryUrl: 'https://github.com/acme/skills', trackingRef: 'main', commitSha: sha, selectedPaths: ['deep/one/SKILL.md'] }, context);
+    const original = githubFixture(initial), audit = vi.fn();
+    const read = async (request: string) => {
+      if (request.endsWith('/commits/feature%2Fmissing')) throw unprocessable('Unavailable branch.', { code: 'skill_source_ref_unavailable' });
+      if (request.endsWith('/commits/..')) return { id: 42, default_branch: 'main' };
+      return original(request);
+    };
+    for (const trackingRef of ['feature/missing', '..']) await expect(service.settings(isolatedCompany, created.source.id, { revision: created.source.revision, trackingRef }, { ...context, audit, read: () => read })).rejects.toMatchObject({ details: { code: 'skill_source_ref_unavailable' } });
+    expect(await service.detail(isolatedCompany, created.source.id)).toEqual(created.source);
+    expect(audit).not.toHaveBeenCalled();
+  });
+  it('requires source edit authorization before reading branches and uses only the requested connection', async () => {
+    const service = skillSourceService(db);
+    const created = await service.create(companyId, { repositoryUrl: 'https://github.com/acme/skills', trackingRef: 'branch-list', commitSha: sha, selectedPaths: [] }, context);
+    const read = vi.fn(async (request: string) => request === '/repos/acme/skills' ? { id: 42, default_branch: 'main' } : [{ name: 'main' }]);
+    const connection = randomUUID(), choose = vi.fn(() => read);
+    const result = await service.branches(companyId, created.source.id, { connectionId: connection }, { ...context, read: choose });
+    expect(result.defaultBranch).toBe('main'); expect(choose).toHaveBeenCalledWith(connection);
+    read.mockClear();
+    await expect(service.branches(companyId, created.source.id, {}, { ...context, read: choose, authorize: async () => { throw unprocessable('Editing denied.'); } })).rejects.toThrow('Editing denied');
+    expect(read).not.toHaveBeenCalled();
+  });
   it('checks a new commit with an unchanged tree without downloading or replacing versions', async () => {
     const originalFiles = files, originalCommit = commit;
     try {

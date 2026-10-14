@@ -10,6 +10,7 @@ import { dotRunnerBroker } from "../services/dot-runner-broker.js";
 import { publicMcpConfig } from "../services/public-mcp/oauth.js";
 import { connectionIntentDeliveryService } from "../services/connection-intent-delivery.js";
 import { completeConnectionIntentSchema } from "@paperclipai/shared";
+import { HEARTBEAT_RUN_LIST_DEFAULT_LIMIT, HEARTBEAT_RUN_LIST_MAX_LIMIT } from "@paperclipai/shared";
 import { agentFileStore, agentFileTokenFromHash } from "../services/agent-file-store.js";
 import { pipeline } from "node:stream/promises";
 import { resolveAgentAppearance, agentAvatarUrl } from "@paperclipai/shared";
@@ -6615,7 +6616,9 @@ export function agentRoutes(
     if (!(await assertRunTelemetryReadAllowed(req, res, companyId))) return;
     const agentId = req.query.agentId as string | undefined;
     const limitParam = req.query.limit as string | undefined;
-    const limit = limitParam ? Math.max(1, Math.min(1000, parseInt(limitParam, 10) || 200)) : undefined;
+    const limit = limitParam
+      ? Math.max(1, Math.min(HEARTBEAT_RUN_LIST_MAX_LIMIT, parseInt(limitParam, 10) || HEARTBEAT_RUN_LIST_DEFAULT_LIMIT))
+      : HEARTBEAT_RUN_LIST_DEFAULT_LIMIT;
     const summary = req.query.summary === "true" || req.query.summary === "1";
     const runs = await heartbeat.list(companyId, agentId, limit, { summary });
     const readDecisions = await getHeartbeatRunReadDecisions(db, access, req.actor, runs);

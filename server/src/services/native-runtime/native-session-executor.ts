@@ -9418,7 +9418,9 @@ async function executePaperclipNativeSessionWithinScope(
             recoveryProjection.supersedeOnIdentityChange,
         });
       });
-      if (terminalRunToReport) void reportRunFailure(input.db, terminalRunToReport);
+      // Pass the raw error only for closed settlement labels: its text bypasses
+      // the identity redactor applied to the persisted message above.
+      if (terminalRunToReport) void reportRunFailure(input.db, terminalRunToReport, { nativeCloseFailure: error });
       await boundedExecutionCleanup(async () => {
         await stoppedLeaseRenewal;
         await attemptFailureStep(() =>

@@ -15,9 +15,12 @@ test('groups matching project repositories and keeps progress visible through ad
 test('repairs a missing branch without prompting for another connection', async ({ page }) => {
   await page.goto(story('missing-branch'));
   await expect(page.getByRole('button', { name: 'Choose connection', exact: true })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Use default branch', exact: true }).click();
+  await page.getByRole('button', { name: 'Choose a new branch', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Branch', exact: true }).click();
+  await page.getByRole('option', { name: 'master Default', exact: true }).click();
+  await page.getByRole('button', { name: 'Change branch', exact: true }).click();
   await expect(page.getByRole('alert')).toHaveCount(0);
-  await expect(page.getByText(/Default branch · Updated/)).toBeVisible();
+  await expect(page.getByText(/master · Updated/)).toBeVisible();
   await expect(page.getByRole('region', { name: 'acme/team-skills', exact: true }).getByText('Code review', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'More actions for acme/team-skills', exact: true })).toBeFocused();
 });

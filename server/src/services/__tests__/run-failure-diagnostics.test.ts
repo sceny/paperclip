@@ -176,6 +176,61 @@ describe("run failure diagnostics", () => {
     }
   });
 
+  it("exports which native close barrier failed without tool identities or provider text", () => {
+    const closeFailure = (settlement: unknown) => Object.assign(
+      new Error("provider_transport_failed: runner did not durably suspend before checkpoint"),
+      { code: "native_session_close_unrecoverable", settlement },
+    );
+    const settlement = {
+      runnerSuspended: false,
+      providerDrained: true,
+      suspensionState: { commandStatus: "pending", runnerLifecycle: "ready", runnerIdentityMatches: true },
+      semanticTools: {
+        persistenceFailed: false,
+        failures: [{ callId: "private-call", operationId: "private-operation", stage: "persist", code: "private-code" }],
+        pending: [{ sourceEventId: "private-event", callId: "private-call", inputDigest: "private-digest" }],
+        deliveries: [{ commandId: "private-command", status: "pending" }, { commandId: "private-command-2", status: "indeterminate" }],
+      },
+      finalProviderState: { pendingEventCount: 128, activeProviderTurnId: "private-turn", providerSettled: false },
+    };
+    const result = sanitizeRunFailureDiagnostics(collectRunFailureDiagnostics(run(), { nativeCloseFailure: closeFailure(settlement) }));
+    expect(result.execution).toEqual({
+      closeRunnerSuspended: false, closeProviderDrained: true,
+      closeSuspendCommandStatus: "pending", closeRunnerLifecycle: "ready", closeRunnerIdentityMatches: true,
+      closeProviderState: "unsettled", closeProviderPendingEventCount: 128, closeProviderTurnActive: true,
+      closeSemanticResultPersistenceFailed: false,
+      closeSemanticToolsPending: 1, closeSemanticToolDeliveriesOpen: 2, closeSemanticResultFailures: 1,
+    });
+    expect(result.exceptions).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(JSON.stringify(result)).not.toContain("durably suspend");
+
+    const unobserved = collectRunFailureDiagnostics(run(), { nativeCloseFailure: new Error("wrapped", { cause: closeFailure({
+      runnerSuspended: true, providerDrained: false, suspensionState: null, finalProviderState: null,
+    }) }) }).execution;
+    expect(unobserved).toEqual({ closeRunnerSuspended: true, closeProviderDrained: false, closeProviderState: "not_local" });
+    expect(collectRunFailureDiagnostics(run(), { nativeCloseFailure: closeFailure({
+      suspensionState: { commandStatus: null, runnerLifecycle: null, runnerIdentityMatches: null },
+      finalProviderState: "unreadable",
+    }) }).execution).toEqual({ closeSuspendCommandStatus: "not_queued", closeRunnerLifecycle: "unobserved", closeProviderState: "unreadable" });
+  });
+
+  it("ignores unrelated errors and unknown or hostile native close settlement values", () => {
+    expect(collectRunFailureDiagnostics(run(), { nativeCloseFailure: Object.assign(new Error("x"), {
+      code: "provider_transport_failed", settlement: { runnerSuspended: false },
+    }) }).execution).toEqual({});
+    const hostile = Object.assign(new Error("x"), { code: "native_session_close_unrecoverable", settlement: {
+      runnerSuspended: "private", providerDrained: 1,
+      suspensionState: { commandStatus: "private-status", runnerLifecycle: "private-lifecycle", runnerIdentityMatches: "yes" },
+      finalProviderState: { pendingEventCount: -1, activeProviderTurnId: 7, providerSettled: "private" },
+      semanticTools: Object.defineProperty({ pending: Number.POSITIVE_INFINITY }, "persistenceFailed", { get() { throw new Error("private"); } }),
+    } });
+    expect(collectRunFailureDiagnostics(run(), { nativeCloseFailure: hostile }).execution).toEqual({});
+    expect(collectRunFailureDiagnostics(run(), { nativeCloseFailure: Object.assign(new Error("x"), {
+      code: "native_session_close_unrecoverable",
+    }) }).execution).toEqual({});
+  });
+
   it("selects bounded lock-owner evidence from a caught timeout cause", () => {
     const error = new Error("outer", { cause: Object.assign(new Error("lock timeout"), {
       code: "ERR_WORKSPACE_RESTORE_LOCK_TIMEOUT",

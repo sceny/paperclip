@@ -204,6 +204,12 @@ ends before outer workspace persistence. The heartbeat-owned local run-log
 every other native span carries a real OpenTelemetry parent context rather than
 only a descriptive `parentName` field.
 
+The native lifecycle root uses the operator's root sampling policy. It links
+to a valid active trigger trace without inheriting its sampling decision.
+An unsampled HTTP request therefore cannot suppress an otherwise sampled
+background run. An operator who disables root sampling still gets no spans.
+Without an OTLP endpoint, tracing remains silent and does not export data.
+
 The run link in Honeycomb matches both `task.provider_session` for native runs and `task.run` for legacy adapters. It retains the exact hashed run-ID and service filters and groups by trace ID. The URL builder uses Honeycomb’s supported `in` operator for the two root names; see the [query specification](https://github.com/honeycombio/honeycomb-mcp#query-specification-for-run_query). This changes only the query link. The operator endpoint gate and span attribute allowlist remain unchanged.
 
 The canonical lifecycle is:
@@ -666,6 +672,23 @@ provider failure, or deployment. The last-output age can include system output.
 at detection; it does not claim that a retry was queued or succeeded. This data
 contains no process IDs, task text, paths, or credentials and changes no recovery
 or ownership decisions.
+
+When a native session fails because close could not prove durable runner
+suspension (`provider_transport_failed: runner did not durably suspend before
+checkpoint`), `run_execution` records which barrier was unproven:
+`closeRunnerSuspended`, `closeProviderDrained`, `closeSuspendCommandStatus`
+(a runner command status, or `not_queued`), `closeRunnerLifecycle` (`ready`,
+`suspended`, `closed`, `recoverable_failure`, or `unobserved`),
+`closeRunnerIdentityMatches`, `closeProviderState` (`settled`, `unsettled`,
+`unreadable`, or `not_local`), `closeProviderPendingEventCount`,
+`closeProviderTurnActive`, `closeSemanticResultPersistenceFailed`, and the counts
+`closeSemanticToolsPending`, `closeSemanticToolDeliveriesOpen`, and
+`closeSemanticResultFailures`. Fields absent from the runner's settlement are
+omitted. Tool call, operation, command and event identities, input digests and
+provider turn IDs stay in the instance run log. The report reads the caught error
+only for these labels; its text and stack are not copied, because they bypass the
+executor's identity redaction. These observations do not change close, quarantine
+or recovery behavior.
 
 ACP turns record `acpLastEventAgeMs`, `acpObservedEventCount`,
 `acpPendingToolCount`, and `acpToolInventoryComplete` at finalization, before

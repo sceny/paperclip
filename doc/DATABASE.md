@@ -28,6 +28,23 @@ benchmark loads that revision's chat query, uses synthetic data only, compares
 complete returned rows, and prints timings and `EXPLAIN (ANALYZE, BUFFERS)` plans.
 Local results measure query execution, not staging request latency.
 
+Run history defaults to 200 rows and permits at most 1,000 rows, including
+direct service calls. The UI client requests 200 rows when its caller omits a
+limit. Context summaries expand the stored JSON once per returned row, retaining
+legacy text conversion and the first-class issue binding. Authorization and
+secret redaction still run on the bounded result set.
+Agent detail links fetch an older selected run by ID when it is outside the
+history page, and verify that it belongs to the current company and agent.
+
+To compare the real summary and full history queries with an earlier revision:
+
+```sh
+pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-run-history.ts --baseline-ref=1e731520bb
+```
+
+The fixture has 1,400 synthetic runs with 192 KiB contexts. Both queries return
+the same 200 complete rows. This benchmark excludes HTTP and redaction latency.
+
 ## 1. Embedded PostgreSQL — zero config
 
 If you don't set `DATABASE_URL`, the server automatically starts an embedded PostgreSQL instance and manages a local data directory.
@@ -814,11 +831,15 @@ source identity even if it currently resolves to that default branch. API-key
 agents without an authenticated run may attach repositories; their durable import
 jobs have no setup person and require adoption by an authorized person.
 
-Independent legacy sources with a missing branch can explicitly switch to `HEAD`
-through source settings. Validate the repository identity and default-branch read
+Independent sources can change their tracked branch or revision through source
+settings, including `HEAD` to follow the default branch. Validate the repository
+identity and the requested commit read
 before changing the ref; preserve installed skill IDs, versions and selection. Active
 project bindings must change their ref through the project configuration. `HEAD`
 remains the default-branch alias after refresh, including for independent sources.
+Branch changes use the source revision and lease fence, reject duplicate repository/ref
+sources, keep installed version rows unchanged, and enqueue the normal refresh path.
+Branch listing uses the caller's authorized connection, not the stored setup identity.
 
 ### Task workspace records (2026-10-09)
 
@@ -876,3 +897,21 @@ reservation per attempt. Failed downloads and package fallback keep the full
 reservation. Successfully linked small imports refund unused measured work.
 Completed bindings do not reset company credits; waiting jobs retry on refill.
 The company_skill_import_budgets table stores no credentials or source contents.
+
+### Execution recovery query performance
+
+Conversation recovery keeps indexed run and task UUID columns as UUIDs. Saved
+JSON identifiers pass a canonical lowercase UUID guard before conversion.
+Malformed, uppercase, numeric and cross-company values retain their old behavior.
+Ownership candidate reads split native and legacy issue bindings so existing
+indexes can filter candidates before reading large contexts. Native bindings
+continue to override legacy context IDs. No new index or migration is needed.
+
+```sh
+pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-recovery-queries.ts --baseline-ref=1e731520bb
+```
+
+This disposable fixture compares the real ownership, recovery-action and status
+delivery queries, including complete positional results and database plans.
+All data is synthetic. Query timings exclude process liveness probes, HTTP and
+provider work.

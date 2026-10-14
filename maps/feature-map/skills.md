@@ -81,8 +81,11 @@ must be verified separately; inspect resolved version IDs across an upstream upd
 ### Connection repair during an update
 
 A missing tracked branch is a branch repair, not a credential failure. On an independent
-source, choose Use default branch explicitly; installed identities, selections and version
-pins remain. Project-tracked branches are changed in project settings. A saved connection
+source, choose a new branch from the searchable list or enter its name. The repository's
+default branch is marked and included even outside the first 100 listed branches.
+Loading or a failed list request does not prevent manual entry; saving validates the
+requested ref. Installed identities, selections and version pins remain. Project-tracked
+branches are changed in project settings. A saved connection
 is validated against both the repository and tracked revision before repair succeeds.
 
 Open Choose connection while a source is being refreshed. Select an authorized account and save. If the source changes, the dialog must retain that selection, load the current revision, and allow a second save without reopening. The [project repository browser suite](../../tests/storybook-visual/project-repository-skills.spec.ts) covers this recovery with simulated upstream data.

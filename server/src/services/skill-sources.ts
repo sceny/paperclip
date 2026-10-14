@@ -1,5 +1,6 @@
 import { reserveAutomaticSkillWork, settleAutomaticSkillWork } from './skill-source-refresh-budget.js';
 import { skillSourceRepairAction } from './skill-source-problems.js';
+import { listSkillSourceBranches } from './skill-source-branches.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { skillSourceRetryAt } from './skill-source-retry.js';
 import path from 'node:path';
@@ -7,7 +8,7 @@ import { promises as fs } from 'node:fs';
 import { folderService } from './folders.js';
 import { and, eq, isNull, lt, or, sql } from 'drizzle-orm';
 import { companySkillSources as sources, companySkillSourceEntries as entries, companySkills, companySkillRepositorySnapshots, projectSkillSources, projects, type Db, authUsers } from '@paperclipai/db';
-import type { CompanySkill, SkillSource, SkillSourceCreateRequest, SkillSourceDiscoveryRequest, SkillSourceSelectionRequest, SkillSourceRefreshResult, SkillSourcePreviewRequest, SkillSourceSettingsRequest, SkillSourceDisconnectRequest, SkillSourceDisconnectResult } from '@paperclipai/shared';
+import type { CompanySkill, SkillSource, SkillSourceCreateRequest, SkillSourceDiscoveryRequest, SkillSourceSelectionRequest, SkillSourceRefreshResult, SkillSourcePreviewRequest, SkillSourceSettingsRequest, SkillSourceDisconnectRequest, SkillSourceDisconnectResult, SkillSourceBranchesQuery } from '@paperclipai/shared';
 import { normalizeAgentUrlKey } from '@paperclipai/shared';
 import { conflict, notFound, unprocessable } from '../errors.js';
 import { companySkillService, parseSkillImportSourceInput } from './company-skills.js';
@@ -295,7 +296,14 @@ export function skillSourceService(db: Db) {
       throw error;
     }
   }
+  async function branches(companyId: string, id: string, input: SkillSourceBranchesQuery, context: SkillSourceContext, signal?: AbortSignal) {
+    await skillAccessService(db).assertSource(companyId, id);
+    const source = await row(companyId, id);
+    await context.authorize('skills.edit', { sourceType: 'git', sourceLocator: source.repositoryUrl });
+    return listSkillSourceBranches(source, context.read(input.connectionId ?? source.connectionId), signal);
+  }
   async function settings(companyId: string, id: string, input: SkillSourceSettingsRequest, context: SkillSourceContext) {
+    await skillAccessService(db).assertSource(companyId, id);
     const source = await row(companyId, id);
     await context.authorize('skills.edit', { sourceType: 'git', sourceLocator: source.repositoryUrl });
     // Validate a replacement connection before binding unattended work to it.
@@ -309,8 +317,11 @@ export function skillSourceService(db: Db) {
       reader = context.read(input.connectionId !== undefined ? input.connectionId : source.connectionId);
       const repository = await reader(`/repos/${source.fullName}`) as { id: number; default_branch: string };
       if (source.repositoryId && String(repository.id) !== source.repositoryId) throw conflict('The repository at this URL has changed identity. Add it as a new source.');
-      const ref = (input.trackingRef ?? source.trackingRef) === 'HEAD' ? repository.default_branch : source.trackingRef;
-      await reader(`/repos/${source.fullName}/commits/${encodeURIComponent(ref)}`);
+      const requestedRef = input.trackingRef ?? source.trackingRef;
+      const ref = requestedRef === 'HEAD' ? repository.default_branch : requestedRef;
+      if (typeof ref !== 'string' || !ref) throw unprocessable('The selected branch or revision is unavailable.', { code: 'skill_source_ref_unavailable' });
+      const commit = await reader(`/repos/${source.fullName}/commits/${encodeURIComponent(ref)}`) as { sha?: unknown } | null;
+      if (!commit || typeof commit.sha !== 'string' || !/^[a-f0-9]{40}$/i.test(commit.sha)) throw unprocessable('The selected branch or revision is unavailable.', { code: 'skill_source_ref_unavailable' });
     }
     return db.transaction(async tx => {
       if (input.trackingRef !== undefined) {
@@ -321,7 +332,7 @@ export function skillSourceService(db: Db) {
         if (binding) throw unprocessable('Update the repository branch in its project settings.');
         const [duplicate] = await tx.select({ id: sources.id }).from(sources).where(and(
           eq(sources.companyId, companyId), eq(sources.repositoryUrl, source.repositoryUrl), eq(sources.trackingRef, input.trackingRef), isNull(sources.removedAt), sql`${sources.id} <> ${id}`));
-        if (duplicate) throw conflict('This repository’s default branch is already in Sources. Use that source; installed skills were kept.');
+        if (duplicate) throw conflict('This repository and branch are already in Sources. Use that source; installed skills were kept.');
       }
       const [updated] = await tx.update(sources).set({
         ...(input.automaticUpdates !== undefined ? { automaticUpdates: input.automaticUpdates } : {}),
@@ -332,7 +343,7 @@ export function skillSourceService(db: Db) {
         ...(input.trackingRef !== undefined ? { trackingRef: input.trackingRef, lastError: null, failureCount: 0 } : {}),
         revision: sql`${sources.revision} + 1`, nextSyncAt: new Date(),
       }).where(and(scope(companyId, id), eq(sources.revision, input.revision), or(isNull(sources.leaseToken), lt(sources.leaseExpiresAt, new Date())))).returning();
-      if (!updated) throw conflict('This source is refreshing or changed. Reload before saving.');
+      if (!updated) throw conflict('This source is refreshing or changed. Reload before saving.', { code: 'skill_source_settings_changed' });
       await context.audit(tx, id, 'company.skill_source_settings_updated', { automaticUpdates: updated.automaticUpdates, importNewSkills: updated.importNewSkills, connectionChanged: input.connectionId !== undefined,
         ...(input.trackingRef !== undefined ? { previousRef: source.trackingRef, trackingRef: updated.trackingRef } : {}) });
       return detail(companyId, id, tx);
@@ -435,5 +446,5 @@ export function skillSourceService(db: Db) {
     const imported = await Promise.all(result.source.entries.filter(entry => selectedPaths.includes(entry.path) && entry.skillId && !entry.error).map(entry => skills.getById(companyId, entry.skillId!)));
     return { imported: imported.filter((skill): skill is CompanySkill => Boolean(skill)), warnings: result.warnings };
   }
-  return { list, detail, sourceForSkill, discover, preview, create, refresh, settings, disconnect, importFromUrl };
+  return { list, detail, sourceForSkill, discover, preview, create, refresh, branches, settings, disconnect, importFromUrl };
 }

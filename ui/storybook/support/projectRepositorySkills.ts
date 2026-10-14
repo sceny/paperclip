@@ -34,7 +34,7 @@ export function installProjectSkillFixtures(scenario: Scenario, client: QueryCli
   const timers: ReturnType<typeof setTimeout>[] = [];
   let projectCreated = scenario !== 'new-project';
   const updatedSources = new Set<string>();
-  const sourcePreferences = new Map<string, { automaticUpdates?: boolean; importNewSkills?: boolean; connectionId?: string | null; trackingRef?: 'HEAD' }>();
+  const sourcePreferences = new Map<string, { automaticUpdates?: boolean; importNewSkills?: boolean; connectionId?: string | null; trackingRef?: string }>();
   let live = true, automaticUpdates = scenario !== 'paused', failed = ['error', 'repair', 'repair-conflict', 'missing-branch'].includes(scenario);
   let sourceRevision = sourceFixture().revision, repairConflict = scenario === 'repair-conflict';
   const privateProject = scenario === 'private';
@@ -101,13 +101,16 @@ export function installProjectSkillFixtures(scenario: Scenario, client: QueryCli
     await adopt(row); return { bindingId: `binding-${workspaceId}` };
   };
   skillSourcesApi.refresh = refresh;
+  skillSourcesApi.branches = async () => ({ defaultBranch: scenario === 'missing-branch' ? 'master' : 'main', branches: [
+    { name: scenario === 'missing-branch' ? 'master' : 'main', isDefault: true }, { name: 'release/2026.10', isDefault: false },
+  ], truncated: false });
   skillSourcesApi.settings = async (_companyId, id, input) => {
     if (input.connectionId !== undefined && repairConflict) {
       repairConflict = false; sourceRevision++;
-      throw new ApiError('The source was updated while choosing a connection.', 409, null);
+      throw new ApiError('The source was updated while choosing a connection.', 409, { code: 'skill_source_settings_changed' });
     }
     if (input.revision !== undefined && input.revision < sourceRevision) {
-      throw new ApiError('The source revision changed.', 409, null);
+      throw new ApiError('The source revision changed.', 409, { code: 'skill_source_settings_changed' });
     }
     sourcePreferences.set(id, { ...sourcePreferences.get(id),
       ...(input.automaticUpdates === undefined ? {} : { automaticUpdates: input.automaticUpdates }),
