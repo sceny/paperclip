@@ -5,7 +5,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { agents, folders, companySkillSources, companies, companySkills, companySkillVersions, companySkillRepositorySnapshots, createDb } from '@paperclipai/db';
+import { agents, folders, companySkillSources, companySkillSourceEntries, companies, companySkills, companySkillVersions, companySkillRepositorySnapshots, createDb } from '@paperclipai/db';
 import { eq, sql } from 'drizzle-orm';
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from './helpers/embedded-postgres.js';
 import { unprocessable } from '../errors.js';
@@ -595,7 +595,7 @@ describe.skipIf(!support.supported)('skill source persistence', () => {
     await expect(fs.stat(path.join(runtime.source, '.paperclip-repository/shared/tools'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it.each([false, true])('retains installed repository dependencies after an oversized refresh (scheduled: %s)', async scheduled => {
+  it.each([false, true])('updates bounded dependencies after repository growth and retains versions when dependencies cannot fit (scheduled: %s)', async scheduled => {
     const temporaryCompany = randomUUID();
     await db.insert(companies).values({ id: temporaryCompany, name: 'Repository fallback', issuePrefix: 'FBK' });
     let repoFiles = {
@@ -623,14 +623,22 @@ describe.skipIf(!support.supported)('skill source persistence', () => {
       head = 'f'.repeat(40);
       repoFiles = { ...repoFiles, 'shared/guide.md': 'New shared instructions',
         ...Object.fromEntries(Array.from({ length: 62 }, (_, i) => [`generated/${i}.bin`, 'x'])) };
+      const refreshed = await service.refresh(temporaryCompany, installed.source.id, localContext, undefined, undefined, { checkCommit: scheduled });
+      expect(refreshed.source.packageMode).toBe('repository');
+      expect(refreshed.updated.map(skill => skill.id)).toContain(main.id);
+      expect((await library.readFile(temporaryCompany, main.id, '.paperclip-repository/shared/guide.md'))?.content).toBe('New shared instructions');
+      expect(await library.getVersion(temporaryCompany, main.id, versions[0]!.id)).not.toBeNull();
+      const updatedVersions = await library.listVersions(temporaryCompany, main.id);
+      head = 'e'.repeat(40);
+      repoFiles['shared/guide.md'] = 'x'.repeat(1024 * 1024 + 1);
       await expect(service.refresh(temporaryCompany, installed.source.id, localContext, undefined, undefined, { checkCommit: scheduled }))
         .rejects.toThrow('Installed repository skills and their dependencies were kept');
       const retained = await service.detail(temporaryCompany, installed.source.id);
       expect(retained.packageMode).toBe('repository');
-      expect(retained.lastScanCommit).toBe(sha);
+      expect(retained.lastScanCommit).toBe('f'.repeat(40));
       expect(retained.lastError).toContain('dependencies were kept');
-      expect(await library.listVersions(temporaryCompany, main.id)).toEqual(versions);
-      expect((await library.readFile(temporaryCompany, main.id, '.paperclip-repository/shared/guide.md'))?.content).toBe('Working shared instructions');
+      expect(await library.listVersions(temporaryCompany, main.id)).toEqual(updatedVersions);
+      expect((await library.readFile(temporaryCompany, main.id, '.paperclip-repository/shared/guide.md'))?.content).toBe('New shared instructions');
       expect((await library.readFile(temporaryCompany, main.id, '.paperclip-repository/skills/helper/SKILL.md'))?.content).toBe(md('helper'));
       repoFiles = { 'skills/main/SKILL.md': repoFiles['skills/main/SKILL.md'], 'skills/helper/SKILL.md': md('helper'), 'shared/guide.md': 'New shared instructions' };
       await service.refresh(temporaryCompany, installed.source.id, localContext);
@@ -639,6 +647,31 @@ describe.skipIf(!support.supported)('skill source persistence', () => {
     } finally {
       await deleteCompany(db, temporaryCompany);
     }
+  });
+
+  it('imports an explicitly selected skill with missing references and repairs cached dependency failures at an unchanged commit', async () => {
+    const temporaryCompany = randomUUID();
+    await db.insert(companies).values({ id: temporaryCompany, name: 'Warning import', issuePrefix: 'WRN' });
+    const read = githubFixture({ 'skills/test-audit/SKILL.md': md('test-audit') + '\nRead [optional](references/unavailable.md).' });
+    const localContext = { ...context, read: () => read };
+    try {
+      const service = skillSourceService(db);
+      const imported = await service.create(temporaryCompany, { repositoryUrl: 'https://github.com/acme/skills',
+        selectedPaths: ['skills/test-audit/SKILL.md'] }, localContext);
+      expect(imported.imported).toHaveLength(1);
+      expect(imported.warnings.join(' ')).toContain('references/unavailable.md');
+      const skillId = imported.imported[0]!.id;
+      await db.update(companySkillSourceEntries).set({ error: 'This skill depends on files that its imported package cannot provide. Its dependencies could not be preserved.' })
+        .where(eq(companySkillSourceEntries.sourceId, imported.source.id));
+      const open = vi.spyOn(read, 'openSnapshot');
+      const repaired = await service.refresh(temporaryCompany, imported.source.id, localContext, undefined, undefined, { checkCommit: true });
+      expect(open).toHaveBeenCalledOnce();
+      expect(repaired.source.entries[0]).toMatchObject({ skillId, error: null });
+      expect(repaired.source.entries[0]!.inspection?.references).toHaveLength(1);
+      open.mockClear();
+      await service.refresh(temporaryCompany, imported.source.id, localContext, undefined, undefined, { checkCommit: true });
+      expect(open).not.toHaveBeenCalled();
+    } finally { await deleteCompany(db, temporaryCompany); }
   });
 
   it('cascades repository snapshots and referencing versions when the owning company is deleted', async () => {

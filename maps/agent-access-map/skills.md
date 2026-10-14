@@ -176,6 +176,12 @@ company admission limits. Scheduled refresh compares immutable tree identity and
 uses a persistent work allowance; manual refresh still requires its existing
 policy/access checks. These limits grant no content or execution access.
 
+Repository import, preview, and refresh share the bounded dependency-package fallback.
+Missing-reference warnings do not deny an otherwise authorized import. Recovered
+files come only from the same immutable, authorized Git tree and pass the existing
+content audit; no host paths or additional credentials are consulted. Source tests
+cover transitive files, limits, retained versions, and legacy dependency-error recovery.
+
 Agent repository setup preserves the active run's selected GitHub connection/grant
 IDs. Missing selections require human repair; the worker never searches the
 responsible person's other grants for an agent-created source.

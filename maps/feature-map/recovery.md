@@ -102,6 +102,17 @@ cleanup. The [route regressions](../../server/src/__tests__/issue-recovery-actio
 and [heartbeat regression](../../server/src/__tests__/heartbeat-process-recovery.test.ts)
 cover this sequence without a live operator recovery claim.
 
+An intentionally Done onboarding parent can still need its validated
+child-completion report. Recovery must not mark that callback successful before
+execution solely because the parent is Done. The existing
+[stale-lock sweep suite](../../server/src/__tests__/recovery-stale-issue-lock-sweep.test.ts)
+covers delayed native/Legacy startup, invalid parent/child/company/assignee
+bindings and a dead owner. Process-death and ownership backstops remain active.
+Repeat the real onboarding journey and correlate callback turn events with its
+reply and downloadable child file; status alone does not prove delivery. The
+literal `ea6c8eb5e16d61111968f633a66748b397b64a3e` live failure is retained,
+and the revised behavior still needs live qualification.
+
 ### `run-detail`
 
 Automated: [run workspace recovery](../../ui/src/components/RunWorkspaceRecoverySurface.test.tsx)

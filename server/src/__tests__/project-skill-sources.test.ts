@@ -789,7 +789,7 @@ describe.skipIf(!support.supported)('automatic project skill sources', () => {
       return fixture;
     } };
     const result = await service.refresh(companyId, original.id, growing);
-    expect(result.source.packageMode).toBe('skills');
+    expect(result.source.packageMode).toBe('repository');
     expect(result.warnings.join(' ')).toContain('repository exceeds');
     expect(result.source.entries[0]!.skillId).toBe(skillId);
     expect(result.updated).toHaveLength(1);

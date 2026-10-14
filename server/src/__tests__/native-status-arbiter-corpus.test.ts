@@ -848,8 +848,12 @@ describe("P6-31 Section 18.13 executable status-authority corpus", () => {
         completionState === "kill_switch_during_active_native_run"
         && (fixture.covers.migrationRows ?? []).includes("MIG-08")
       ) {
+        const experimentalAdapterConfig = {
+          provider: "opencode",
+          model: "openrouter/deepseek/deepseek-v4-flash-0731",
+        };
         const runtimeConfig = {
-          nativeRunner: { mode: "native", backend: "codex_app_server", protocolVersion: 1 },
+          nativeRunner: { mode: "native", backend: "opencode_server", protocolVersion: 1 },
         };
         const enabled = options.disableLiveEntrypoint === "rollout";
         const activeResolution = resolveHeartbeatNativeRuntimeMode({
@@ -860,7 +864,7 @@ describe("P6-31 Section 18.13 executable status-authority corpus", () => {
           },
           enabled,
           runtimeConfig,
-          adapterConfig: { provider: "codex" },
+          adapterConfig: experimentalAdapterConfig,
           agent: { id: agentId, status: "running", adapterType: "paperclip_runner" },
           issue: { id: seeded.issueId, workMode: "standard" },
           target: { kind: "local" },
@@ -873,7 +877,7 @@ describe("P6-31 Section 18.13 executable status-authority corpus", () => {
             persisted: { runtimeMode: null, runtimeModeReason: null, runtimeModeResolvedAt: null },
             enabled,
             runtimeConfig,
-            adapterConfig: { provider: "codex" },
+            adapterConfig: experimentalAdapterConfig,
             agent: { id: agentId, status: "running", adapterType: "paperclip_runner" },
             issue: { id: seeded.issueId, workMode: "standard" },
             target: { kind: "local" },

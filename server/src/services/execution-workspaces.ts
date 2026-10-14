@@ -12,6 +12,14 @@ import { authorizationService, executionWorkspaceReadSqlCondition, projectReadSq
 import type { SQL } from "drizzle-orm";
 import { createWorkspaceGitInspectionCache } from "./workspace-git-inspection-cache.js";
 import { notifyTerminalWorkspaceWork } from "./terminal-workspace-work.js";
+import {
+  deleteWorkspaceCompactionTrash,
+  findRegenerableWorkspaceDirs,
+  isLinkedGitWorktree,
+  moveWorkspaceDirsToTrash,
+  purgeStaleWorkspaceCompactionTrash,
+  restoreWorkspaceDirsFromTrash,
+} from "./workspace-compaction.js";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
@@ -282,8 +290,17 @@ export type ExecutionWorkspaceServiceOptions = {
   beforeTerminalWorkspaceCleanup?: (workspace: ExecutionWorkspaceRow) => Promise<void>;
   // The terminal-workspace reaper waits this many days after an issue tree
   // becomes terminal before it archives the workspace. A value of 0 disables
-  // the cooldown. The default is 7 days.
+  // the cooldown. The default is 1 day.
   workspaceReaperCooldownDays?: number;
+  // The reaper removes regenerable files (installed dependencies, build output,
+  // tool caches) from a terminal workspace this long after its issue tree
+  // becomes terminal. The worktree, its branch, its commits, and every source
+  // file stay, so the task can resume in place. Unset or null disables
+  // compaction.
+  workspaceCompactionDelayMs?: number | null;
+  // Test hook. Runs after compaction moves directories out of the worktree and
+  // before it re-checks the guard under the lifecycle lock.
+  afterWorkspaceCompactionMove?: (workspace: ExecutionWorkspaceRow) => Promise<void>;
   inspectGitCloseReadiness?: (workspace: ExecutionWorkspace) => Promise<{
     git: ExecutionWorkspaceCloseGitReadiness | null;
     warnings: string[];
@@ -946,26 +963,15 @@ async function inspectGitCloseReadiness(workspace: ExecutionWorkspace): Promise<
   if (repoRoot && baseRef) {
     try {
       const counts = (await runGit(["rev-list", "--left-right", "--count", `${baseRef}...HEAD`], workspacePath)).stdout.trim();
-      const [behindRaw, aheadRaw] = counts.split(/\s+/);
-      behindCount = behindRaw ? Number.parseInt(behindRaw, 10) : 0;
-      aheadCount = aheadRaw ? Number.parseInt(aheadRaw, 10) : 0;
+      const match = /^(\d+)\s+(\d+)$/.exec(counts);
+      if (!match) throw new Error("Git returned invalid ahead/behind counts");
+      behindCount = Number(match[1]);
+      aheadCount = Number(match[2]);
+      isMergedIntoBase = aheadCount === 0;
     } catch (error) {
       warnings.push(
         `Could not compare this workspace against ${baseRef}: ${error instanceof Error ? error.message : String(error)}`,
       );
-    }
-
-    try {
-      await runGit(["merge-base", "--is-ancestor", "HEAD", baseRef], workspacePath);
-      isMergedIntoBase = true;
-    } catch (error) {
-      const code = typeof error === "object" && error && "code" in error ? (error as { code?: unknown }).code : null;
-      if (code === 1) isMergedIntoBase = false;
-      else {
-        warnings.push(
-          `Could not determine whether this workspace is merged into ${baseRef}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
     }
   }
 
@@ -1366,6 +1372,11 @@ async function hasPendingTaskWorkspaceRecovery(tx: DbTransaction, input: {
   });
 }
 
+// Compaction trash older than this belongs to no compaction in progress: the
+// move and the guard finish in one short transaction.
+const WORKSPACE_COMPACTION_TRASH_STALE_MS = 60 * 60 * 1000;
+const WORKSPACE_COMPACTION_TRASH_PURGE_INTERVAL_MS = 30 * 60 * 1000;
+
 export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServiceOptions = {}) {
   async function resolveSourceWorkspaceStrategy(input: {
     companyId: string; issueId?: string | null; assigneeAgentId?: string | null;
@@ -1602,8 +1613,17 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
   // disables the cooldown.
   const workspaceReaperCooldownMs = Math.max(
     0,
-    (opts.workspaceReaperCooldownDays ?? 7) * 24 * 60 * 60 * 1000,
+    (opts.workspaceReaperCooldownDays ?? 1) * 24 * 60 * 60 * 1000,
   );
+  const workspaceCompactionDelayMs = typeof opts.workspaceCompactionDelayMs === "number"
+    ? Math.max(0, opts.workspaceCompactionDelayMs)
+    : null;
+  // The latest terminal timestamp each workspace was compacted for. A workspace
+  // is compacted once per terminal cycle: a resumed task can regenerate its
+  // files, and the next terminal cycle compacts them again. The memo is only a
+  // cache; after a restart compaction re-scans, finds nothing, and records it.
+  const compactedTerminalAt = new Map<string, number>();
+  const compactionTrashPurgedAt = new Map<string, number>();
   const pullRequestStateCache = new Map<
     string,
     {
@@ -1717,7 +1737,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     }
     let mergedPullRequest = false;
     let pullRequestStateUnknown = false;
-    const workspaceHeadSha = git?.repoRoot && git.workspacePath
+    const workspaceHeadSha = sourceIssueTerminal && git?.repoRoot && git.workspacePath
       ? await runGit(["rev-parse", "HEAD"], git.workspacePath)
         .then((result) => result.stdout.trim() || null)
         .catch(() => null)
@@ -1988,6 +2008,187 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         return true;
       },
     });
+  }
+
+  // Reads, inside the caller's transaction, whether compaction may touch the
+  // workspace files right now: the issue tree is terminal, no queued or running
+  // heartbeat run works on the tree or the workspace, and no runtime service
+  // still runs from the worktree.
+  async function terminalWorkspaceCompactionGuardPasses(tx: DbTransaction, workspace: ExecutionWorkspaceRow) {
+    const rows = await tx.execute<{ allowed: boolean }>(sql`
+      WITH RECURSIVE issue_tree(id, status) AS (
+        SELECT root.id, root.status
+        FROM ${issues} root
+        WHERE root.company_id = ${workspace.companyId}
+          AND root.id = ${workspace.sourceIssueId}
+        UNION ALL
+        SELECT child.id, child.status
+        FROM ${issues} child
+        JOIN issue_tree parent ON child.parent_id = parent.id
+        WHERE child.company_id = ${workspace.companyId}
+      )
+      SELECT (
+        EXISTS (SELECT 1 FROM issue_tree)
+        AND NOT EXISTS (SELECT 1 FROM issue_tree WHERE status NOT IN ('done', 'cancelled'))
+        AND NOT EXISTS (
+          SELECT 1
+          FROM ${issues} linked_issue
+          JOIN ${heartbeatRuns} live_run
+            ON live_run.id = linked_issue.checkout_run_id
+            OR live_run.id = linked_issue.execution_run_id
+          WHERE linked_issue.company_id = ${workspace.companyId}
+            AND (
+              linked_issue.execution_workspace_id = ${workspace.id}
+              OR linked_issue.id IN (SELECT id FROM issue_tree)
+            )
+            AND live_run.company_id = ${workspace.companyId}
+            AND live_run.status IN ('queued', 'running')
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM ${heartbeatRuns} issue_run
+          WHERE issue_run.company_id = ${workspace.companyId}
+            AND issue_run.status IN ('queued', 'running')
+            AND coalesce(
+              issue_run.native_issue_id::text,
+              nullif(issue_run.context_snapshot->>'issueId', ''),
+              nullif(issue_run.context_snapshot->>'taskId', '')
+            ) IN (SELECT id::text FROM issue_tree)
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM ${workspaceRuntimeServices} service
+          WHERE service.company_id = ${workspace.companyId}
+            AND service.execution_workspace_id = ${workspace.id}
+            AND service.status <> 'stopped'
+        )
+      ) AS allowed
+    `);
+    return rows[0]?.allowed === true;
+  }
+
+  // Deletes compaction trash that an interrupted compaction or a failed delete
+  // left beside a worktree. The sweep calls this for every worktree candidate,
+  // independent of the per-cycle compaction memo, so leftover trash is found
+  // after a restart and after a workspace has nothing left to compact. Each
+  // worktree parent directory is checked at most once per interval.
+  async function purgeCompactionTrashIfDue(workspace: ExecutionWorkspaceRow) {
+    const worktreePath = workspace.providerRef ?? workspace.cwd;
+    if (workspace.providerType !== "git_worktree" || !worktreePath) return;
+    const parentDir = path.dirname(path.resolve(worktreePath));
+    const nowMs = now().getTime();
+    const lastPurgedAt = compactionTrashPurgedAt.get(parentDir);
+    if (lastPurgedAt !== undefined && nowMs - lastPurgedAt < WORKSPACE_COMPACTION_TRASH_PURGE_INTERVAL_MS) return;
+    if (compactionTrashPurgedAt.size >= 1024) compactionTrashPurgedAt.delete(compactionTrashPurgedAt.keys().next().value!);
+    compactionTrashPurgedAt.set(parentDir, nowMs);
+    await purgeStaleWorkspaceCompactionTrash(parentDir, WORKSPACE_COMPACTION_TRASH_STALE_MS).catch((error) => {
+      logger.warn({ err: error, parentDir }, "failed to purge stale workspace compaction trash");
+    });
+  }
+
+  // Removes regenerable files (installed dependencies, build output, tool
+  // caches) from a terminal workspace. The workspace row stays active and the
+  // worktree, its branch, its commits, and every tracked or untracked source
+  // file stay in place, so a resumed task continues where it stopped and its
+  // provisioning regenerates the removed files. This applies to workspaces the
+  // reaper cannot archive: an undelivered branch, leftover files, or a workspace
+  // still inside the archive cooldown.
+  async function compactTerminalWorkspace(
+    workspace: ExecutionWorkspaceRow,
+    signal?: AbortSignal,
+  ): Promise<"compacted" | "nothing_to_compact" | "not_compactable" | "busy"> {
+    const worktreePath = workspace.providerRef ?? workspace.cwd;
+    if (
+      workspace.providerType !== "git_worktree"
+      || workspace.mode === "shared_workspace"
+      || !workspace.sourceIssueId
+      || !worktreePath
+    ) {
+      return "not_compactable";
+    }
+    if (!(await isLinkedGitWorktree(worktreePath))) return "not_compactable";
+    const projectWorkspaceCwd = workspace.projectWorkspaceId
+      ? await db
+          .select({ cwd: projectWorkspaces.cwd })
+          .from(projectWorkspaces)
+          .where(and(
+            eq(projectWorkspaces.companyId, workspace.companyId),
+            eq(projectWorkspaces.id, workspace.projectWorkspaceId),
+          ))
+          .then((rows) => rows[0]?.cwd ?? null)
+      : null;
+    if (projectWorkspaceCwd && path.resolve(projectWorkspaceCwd) === path.resolve(worktreePath)) {
+      return "not_compactable";
+    }
+
+    const relativePaths = await findRegenerableWorkspaceDirs(worktreePath, { signal });
+    if (relativePaths.length === 0) return "nothing_to_compact";
+
+    const snapshotGeneration = readExecutionWorkspaceLifecycleGeneration(
+      workspace.metadata as Record<string, unknown> | null,
+    );
+    // Hold the lifecycle lock while the directories move. The guard runs before
+    // the move and again after it, in the same transaction. A task that resumes
+    // in between leaves the terminal state or starts a run first, so the second
+    // check fails and the directories move back before anything is deleted.
+    const move = await db.transaction(async (tx) => {
+      await acquireExecutionWorkspaceLifecycleLock(tx, workspace.id);
+      const [fresh] = await tx
+        .select({
+          status: executionWorkspaces.status,
+          closedAt: executionWorkspaces.closedAt,
+          metadata: executionWorkspaces.metadata,
+        })
+        .from(executionWorkspaces)
+        .where(and(eq(executionWorkspaces.id, workspace.id), eq(executionWorkspaces.companyId, workspace.companyId)));
+      const freshMetadata = (fresh?.metadata as Record<string, unknown> | null) ?? null;
+      if (
+        !fresh
+        || isClosedExecutionWorkspaceStatus(fresh.status)
+        || fresh.closedAt
+        || metadataHasReopenPendingConsumption(freshMetadata)
+        || readExecutionWorkspaceLifecycleGeneration(freshMetadata) !== snapshotGeneration
+        || !(await terminalWorkspaceCompactionGuardPasses(tx, workspace))
+      ) {
+        return null;
+      }
+      const moved = await moveWorkspaceDirsToTrash(worktreePath, relativePaths);
+      try {
+        await opts.afterWorkspaceCompactionMove?.(workspace);
+        if (!(await terminalWorkspaceCompactionGuardPasses(tx, workspace))) {
+          await restoreWorkspaceDirsFromTrash(worktreePath, moved);
+          await deleteWorkspaceCompactionTrash(moved.trashDir);
+          return null;
+        }
+      } catch (error) {
+        await restoreWorkspaceDirsFromTrash(worktreePath, moved);
+        await deleteWorkspaceCompactionTrash(moved.trashDir);
+        throw error;
+      }
+      return moved;
+    });
+    if (!move) return "busy";
+
+    await deleteWorkspaceCompactionTrash(move.trashDir).catch((error) => {
+      logger.warn(
+        { err: error, executionWorkspaceId: workspace.id, trashDir: move.trashDir },
+        "failed to delete compacted workspace files; a later compaction retries",
+      );
+    });
+    if (move.moved.length === 0) return "nothing_to_compact";
+    await logActivity(db, {
+      companyId: workspace.companyId,
+      actorType: "system",
+      actorId: "workspace_terminality_reaper",
+      action: "execution_workspace.regenerable_files_removed",
+      entityType: "execution_workspace",
+      entityId: workspace.id,
+      details: {
+        sourceIssueId: workspace.sourceIssueId,
+        removedPaths: move.moved.map((entry) => entry.relativePath),
+      },
+    });
+    return "compacted";
   }
 
   async function cleanupTerminalWorkspace(
@@ -2581,6 +2782,12 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       return null;
     },
 
+    getStoredById: async (companyId: string, id: string) => {
+      const [row] = await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.id, id));
+      if (row && row.companyId !== companyId) throw forbidden("Task workspace access is no longer available");
+      return row ? toExecutionWorkspace(row) : null;
+    },
+
     getById: async (id: string) => {
       const row = await db
         .select()
@@ -2885,6 +3092,8 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           skippedCooldown: 0,
           skippedBackoff: 0,
           clearedStaleReopenPending: 0,
+          compacted: 0,
+          compactionFailed: 0,
         };
       }
       const previousCursor = terminalSweepCursor;
@@ -2954,11 +3163,14 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         skippedCooldown: 0,
         skippedBackoff: 0,
         clearedStaleReopenPending: 0,
+        compacted: 0,
+        compactionFailed: 0,
       };
       const readinessByWorkingTree = new Map<string, ReturnType<typeof inspectGitCloseReadiness>>();
 
       for (const workspace of candidates) {
         signal?.throwIfAborted();
+        await purgeCompactionTrashIfDue(workspace);
         const issueTree = await listWorkspaceIssueTree(workspace);
         const sourceIssue = issueTree.find((issue) => issue.id === workspace.sourceIssueId);
         const reopenPending = metadataHasReopenPendingConsumption(
@@ -2977,8 +3189,34 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           continue;
         }
         const latestTerminalAt = Math.max(...issueTree.map(issue => issueTerminalTimestamp(issue)!.getTime()));
+        // Compaction runs once per terminal cycle, after its own delay and
+        // before the archive cooldown, so a workspace the reaper cannot archive
+        // yet (or ever) stops holding regenerable files.
+        const compactionPending = workspaceCompactionDelayMs !== null
+          && !reopenPending
+          && compactedTerminalAt.get(workspace.id) !== latestTerminalAt;
+        const compactionDueAt = latestTerminalAt + (workspaceCompactionDelayMs ?? 0);
+        const archiveDueAt = latestTerminalAt + workspaceReaperCooldownMs;
         terminalWorkspaceDeadlines.set(workspace.id, reopenPending ? now().getTime()
-          : latestTerminalAt + workspaceReaperCooldownMs);
+          : compactionPending ? Math.min(compactionDueAt, archiveDueAt) : archiveDueAt);
+        if (compactionPending && compactionDueAt <= now().getTime()) {
+          try {
+            const outcome = await compactTerminalWorkspace(workspace, signal);
+            if (outcome === "compacted") result.compacted += 1;
+            if (outcome !== "busy") {
+              if (compactedTerminalAt.size >= 4096) compactedTerminalAt.delete(compactedTerminalAt.keys().next().value!);
+              compactedTerminalAt.set(workspace.id, latestTerminalAt);
+              terminalWorkspaceDeadlines.set(workspace.id, archiveDueAt);
+            }
+          } catch (error) {
+            if (signal?.aborted) throw error;
+            result.compactionFailed += 1;
+            logger.warn(
+              { err: error, executionWorkspaceId: workspace.id, sourceIssueId: workspace.sourceIssueId },
+              "terminal workspace compaction failed; a later sweep retries",
+            );
+          }
+        }
         if (workspaceReaperCooldownMs > 0 && latestTerminalAt + workspaceReaperCooldownMs > now().getTime()) {
           result.skippedCooldown += 1;
           continue;

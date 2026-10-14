@@ -231,7 +231,10 @@ scripts; it verifies native startup and package continuity separately from the
 restricted Docker installation check. This does not prove a normal OS package
 installation journey or a paid provider task on ARM64.
 
-Windows, 32-bit ARM, and Alpine/musl native qualification remain deferred.
+Automatic creation selects legacy execution when a Linux host has musl, unknown
+libc, or a measured GNU libc version below the baseline. Existing agents retain
+their stored runner. Windows, 32-bit ARM, and Alpine/musl native qualification
+remain deferred.
 
 Native release jobs cache Cargo dependencies per platform and OS baseline,
 including compiler, lockfile, and external generated-contract inputs. Workspace

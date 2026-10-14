@@ -90,6 +90,12 @@ SSH keeps its explicit remote provision-command path; these checks
 do not claim a new sandbox provision transport.
 Low-trust closed-worktree reopening, including a board-comment reopen of a projectless task, must also suppress both kinds of host provision script. Returned checkpoints must reject file, symlink or missing parents before host writes, even if a nested file is marked unchanged. The retained host file and recovery evidence must survive rejection. These are automated safety contracts, not new live runtime acceptance.
 
+An unchanged returned snapshot skips the host scan after acquiring the writer lock
+and checking authority. Concurrent host edits remain untouched; changed files,
+modes, symlinks and deletions still take the conflict path. The
+[unchanged restore regression](../../packages/adapter-utils/src/workspace-restore-unchanged.test.ts)
+checks both hooks under the lock. This is source-level coverage, not a cloud latency result.
+
 For a child created by an admitted agent with an explicit existing workspace, verify that a matching sandbox boundary permits creation before the child has an ID. A changed child policy, unrelated parent, or forged creator run must fail. See the [child workspace trust regression](../../server/src/__tests__/task-workspace-child-trust.test.ts). This automated contract does not add live acceptance evidence.
 
 ### `workspace-management`

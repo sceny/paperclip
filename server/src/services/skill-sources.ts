@@ -12,7 +12,7 @@ import type { CompanySkill, SkillSource, SkillSourceCreateRequest, SkillSourceDi
 import { normalizeAgentUrlKey } from '@paperclipai/shared';
 import { conflict, notFound, unprocessable } from '../errors.js';
 import { companySkillService, parseSkillImportSourceInput } from './company-skills.js';
-import { scanGitHubSkillsWithPackageFallback as scanGitHubSkills, rejectIncompleteSkillPackages, previewGitHubSkillFile, type GitHubRead, type ScannedSkillSource, type SkillScanOptions } from './github-skill-source.js';
+import { scanGitHubSkillsWithPackageFallback as scanGitHubSkills, previewGitHubSkillFile, type GitHubRead, type ScannedSkillSource, type SkillScanOptions } from './github-skill-source.js';
 import { skillAccessService } from './skill-access.js';
 import { skillSnapshotHash } from './skill-snapshot.js';
 
@@ -67,7 +67,7 @@ export function skillSourceService(db: Db) {
   }
   async function discover(input: SkillSourceDiscoveryRequest, context: SkillSourceContext, options?: SkillScanOptions) {
     await context.authorize('skills.import', { sourceType: 'git', sourceLocator: input.repositoryUrl });
-    const { skills: _files, repositoryFiles: _repositoryFiles, defaultBranch: _defaultBranch, treeSha: _tree, downloadBytes: _download, scanBytes: _scan, ...result } = await scanGitHubSkills(input, context.read(input.connectionId ?? null), { ...options, retainFiles: false });
+    const { skills: _files, repositoryFiles: _repositoryFiles, repositorySubset: _subset, defaultBranch: _defaultBranch, treeSha: _tree, downloadBytes: _download, scanBytes: _scan, ...result } = await scanGitHubSkills(input, context.read(input.connectionId ?? null), { ...options, retainFiles: false });
     return result;
   }
   async function preview(input: SkillSourcePreviewRequest, context: SkillSourceContext) {
@@ -239,7 +239,11 @@ export function skillSourceService(db: Db) {
         const head = await reader(`/repos/${source.fullName}/commits/${encodeURIComponent(ref)}`, options.signal) as { sha: string; commit?: { tree?: { sha?: string } } };
         const rawTreeSha = head.commit?.tree?.sha;
         const treeSha = rawTreeSha && /^[a-f0-9]{40}$/i.test(rawTreeSha) ? rawTreeSha.toLowerCase() : null;
-        if (head.sha === source.lastScanCommit || (treeSha && treeSha === source.lastScanTreeSha)) {
+        const [legacyDependencyFailure] = await db.select({ id: entries.id }).from(entries).where(and(
+          eq(entries.companyId, companyId), eq(entries.sourceId, id),
+          sql`${entries.error} like 'This skill depends on files that its imported package cannot provide.%'`,
+        )).limit(1);
+        if (!legacyDependencyFailure && (head.sha === source.lastScanCommit || (treeSha && treeSha === source.lastScanTreeSha))) {
           await db.transaction(async tx => {
             const [locked] = await tx.select().from(sources).where(scope(companyId, id)).for('update');
             if (!locked || locked.leaseToken !== token || locked.revision !== source.revision) throw conflict('Source refresh changed. Try again.');
@@ -256,18 +260,18 @@ export function skillSourceService(db: Db) {
       if (options.automatic) await reserveAutomaticSkillWork(db, source, token, options.now ?? new Date());
       const scan = staged ?? await scanGitHubSkills({ repositoryUrl: source.repositoryUrl, trackingRef: source.trackingRef, packageMode }, reader, { signal: options.signal });
       if (options.automatic) await settleAutomaticSkillWork(db, companyId, id, token,
-        packageMode === 'repository' && scan.packageMode === 'skills' ? {} : scan);
-      // A project source may already be in package-only mode after initial fallback.
-      if (source.accessScope === 'projects' && scan.packageMode === 'skills') rejectIncompleteSkillPackages(scan);
+        packageMode === 'repository' && (scan.packageMode === 'skills' || scan.repositorySubset) ? {} : scan);
       if (source.repositoryId && source.repositoryId !== scan.repositoryId) throw conflict('The repository at this URL has changed identity. Add it as a new source.');
       const current = await detail(companyId, id);
+      const includedRepositoryPaths = new Set(scan.repositoryFiles?.map(file => file.path));
       const omittedInstalledFiles = current.entries.some(entry => entry.skillId && current.repositoryPackage?.files.some(file => {
+        if (scan.repositorySubset) return !includedRepositoryPaths.has(file.path);
         const root = path.posix.dirname(entry.path);
         return root !== '.' && !file.path.startsWith(`${root}/`);
       }));
-      if (source.packageMode === 'repository' && scan.packageMode === 'skills'
+      if (source.packageMode === 'repository' && (scan.packageMode === 'skills' || scan.repositorySubset)
         && selection?.packageMode !== 'skills' && current.entries.some(entry => entry.skillId)
-        && (omittedInstalledFiles || scan.skills.some(skill => skill.inspection?.references.length))) {
+        && (omittedInstalledFiles || (scan.packageMode === 'skills' && scan.skills.some(skill => skill.inspection?.references.length)))) {
         throw unprocessable('The repository exceeds the supported package size. Installed repository skills and their dependencies were kept. Reduce the repository package size before refreshing.');
       }
       const selectedPaths = selection?.selectedPaths ?? current.entries.filter(entry => entry.selection === 'selected').map(entry => entry.path);
@@ -432,7 +436,7 @@ export function skillSourceService(db: Db) {
     await context.authorize('skills.import', { sourceType: 'git', sourceLocator: repositoryUrl });
     let scan = await scanGitHubSkills({ repositoryUrl, trackingRef, commitSha }, read);
     const existing = previous.find(source => source.trackingRef === scan.trackingRef || (source.trackingRef === 'HEAD' && scan.trackingRef === scan.defaultBranch));
-    if (existing?.packageMode === 'repository') {
+    if (existing?.packageMode === 'repository' || existing?.accessScope === 'projects') {
       scan = await scanGitHubSkills({ repositoryUrl, trackingRef: scan.trackingRef, commitSha: scan.commitSha, packageMode: 'repository' }, read);
     }
     const selectedPaths = scan.candidates.filter(candidate =>

@@ -220,6 +220,13 @@ function createBroker(db: Db) {
         acceptByUnixMs: Date.now() + 10 * 60_000, expiresAtUnixMs: Date.now() + 2 * 60 * 60_000 };
     },
     async authorizeFileSession(principal: McpPrincipal, assignmentId: string, taskId: string, write: boolean) {
+      if (write && principal.grant.purpose === "agent" && principal.grant.agentId) {
+        // A transfer transaction retains this lock through publication. Stop
+        // and terminal reconciliation cannot fence the assignment midway through
+        // an authorized effect; authority is rechecked after acquiring the lock.
+        await db.select({ id: assignments.id }).from(assignments).where(and(eq(assignments.id, assignmentId),
+          eq(assignments.companyId, principal.grant.companyId), eq(assignments.agentId, principal.grant.agentId))).for("share");
+      }
       const { binding, assignment } = await authorizeAssignment(principal, assignmentId);
       if (binding.providerKind !== "grok_bot" || assignment.status !== "accepted") throw fail("Files require a current accepted Grok work session.");
       const [run] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, assignment.runId), eq(heartbeatRuns.companyId, binding.companyId)));
@@ -505,12 +512,17 @@ function createBroker(db: Db) {
         const rows = await tx.select().from(assignments).where(and(eq(assignments.bindingId, binding.id), inArray(assignments.status, ["offered", "accepted"])));
         const [requestedRun] = expectedRunId ? await tx.select({ id: heartbeatRuns.id, status: heartbeatRuns.status }).from(heartbeatRuns)
           .where(and(eq(heartbeatRuns.id, expectedRunId), eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId))) : [];
-        if (expectedRunId && (!requestedRun || !["queued", "running"].includes(requestedRun.status))) throw fail("The work session changed. Reload before stopping it.");
+        // A failed Runner can still leave its external assignment active.
+        // Fence that exact assignment too; an old terminal run with no current
+        // assignment must never stop a successor's work.
+        const targeted = expectedRunId ? rows.filter(row => row.runId === expectedRunId) : rows;
+        if (expectedRunId && (!requestedRun || !["queued", "running"].includes(requestedRun.status) && !targeted.length)) {
+          throw fail("The work session changed. Reload before stopping it.");
+        }
         const [previousAssignment] = expectedRunId ? await tx.select({ status: assignments.status }).from(assignments)
           .where(and(eq(assignments.bindingId, binding.id), eq(assignments.runId, expectedRunId))) : [];
         const otherWork = expectedRunId && rows.some(row => row.runId !== expectedRunId);
         if (otherWork && previousAssignment && !["offered", "accepted"].includes(previousAssignment.status)) throw fail("The work session changed. Reload before stopping it.");
-        const targeted = expectedRunId ? rows.filter(row => row.runId === expectedRunId) : rows;
         const runIds = [...new Set([...targeted.map(row => row.runId), ...(requestedRun ? [requestedRun.id] : [])])];
         if (targeted.length) await tx.update(assignments).set({ status: "fenced" }).where(inArray(assignments.id, targeted.map(row => row.id)));
         // A queued run has no external authority. Preparing work with no other
@@ -709,7 +721,7 @@ export function createDotRunnerMcpTools(db: Db, heartbeat?: DotHeartbeat, transf
   }));
   grokDefinitions.push({ name: "paperclip_grok_ack_wake", description: "Acknowledge an exact routine wake through this fixed agent connection. Echo its correlationId, bindingId and generation; for verification also echo its challenge. This records authenticated contact, never work acceptance, completion or remote termination.", schema: grokWakeAcknowledgementSchema });
   if (transfers) grokDefinitions.push(
-    { name: "paperclip_grok_get_upload_url", description: "Get a bounded ten-minute grant to attach exact file bytes to this accepted work session's task. Use your own HTTP/file tools, not a Paperclip filesystem. Compute SHA-256 and size, PUT those bytes, and keep requestId stable after a lost response. Revocation, pause, expiry and reassignment invalidate the grant.", schema: uploadSchema.omit({ companyId: true }).extend({ assignmentId: z.uuid() }) },
+    { name: "paperclip_grok_get_upload_url", description: "Get a bounded ten-minute grant to attach exact file bytes to this accepted work session's task. Use your own HTTP/file tools, not a Paperclip filesystem. Compute SHA-256 and size, PUT those bytes, and cite the returned publication.evidenceRef in your completion report. Keep requestId stable after a lost response. Revocation, pause, expiry and reassignment invalidate the grant.", schema: uploadSchema.omit({ companyId: true }).extend({ assignmentId: z.uuid() }) },
     { name: "paperclip_grok_get_download_url", description: "Get a ten-minute download grant for one attachment of this accepted work session's task. Current session authority is rechecked on download; the grant is not a general file credential.", schema: z.object({ assignmentId: z.uuid(), attachmentId: z.uuid() }).strict() },
   );
   return {

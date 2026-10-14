@@ -2251,7 +2251,7 @@ export function heartbeatService(
         );
       const contextProjectId = readNonEmptyString(context.projectId);
       const boundSourceWorkspace = issueContext?.executionWorkspaceId
-        ? await executionWorkspacesSvc.getById(issueContext.executionWorkspaceId) : null;
+        ? await executionWorkspacesSvc.getStoredById(agent.companyId, issueContext.executionWorkspaceId) : null;
       const [selectedWorkspaceSource] = !boundSourceWorkspace && issueContext?.projectWorkspaceId
         ? await db.select({ projectId: projectWorkspaces.projectId }).from(projectWorkspaces)
           .where(and(eq(projectWorkspaces.id, issueContext.projectWorkspaceId), eq(projectWorkspaces.companyId, agent.companyId))) : [];

@@ -744,5 +744,7 @@ export const queryKeys = {
   },
   adapters: {
     all: ["adapters"] as const,
+    availability: (companyId: string | null, environmentId?: string | null) =>
+      ["adapters", "availability", companyId, environmentId ?? null] as const,
   },
 };

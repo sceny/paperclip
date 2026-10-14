@@ -62,6 +62,17 @@ Gaps: Eligible resolutions use native `call_api`. The route retains owner and
 management authority, active-run/source-trust checks, board-only outcomes and
 reconciliation controls.
 
+Scoped source review: 2026-10-13, recovery correction against
+`ea6c8eb5e16d61111968f633a66748b397b64a3e`. The
+[recovery service](../../server/src/services/recovery/service.ts) reuses the
+existing completed-onboarding handoff validator. It checks the source company,
+onboarding origin, Done parent, assignee and Done child, with no unfinished
+siblings, before exempting the report from the issue-terminal backstop. Other
+terminal work and process-death/controller ownership checks remain enforced.
+This internal wake handling adds no recovery-resolution or cross-company agent
+authority. Real PostgreSQL regressions cover allowed and rejected bindings;
+revised live agent authorization and callback delivery remain `not-run`.
+
 ## `source-action`
 
 Review: `baseline`.

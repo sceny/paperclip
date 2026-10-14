@@ -119,16 +119,20 @@ describe('GitHub skill source import', () => {
     expect(document.querySelector('button[aria-label="Branch"]')?.textContent).toContain('master');
   });
 
-  it('keeps pending project links inside the installed source instead of duplicating its repository', async () => {
+  it('keeps an existing source compact while project import is pending', async () => {
     context.sourceId = '';
-    vi.mocked(skillSourcesApi.list).mockResolvedValue([{ ...sourceFixture(), trackingRef: 'HEAD' }]);
+    vi.mocked(skillSourcesApi.list).mockResolvedValue([{ ...sourceFixture(), trackingRef: 'HEAD', projects: [{ id: 'paperclip', name: 'Paperclip', visibility: 'open', active: true }] }]);
     vi.mocked(skillSourcesApi.projectRepositories).mockResolvedValue([{ projectId: 'sentry', projectName: 'Sentry', projectVisibility: 'open',
       workspaceId: 'second-workspace', repositoryUrl: sourceFixture().repositoryUrl, trackingRef: 'HEAD', bindingId: 'binding', sourceId: null, status: 'pending', lastError: null }]);
     await mount();
     expect(document.querySelectorAll(`a[href="${sourceFixture().repositoryUrl}"]`)).toHaveLength(1);
     expect(document.querySelector('[aria-label="Project repositories"]')).toBeNull();
-    expect(button('Importing…').disabled).toBe(true);
-    expect(document.querySelector('[role="status"]')?.textContent).toContain('queued');
+    expect(document.querySelector('[aria-label="Skills from Sentry"]')).toBeNull();
+    expect(document.body.textContent).not.toContain('Other projects with this repo');
+    expect(document.body.textContent).not.toContain('Sentry');
+    expect(document.body.textContent).not.toContain('Paperclip');
+    expect(document.querySelector('a[href="/skills"]')).toBeNull();
+    expect(document.querySelector('[role="status"]')?.textContent).toContain('Importing skills');
   });
 
   it('allows remaining project imports while another matching workspace is pending', async () => {

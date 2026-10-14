@@ -1374,6 +1374,9 @@ async function startServerWithDatabaseTeardown(
     });
     const terminalWorkspaces = executionWorkspaceService(db as any, {
       workspaceReaperCooldownDays: config.workspaceReaperCooldownDays,
+      workspaceCompactionDelayMs: config.workspaceCompactionDelayHours === null
+        ? null
+        : config.workspaceCompactionDelayHours * 60 * 60 * 1000,
       terminalWorkspaceInspectionBackoffMs: TERMINAL_WORKSPACE_RETRY_MS,
     });
     const scheduleMergedPullRequestConfirmationSweep = () => {
@@ -1394,7 +1397,7 @@ async function startServerWithDatabaseTeardown(
       ...terminalWorkspaces,
       sweepTerminalWorkspaces: async (limit, signal) => {
         const result = await terminalWorkspaces.sweepTerminalWorkspaces(limit, signal);
-        if (result.archived > 0 || result.cleanupFailed > 0) {
+        if (result.archived > 0 || result.cleanupFailed > 0 || result.compacted > 0 || result.compactionFailed > 0) {
           logger.info(result, "terminal issue workspace reaper changed workspace state");
         } else if (result.checked > 0 && Date.now() - lastTerminalWorkspaceSkipLogAt >= 10 * 60 * 1000) {
           lastTerminalWorkspaceSkipLogAt = Date.now();

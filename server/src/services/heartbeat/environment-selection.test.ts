@@ -89,6 +89,27 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
     expect(result.persistedNativeExecutionInput?.binding.executionWorkspaceId).toBe(original.id);
   });
 
+  it("selects the saved execution workspace without inspecting live Git delivery state", async () => {
+    const { input, workspace, recover } = await fixture();
+    const saved = await workspace();
+    recover(saved.id);
+    input.services.executionWorkspacesSvc = executionWorkspaceService(db, {
+      inspectGitCloseReadiness: async () => {
+        throw new Error("Live Git inspection is unavailable");
+      },
+    });
+
+    const result = await selectHeartbeatEnvironment(db, input);
+
+    expect(result.reusableExistingExecutionWorkspace).toMatchObject({
+      id: saved.id,
+      companyId: input.agent.companyId,
+      cwd: home,
+      strategyType: "git_worktree",
+    });
+    expect(result.nativeRecoveryExecutionWorkspaceId).toBe(saved.id);
+  });
+
   it("does not treat a synthetic run-id recovery binding as a persisted workspace", async () => {
     const { input, recover } = await fixture();
     recover(input.run.id);

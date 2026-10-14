@@ -175,7 +175,7 @@ export interface HeartbeatRuntimeExecutionInput {
     Pick<Lifecycle, "persistRunProcessMetadata" | "recordCurrentHeartbeatRunRuntimeProgress"> &
     Pick<ReturnType<typeof createHeartbeatRunControl>, "cancelRunInternal"> &
     Pick<ReturnType<typeof createHeartbeatQueue>, "enqueueWakeup" | "dispatchPendingNativeStatusWakeups"> & {
-    executionWorkspacesSvc: Pick<ReturnType<typeof executionWorkspaceService>, "getById">;
+    executionWorkspacesSvc: Pick<ReturnType<typeof executionWorkspaceService>, "getStoredById">;
     instanceSettings: Pick<ReturnType<typeof instanceSettingsService>, "getExperimental">;
     envOrchestrator: Pick<ReturnType<typeof environmentRunOrchestrator>, "releaseForRun">;
   };
@@ -266,7 +266,8 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
   let adapterFinalizeOutcome: "succeeded" | "failed" | null = null;
   const inspectFinalizeWorkspaceBranch = async () => {
     const workspaceRecord = persistedExecutionWorkspace?.id
-      ? await executionWorkspacesSvc.getById(
+      ? await executionWorkspacesSvc.getStoredById(
+          agent.companyId,
           persistedExecutionWorkspace.id,
         )
       : persistedExecutionWorkspace;
