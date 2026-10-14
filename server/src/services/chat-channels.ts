@@ -55,6 +55,7 @@ export { createChatSdkStatePersistence } from "./chat-channels/sdk-state.js";
 import { createChatInteractionCallbacks } from "./chat-channels/interactions/callbacks.js";
 import { createChatInteractionContinuations } from "./chat-channels/interactions/continuations.js";
 import { createGitHubInstallationLifecycle } from "./chat-channels/github/installation-lifecycle.js";
+import { githubChatReviewService } from "./chat-github-reviews.js";
 import { createGitHubAppSetup } from "./chat-channels/github/app-setup.js";
 import { createSlackTaskAuthorityRegistration } from "./chat-channels/slack/task-authority.js";
 import { createGitHubPublicationPolicy } from "./chat-channels/github/publication-policy.js";
@@ -3370,6 +3371,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     return publicationQueue.processPendingPublications(...args);
   }
 
+  const githubReviews = githubChatReviewService(db, fetchImpl);
   const { scheduleGitHubMaintenance } = createGitHubMaintenance(db, fetchImpl, {
     scheduleMessageProcessing, isShuttingDown: () => shuttingDown,
   });
@@ -3592,6 +3594,8 @@ return {
     processPublicationMaintenance,
     nextInboundDeliveryAt,
     nextPublicationAt,
+    processPendingGitHubReviewPublications: githubReviews.processPending,
+    nextGitHubReviewPublicationAt: githubReviews.nextPendingAt,
     nextSlackReceiptAt,
     onPublicationsSettled: (wake: () => void) => { wakePublications = wake; },
     prepareFailedChatRunRetry,

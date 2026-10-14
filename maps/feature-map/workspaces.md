@@ -107,6 +107,14 @@ Manual: Provision a disposable workspace, wait for readiness, start an available
 
 - A link or running badge does not prove the service is reachable from the user’s browser.
 - Workspace IDs, runtime leases, and repository paths are not interchangeable.
+- Terminal workspace cleanup wakes after committed task/workspace/PR changes and
+  restores cooldown deadlines at startup. Empty lanes stop scanning. Display Git
+  results can lag by thirty seconds; destructive cleanup still reads fresh Git.
+  The [worker tests](../../server/src/__tests__/terminal-workspace-work.test.ts)
+  cover quiet lanes and deadlines. The
+  [service tests](../../server/src/__tests__/execution-workspaces-service.test.ts)
+  cover real PostgreSQL signals and retained worktrees. These tests do not
+  qualify an external wake alarm or a live provider deployment.
 - Organizational project, source project, task files, personal `AGENT_HOME`, and
   provider home have separate meanings. Private source ownership remains attached
   to copied files after source configuration changes or workspace closure.

@@ -123,6 +123,13 @@ running the timer while asleep. A generation counter invalidates a
 scan if tracked work both starts and finishes during inspection. Reports remain
 unknown until startup recovery and HTTP tracking are installed.
 
+Terminal workspace recovery also registers a local sleep probe. Incomplete
+startup pages and failed recovery remain blockers until a successful pass.
+Active cleanup and unresolved producer transactions retain their admission holds.
+Cooldown and inspection-backoff timers are maintenance hints over retained domain
+rows. They can wait for the next wake and are restored at startup; they do not
+create external alarm coverage or exempt other persisted work from this report.
+
 ### Backup checkpoints for idle instances
 
 `PAPERCLIP_DB_BACKUP_IDLE_CHECKPOINT_ENABLED=1` opts an instance with automatic

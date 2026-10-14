@@ -2271,10 +2271,38 @@ that flushes after the tab hides marks data stale without starting a refetch.
 The developer-server health poll also stops in hidden tabs.
 
 Workspace detail responses share concurrent Git inspections and reuse their
-results for up to five seconds after completion. The cache holds at most 256
+results for up to thirty seconds after completion. Workspace identity and metadata
+changes invalidate the cached result. The cache holds at most 256
 entries. Close-readiness checks, the terminal-workspace reaper, and the final
 cleanup validation still inspect Git afresh. A display result never authorizes
 worktree removal.
+
+The terminal-workspace reaper uses the database work coordinator. Startup scans
+recover existing workspace rows in bounded pages. Issue status and tree changes,
+workspace lifecycle writes, and pull-request work-product writes signal work on
+their transaction before writing. The coordinator wakes after the outer
+transaction settles and holds idle admission while writes or cleanup are active.
+Empty and nonterminal-only lanes have no recurring timer or query. Terminal trees
+schedule their actual cooldown deadline; unresolved delivery or cleanup eligibility
+is checked again after five minutes. Nonterminal trees, cooldowns, and active runs
+are checked before Git. Unchanged terminal candidates also back off for five
+minutes during unrelated commit wakes. Scoped task/workspace hints invalidate
+affected candidates; changed tree or workspace revisions invalidate them too.
+Deadline selection reuses task trees read by those pages and performs no separate
+full-inventory query. Commits during a paged rotation request another bounded
+rotation so changes behind its cursor are recovered.
+The backoff retains at most 256 candidates and only applies to the background
+worker. Final cleanup still checks the current task tree,
+delivery evidence, ownership, lifecycle generation, and Git state under the
+existing cleanup locks.
+
+These wakes cover the owning `createDb` scope in this server process. Direct SQL
+and other server processes require startup recovery. Local deadlines do not
+establish external wake-alarm coverage or whole-instance sleep safety. The local
+sleep inventory blocks host suspension until bounded recovery succeeds. Cooldown
+eligibility is an earliest allowed cleanup time; passive retained directories can
+wait for the next wake, when startup restores their rows. Existing idle-sleep
+blockers and cleanup admission holds remain authoritative.
 
 The connection-health sweep selects only due IDs in SQL before applying its
 limit. Legacy `paperclip_plugin` placeholder connections are excluded: their
