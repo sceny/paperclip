@@ -13,3 +13,6 @@
 
 # Same cause as the heartbeat-workspace-session entry above: temp dir not classified as a proven non-git path in the gate runner's user namespace, so configurationReason is missing. Checked alone on plain upstream bfe7c6357 on 2026-10-11. Passes in some full runs, fails when run alone.
 |@paperclipai/server| src/__tests__/heartbeat-process-recovery.test.ts > heartbeat orphaned process recovery > keeps an explicit local-path/worktree conflict blocked with a board action and no Sentry event
+
+# The gate runner sources the sandbox env.sh, which exports PAPERCLIP_RUNNER_BINARY; the test does not clear it, so the controller override wins over the mocked packaged daemon. Fails alone and in full runs; passes with that variable unset. Added 2026-10-14 (upstream 2c17d3ca5).
+|@paperclipai/server| src/services/native-runtime/native-codex-runner.test.ts > selected remote daemon target > uses the packaged Linux/x86_64 daemon independent of the controller
