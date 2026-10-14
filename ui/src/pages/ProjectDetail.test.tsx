@@ -15,6 +15,8 @@ const mockProjectsApi = vi.hoisted(() => ({
   get: vi.fn(),
   list: vi.fn(),
   update: vi.fn(),
+  pause: vi.fn(),
+  resume: vi.fn(),
 }));
 const mockIssuesApi = vi.hoisted(() => ({
   list: vi.fn(),
@@ -294,6 +296,62 @@ describe("ProjectDetail", () => {
       projectId: "project-1",
       originKindPrefix: "plugin:paperclip.missions",
     });
+  });
+
+  async function renderProjectDetail() {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <ProjectDetail />
+        </QueryClientProvider>,
+      );
+    });
+    await settle();
+  }
+
+  function buttonByText(text: string) {
+    return [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === text);
+  }
+
+  it("pauses a running project from the Pause control", async () => {
+    mockProjectsApi.pause.mockResolvedValue(project({ pauseReason: "manual", pausedAt: new Date() }));
+
+    await renderProjectDetail();
+    expect(container.textContent).not.toContain("Paused manually");
+    expect(buttonByText("Resume")).toBeUndefined();
+    await act(() => buttonByText("Pause")!.click());
+    await settle();
+
+    expect(mockProjectsApi.pause).toHaveBeenCalledWith("project-1", "company-1");
+    expect(mockProjectsApi.resume).not.toHaveBeenCalled();
+  });
+
+  it("shows the manual pause marker and resumes from the Resume control", async () => {
+    mockProjectsApi.get.mockResolvedValue(project({ pauseReason: "manual", pausedAt: new Date() }));
+    mockProjectsApi.resume.mockResolvedValue(project());
+
+    await renderProjectDetail();
+    expect(container.textContent).toContain("Paused manually");
+    expect(container.textContent).not.toContain("Paused by budget hard stop");
+    expect(buttonByText("Pause")).toBeUndefined();
+    await act(() => buttonByText("Resume")!.click());
+    await settle();
+
+    expect(mockProjectsApi.resume).toHaveBeenCalledWith("project-1", "company-1");
+    expect(mockProjectsApi.pause).not.toHaveBeenCalled();
+  });
+
+  it("offers no manual control while a budget pause is active", async () => {
+    mockProjectsApi.get.mockResolvedValue(project({ pauseReason: "budget", pausedAt: new Date() }));
+
+    await renderProjectDetail();
+
+    expect(container.textContent).toContain("Paused by budget hard stop");
+    expect(container.textContent).not.toContain("Paused manually");
+    expect(buttonByText("Pause")).toBeUndefined();
+    expect(buttonByText("Resume")).toBeUndefined();
   });
 
   it("keeps Timeline out of the project task-list controls", async () => {
