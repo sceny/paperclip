@@ -23,7 +23,7 @@ import { cn, projectRouteRef, SIDEBAR_RAIL_HIDDEN_LABEL } from "../lib/utils";
 import { useProjectOrder } from "../hooks/useProjectOrder";
 import { resourceMembershipState, useResourceMembershipMutation, useResourceMemberships } from "../hooks/useResourceMemberships";
 import { useProjectExternalObjectSummary } from "../hooks/useIssueExternalObjects";
-import { BudgetSidebarMarker } from "./BudgetSidebarMarker";
+import { ProjectPausedSidebarMarker } from "./ProjectPausedSidebarMarker";
 import { ExternalObjectStatusSummary } from "./ExternalObjectStatusSummary";
 import { ProjectTile } from "./ProjectTile";
 import { SidebarSection, type SidebarSectionRadioChoice } from "./SidebarSection";
@@ -148,7 +148,7 @@ function ProjectItem({
       <span className={rail ? SIDEBAR_RAIL_HIDDEN_LABEL : "flex-1 truncate"}>{project.name}</span>
             {!rail && project.visibility === "private" ? <Lock className="size-3.5 shrink-0 text-muted-foreground" aria-label="Private project" /> : null}
       {!rail ? <ExternalObjectStatusSummary summary={externalObjectsSummary} compact /> : null}
-      {!rail && project.pauseReason === "budget" ? <BudgetSidebarMarker title="Project paused by budget" /> : null}
+      {!rail ? <ProjectPausedSidebarMarker pauseReason={project.pauseReason} /> : null}
     </NavLink>
   );
 
