@@ -120,7 +120,8 @@ it.each([
     } else {
       handle!.child.kill("SIGTERM");
       await handle!.completion;
-      await expect(session.read!()).rejects.toThrow("dot_runner_process_exited_recovery_required");
+      await expect(session.read!()).rejects.toThrow(
+        /^dot_runner_process_exited_recovery_required: code=\S+ signal=\S+ disconnectedMs=(?:none|\d+)$/);
     }
   } finally {
     commandSpy.mockRestore(); spawnSpy.mockRestore();

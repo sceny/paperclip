@@ -92,6 +92,11 @@ async function readProviderCheckpoint(options: RunnerdDotDriverOptions): Promise
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
+export function runnerDisconnectDiagnostic(core: Pick<DurablePrpControlPlane, "runnerDisconnectedForMs">): string {
+  const disconnectedMs = core.runnerDisconnectedForMs();
+  return `disconnectedMs=${disconnectedMs ?? "none"}`;
+}
+
 class RunnerdDotSession implements HarnessSession {
   #core: DurablePrpControlPlane | null = null;
   #process: RunnerProcessHandle | null = null;
@@ -168,11 +173,13 @@ class RunnerdDotSession implements HarnessSession {
         // Remote monitors do not report an exit code. The authenticated,
         // persisted receipt is the evidence of shutdown, for either launcher.
         if (core.getCommand("dot_shutdown")?.status === "completed") return;
-        this.#failure ??= new Error(`dot_runner_process_exited_recovery_required: code=${result.code} signal=${result.signal}`);
+        // Without an exit status, the controller-side disconnect age separates
+        // reconnect-grace expiry (the Runner was already away) from a crash.
+        this.#failure ??= new Error(`dot_runner_process_exited_recovery_required: code=${result.code} signal=${result.signal} ${runnerDisconnectDiagnostic(core)}`);
         this.#wake();
       }, () => {
         if (this.#closed || core.getCommand("dot_shutdown")?.status === "completed") return;
-        this.#failure ??= new Error("dot_runner_process_exited_recovery_required");
+        this.#failure ??= new Error(`dot_runner_process_exited_recovery_required: ${runnerDisconnectDiagnostic(core)}`);
         this.#wake();
       });
     } else if (!await o.adoptExistingRunner.isAlive()) { throw new Error("dot_runner_adoption_failed"); }

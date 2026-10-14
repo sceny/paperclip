@@ -47,6 +47,14 @@ describe("assigned MCP runner tools", () => {
     expect(f.executeTool).not.toHaveBeenCalled();
   });
 
+  it("identifies the conflicting tool and both connection bindings without exporting descriptor metadata", async () => {
+    const tool = { ...descriptor("calendar.search"), connectionId: "first-connection", providerMetadata: { token: "private-token" } };
+    const f = fixture([tool, { ...tool, connectionId: "second-connection" }]);
+    await expect(createAssignedMcpTools(f)).rejects.toMatchObject({ reasonCode: "tool_name_collision",
+      message: 'Conflicting tool definitions share the name "calendar.search" (connections ["first-connection","second-connection"]).' });
+    expect(f.executeTool).not.toHaveBeenCalled();
+  });
+
   it("keeps same-action tools from distinct connections separately callable", async () => {
     const f = fixture([descriptor("mcp.memory-first:search"), descriptor("mcp.memory-second:search")]);
     const assigned = await createAssignedMcpTools(f);

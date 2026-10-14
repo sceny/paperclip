@@ -1,3 +1,4 @@
+import { enableRunFailureReporting } from "./helpers/run-failure-reporting.js";
 import { EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@paperclipai/db";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -1457,3 +1458,6 @@ describe.each(["unchanged", "newer_active", "stale_idle"] as const)(
     }, 30_000);
   },
 );
+
+
+enableRunFailureReporting();

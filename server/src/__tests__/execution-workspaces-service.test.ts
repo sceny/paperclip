@@ -573,6 +573,36 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
     expect(await fs.readFile(path.join(seed.worktreePath, "unsaved.txt"), "utf8")).toBe("keep this work\n");
   });
 
+  it("shares compatible Git inspections within a batch while keeping branch and company decisions separate", async () => {
+    const first = await seedTerminalWorkspace();
+    const otherCompany = await seedTerminalWorkspace();
+    const [original] = await db.select().from(executionWorkspaces)
+      .where(eq(executionWorkspaces.id, first.executionWorkspaceId));
+    await db.insert(executionWorkspaces).values([
+      { ...original!, id: randomUUID(), name: "Same directory", updatedAt: new Date("2020-01-01") },
+      { ...original!, id: randomUUID(), name: "Different base", baseRef: "other-base", updatedAt: new Date("2020-01-01") },
+    ]);
+    await db.update(executionWorkspaces).set({
+      cwd: first.worktreePath,
+      providerRef: first.worktreePath,
+      branchName: original!.branchName,
+      baseRef: original!.baseRef,
+    }).where(eq(executionWorkspaces.id, otherCompany.executionWorkspaceId));
+    const service = executionWorkspaceService(db, { workspaceReaperCooldownDays: 0 });
+    const scan = vi.spyOn(workspaceGitOperationScheduler, "run");
+    const select = vi.spyOn(db, "select");
+    try {
+      expect(await service.sweepTerminalWorkspaces()).toMatchObject({ checked: 4, archived: 0 });
+      expect(scan.mock.calls.filter(([input]) => input.operation === "execution_workspaces.close_readiness_status"))
+        .toHaveLength(3);
+      expect(select.mock.calls.filter(([fields]) => fields && "completedAt" in fields && "cancelledAt" in fields))
+        .toHaveLength(4);
+    } finally {
+      scan.mockRestore();
+      select.mockRestore();
+    }
+  });
+
   it("backs off unchanged terminal candidates while unrelated commits wake the worker", async () => {
     await seedTerminalWorkspace();
     let clock = Date.now();

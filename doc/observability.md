@@ -473,15 +473,71 @@ below.
 
 ### Run failure context
 
-Terminal run failures also carry the run and task IDs, adapter, error code,
-run status, and redacted error message. Their fingerprint is the error code
-and adapter. These fields are passed directly to that event's capture call.
+Run failure reporting requires a separate operator choice in addition to the
+backend Sentry DSN and the audited SDK. Set `PAPERCLIP_SENTRY_RUN_FAILURES` to:
+
+| Value | Reports |
+| --- | --- |
+| `off` (default) | No run failure events. Ordinary server exception reporting still uses the backend DSN. |
+| `unexpected` | Failed and timed-out runs, plus unexpected started cancellations, with the existing configuration, quota, and external connection filters described below. |
+| `all` | Every failed or timed-out run, including the known configuration, quota, and external connection failures. Unexpected started cancellations also report. |
+
+Missing, blank, or unrecognized values keep run reporting off. Expected operator
+stops, shutdown interruptions, successful runs, and queued work do not report in
+either enabled mode. The mode does not change run status, retries, recovery,
+Telemetry, or OpenTelemetry export. It is process-wide, so an operator can enable
+it on one staging instance without enabling it on other deployments. Restart the
+server after changing deployment environment variables.
+
+**Upgrade:** A backend DSN alone previously enabled run failure reports. Set
+`PAPERCLIP_SENTRY_RUN_FAILURES=unexpected` to preserve that reporting policy.
+Use `all` to investigate every failed run in a selected deployment.
+
+Terminal run failures carry the company, agent, run and optional task IDs,
+adapter, error code, run status, and redacted error message. Company-scoped runs
+without a task also report. The `event_kind=run_failure` tag identifies these
+events. Their fingerprint contains the error code and adapter, followed by the
+setup/execute phase and original failure code when available. IDs, release,
+model, and error text do not split groups. These fields are passed directly to
+that event's capture call.
 They do not change the ambient Sentry scope, whose isolation is unavailable
 without an OpenTelemetry context manager. Later, unrelated exceptions must
 not inherit a previous run's identity or fingerprint.
 
+The versioned `paperclip` context supplies company and agent IDs and relative
+API paths for the saved run, events, log, and optional task. A valid HTTP(S)
+origin in `PAPERCLIP_PUBLIC_URL` also supplies absolute run, events, and log URLs.
+Values with credentials, query parameters, fragments, or a path are omitted.
+The event never includes an API key or an access token. These references grant
+no access. A bot must authenticate to the correct instance and pass its existing
+company, run-output, and private-task access checks.
+
+The bot should use the exact run ID to read `GET /api/heartbeat-runs/{runId}`,
+`GET /api/heartbeat-runs/{runId}/events`, and
+`GET /api/heartbeat-runs/{runId}/log`. These retain the saved result, run context,
+and available output. Prefer the saved provider configuration over the agent's
+current settings. The Sentry execution context includes the saved native
+provider kind and model, start/finish timestamps, and original failure code when
+available. Tool-name collision errors identify the conflicting tool names and
+connection bindings without serializing tool schemas or provider metadata.
+Gateway reason codes survive exception projection. All diagnostic text still
+passes through the existing secret redaction and size limits.
+
+Use the Sentry group to combine repeated investigations, and the instance and
+run ID to identify each occurrence. Automated retries or proposed code fixes
+must use normal Paperclip authority and approval checks. Receiving an event
+does not authorize a bot to replay a run. This change provides the reporting
+contract; it does not install a bot or configure Sentry alerts.
+
+Reporting remains asynchronous and best effort. Shutdown drains pending report
+work before the SDK flushes. There is no durable delivery queue or receipt from
+Sentry, so a crash or network outage can lose events. `all` selects failures; it
+does not promise delivery or export complete transcripts. Detailed output stays
+in the instance behind the existing authenticated APIs, with its normal retention.
+
 Known missing-secret configuration blockers are kept in the task's run log,
 blocked state, and owner recovery action, without a Sentry run-failure event.
+The exclusions in this section apply to `unexpected` mode only.
 This requires a failed `configuration_incomplete` run in the preparing stage,
 a setup-phase report, explicit proof that provider work did not start, and a
 nonempty list of recognized missing or inactive secret bindings. Process exit

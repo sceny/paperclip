@@ -8,6 +8,20 @@ const run = (overrides: Partial<Run> = {}) => ({ resultJson: null, ...overrides 
 const collect = (error: unknown) => collectRunFailureDiagnostics(run(), { error });
 
 describe("run failure diagnostics", () => {
+  it("selects the saved provider configuration and gateway error code without reading credentials or tool schemas", () => {
+    const failure = Object.assign(new Error('Tool collision: "calendar.search"'), {
+      reasonCode: "tool_name_collision", details: { token: "private-token" },
+    });
+    const diagnostic = collectRunFailureDiagnostics(run({
+      startedAt: new Date("2026-10-14T00:00:00Z"), finishedAt: new Date("2026-10-14T00:00:01Z"),
+      runnerProfileJson: { nativeExecutionInput: { provider: { kind: "codex", model: "saved-model", env: { TOKEN: "private-token" } } } },
+      resultJson: { originalFailureCode: "tool_name_collision" },
+    }), { error: failure });
+    expect(diagnostic.execution).toMatchObject({ providerKind: "codex", model: "saved-model", durationMs: 1000,
+      originalFailureCode: "tool_name_collision", startedAt: "2026-10-14T00:00:00.000Z", finishedAt: "2026-10-14T00:00:01.000Z" });
+    expect(diagnostic.exceptions[0]).toMatchObject({ code: "tool_name_collision" });
+    expect(JSON.stringify(diagnostic)).not.toContain("private-token");
+  });
   it("reports only private acquisition observations for the exact failed setup run", () => {
     const scope = { companyId: "company-fixture", environmentId: "environment-fixture", runId: "run-fixture" };
     const diagnostic = { phase: "workspace", elapsedMs: 100, budgetMs: 2_000 } as const;

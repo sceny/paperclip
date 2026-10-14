@@ -2273,9 +2273,9 @@ The developer-server health poll also stops in hidden tabs.
 Workspace detail responses share concurrent Git inspections and reuse their
 results for up to thirty seconds after completion. Workspace identity and metadata
 changes invalidate the cached result. The cache holds at most 256
-entries. Close-readiness checks, the terminal-workspace reaper, and the final
-cleanup validation still inspect Git afresh. A display result never authorizes
-worktree removal.
+entries. Close-readiness checks and final cleanup validation request separate
+Git scans that cannot join an older in-flight scan. A display result never
+authorizes worktree removal.
 
 The terminal-workspace reaper uses the database work coordinator. Startup scans
 recover existing workspace rows in bounded pages. Issue status and tree changes,
@@ -2285,8 +2285,12 @@ transaction settles and holds idle admission while writes or cleanup are active.
 Empty and nonterminal-only lanes have no recurring timer or query. Terminal trees
 schedule their actual cooldown deadline; unresolved delivery or cleanup eligibility
 is checked again after five minutes. Nonterminal trees, cooldowns, and active runs
-are checked before Git. Unchanged terminal candidates also back off for five
-minutes during unrelated commit wakes. Scoped task/workspace hints invalidate
+are checked before Git. The worker shares Git readiness across compatible rows
+that point at one directory within a bounded page. Company, branch, base ref,
+and runtime ownership must match. Each row keeps its own task and delivery
+assessment, which reuses the task tree read by the early gate. Unchanged terminal
+candidates also back off for five minutes during unrelated commit wakes. Scoped
+task/workspace hints invalidate
 affected candidates; changed tree or workspace revisions invalidate them too.
 Deadline selection reuses task trees read by those pages and performs no separate
 full-inventory query. Commits during a paged rotation request another bounded

@@ -1,3 +1,4 @@
+import { enableRunFailureReporting } from "./helpers/run-failure-reporting.js";
 import { EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@paperclipai/db";
 import * as conversationContinuation from "../services/conversation-continuation.js";
 import { environmentRuntimeService } from "../services/environment-runtime.js";
@@ -16789,3 +16790,6 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
 });
+
+
+enableRunFailureReporting();

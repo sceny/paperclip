@@ -1,3 +1,4 @@
+import { enableRunFailureReporting } from "./helpers/run-failure-reporting.js";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -1077,3 +1078,6 @@ describeEmbeddedPostgres("shared-workspace run serialization", () => {
     expect(holderRun?.status).toBe("running");
   });
 });
+
+
+enableRunFailureReporting();

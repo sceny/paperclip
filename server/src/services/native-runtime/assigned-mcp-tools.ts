@@ -94,7 +94,12 @@ export async function createAssignedMcpTools(input: {
   const tools = new Map<string, ToolGatewayDescriptor>();
   for (const descriptor of deduplicateToolDescriptors(listed)) {
     const name = assignedToolName(descriptor.name);
-    if (tools.has(name)) throw new Error("assigned_mcp_tool_name_collision");
+    const previous = tools.get(name);
+    if (previous) {
+      throw new ToolGatewayHttpError(409,
+        `Assigned MCP tool name collision for ${JSON.stringify([previous.name, descriptor.name])}.`,
+        "assigned_mcp_tool_name_collision");
+    }
     tools.set(name, descriptor);
   }
   const permits = (tool: ToolGatewayDescriptor, mode: WorkMode = input.workMode ?? "standard") => mode === "standard" || tool.risk === "read";

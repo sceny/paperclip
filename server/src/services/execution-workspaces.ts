@@ -467,6 +467,7 @@ async function runExpensiveGitStatus(input: {
     operation: input.operation,
     fairnessKeys: input.fairnessKeys,
     cacheTtlMs: 0,
+    bypassSingleFlight: true,
     // Nested task worktrees can exceed the scheduler's 1 MiB default.
     // Keep exact file counts for readiness and reconciliation checks.
     maxStdoutBytes: 32 * 1024 * 1024,
@@ -1697,8 +1698,9 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
   async function assessDelivery(
     workspace: ExecutionWorkspaceRow,
     git: ExecutionWorkspaceCloseGitReadiness | null,
+    precomputedIssueTree?: Awaited<ReturnType<typeof listWorkspaceIssueTree>>,
   ) {
-    const issueTree = await listWorkspaceIssueTree(workspace);
+    const issueTree = precomputedIssueTree ?? await listWorkspaceIssueTree(workspace);
     const sourceIssue = issueTree.find((issue) => issue.id === workspace.sourceIssueId) ?? null;
     const sourceIssueTerminal = Boolean(sourceIssue && TERMINAL_ISSUE_STATUSES.has(sourceIssue.status));
     const subtreeTerminal = Boolean(sourceIssue && issueTree.every((issue) => TERMINAL_ISSUE_STATUSES.has(issue.status)));
@@ -2953,6 +2955,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         skippedBackoff: 0,
         clearedStaleReopenPending: 0,
       };
+      const readinessByWorkingTree = new Map<string, ReturnType<typeof inspectGitCloseReadiness>>();
 
       for (const workspace of candidates) {
         signal?.throwIfAborted();
@@ -3001,13 +3004,24 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
             nextAt: now().getTime() + opts.terminalWorkspaceInspectionBackoffMs,
           });
         }
-        const executionWorkspace = toExecutionWorkspace(workspace);
-        const { git, statusInspectionSucceeded } = await inspectGitCloseReadiness(executionWorkspace);
+        const workspacePath = readNullableString(workspace.providerRef) ?? readNullableString(workspace.cwd);
+        const createdByRuntime = workspace.providerType === "git_worktree"
+          ? isRuntimeOwnedGitBranch(workspace.metadata)
+          : workspace.metadata?.createdByRuntime === true;
+        const readinessKey = workspacePath
+          ? JSON.stringify([workspace.companyId, workspacePath, workspace.baseRef, workspace.branchName, createdByRuntime])
+          : `workspace:${workspace.id}`;
+        let inspection = readinessByWorkingTree.get(readinessKey);
+        if (!inspection) {
+          inspection = inspectGitCloseReadiness(toExecutionWorkspace(workspace));
+          readinessByWorkingTree.set(readinessKey, inspection);
+        }
+        const { git, statusInspectionSucceeded } = await inspection;
         if (!statusInspectionSucceeded) {
           result.skippedUndelivered += 1;
           continue;
         }
-        const assessment = await assessDelivery(workspace, git);
+        const assessment = await assessDelivery(workspace, git, issueTree);
         if (!assessment.sourceIssueTerminal || !assessment.subtreeTerminal) {
           if (reopenPending) {
             // The source issue left the terminal state, so the reopen transition

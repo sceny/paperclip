@@ -109,7 +109,9 @@ Manual: Provision a disposable workspace, wait for readiness, start an available
 - Workspace IDs, runtime leases, and repository paths are not interchangeable.
 - Terminal workspace cleanup wakes after committed task/workspace/PR changes and
   restores cooldown deadlines at startup. Empty lanes stop scanning. Display Git
-  results can lag by thirty seconds; destructive cleanup still reads fresh Git.
+  results can lag by thirty seconds. Compatible records share one advisory Git
+  inspection per bounded page, while each record keeps its own delivery check.
+  Destructive cleanup starts a separate Git scan even if an older scan is running.
   The [worker tests](../../server/src/__tests__/terminal-workspace-work.test.ts)
   cover quiet lanes and deadlines. The
   [service tests](../../server/src/__tests__/execution-workspaces-service.test.ts)

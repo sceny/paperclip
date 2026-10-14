@@ -1,3 +1,4 @@
+import { enableRunFailureReporting } from "./helpers/run-failure-reporting.js";
 import { createHash, randomUUID } from "node:crypto";
 import { trace } from "@opentelemetry/api";
 import { InMemorySpanExporter, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
@@ -241,3 +242,6 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
     expect(input).toBeUndefined();
   });
 });
+
+
+enableRunFailureReporting();

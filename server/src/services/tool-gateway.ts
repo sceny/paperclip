@@ -362,7 +362,9 @@ export function deduplicateToolDescriptors(tools: readonly ToolGatewayDescriptor
     const previous = unique.get(tool.name);
     if (previous) {
       if (!isDeepStrictEqual(previous, tool)) {
-        throw new ToolGatewayHttpError(409, "Conflicting tool definitions share the same name.", "tool_name_collision");
+        throw new ToolGatewayHttpError(409,
+          `Conflicting tool definitions share the name ${JSON.stringify(tool.name)} (connections ${JSON.stringify([previous.connectionId ?? null, tool.connectionId ?? null])}).`,
+          "tool_name_collision");
       }
       continue;
     }
