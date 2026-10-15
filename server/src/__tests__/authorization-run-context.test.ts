@@ -48,6 +48,21 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(Math.max(...jsonBytes)).toBeLessThan(1024);
   });
 
+  it('keeps batched saved policy checks below the context transfer budget', async () => {
+    const fixture = await seed();
+    await db.insert(heartbeatRuns).values({ id: fixture.runId, companyId: fixture.companyId, agentId: fixture.agentId,
+      contextSnapshot: { contextPadding: 'unrelated'.repeat(32_768), executionPolicy: {
+        trustPreset: LOW_TRUST_REVIEW_PRESET,
+        authorizationPolicy: { trustBoundary: { mode: LOW_TRUST_REVIEW_PRESET, projectIds: [fixture.projectId] } },
+      } } });
+    recording = true;
+    const decisions = await authorizationService(db).decideReads(fixture.actor,
+      [{ type: 'project', companyId: fixture.companyId, projectId: fixture.projectId }]);
+    expect(decisions.map(decision => decision.allowed)).toEqual([true]);
+    expect(jsonBytes.length).toBeGreaterThan(0);
+    expect(Math.max(...jsonBytes)).toBeLessThan(1024);
+  });
+
   it.each([undefined, null, [], 'invalid', 42, true, {}])('keeps the standard fallback for saved policy %j', async executionPolicy => {
     const fixture = await seed();
     await db.insert(heartbeatRuns).values({ id: fixture.runId, companyId: fixture.companyId, agentId: fixture.agentId,
