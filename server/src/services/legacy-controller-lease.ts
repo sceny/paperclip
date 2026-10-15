@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, gt, lte, sql } from "drizzle-orm";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
-import type { LegacyControllerLeaseLossCause } from "./run-cancellation.js";
+import type { LegacyControllerLeaseLossCause, LegacyControllerLeaseLossTiming } from "./run-cancellation.js";
 
 // A boot UUID has meaning across containers; a numeric PID does not.
 export const legacyControllerBootId = randomUUID();
@@ -12,7 +12,10 @@ type Run = typeof heartbeatRuns.$inferSelect;
 
 /** Abort reason for a lost lease, so completion can attribute the stop. */
 export class LegacyControllerLeaseLostError extends Error {
-  constructor(readonly leaseLossCause: LegacyControllerLeaseLossCause) {
+  constructor(
+    readonly leaseLossCause: LegacyControllerLeaseLossCause,
+    readonly leaseLossTiming?: LegacyControllerLeaseLossTiming,
+  ) {
     super("Legacy controller lease lost");
     this.name = "LegacyControllerLeaseLostError";
   }
@@ -79,17 +82,38 @@ export function watchLegacyControllerLease(db: Db, run: Run, controller: AbortCo
   }
   let stopped = false;
   let pending = false;
+  // Timing evidence for a loss: a renewal still in flight at the deadline
+  // points at the database; a late deadline callback points at the event loop.
+  let lastRenewedAt = Date.now();
+  let renewalCount = 0;
+  const renewalsInFlight = new Set<{ startedAt: number }>();
+  let deadlineDueAt = 0;
+  let deadline: ReturnType<typeof setTimeout> | undefined;
   const lost = (cause: LegacyControllerLeaseLossCause) => {
-    if (!stopped) controller.abort(new LegacyControllerLeaseLostError(cause));
+    if (stopped || controller.signal.aborted) return;
+    const now = Date.now();
+    const oldestRenewal = Math.min(...[...renewalsInFlight].map((renewal) => renewal.startedAt));
+    controller.abort(new LegacyControllerLeaseLostError(cause, {
+      sinceRenewalMs: now - lastRenewedAt,
+      renewalPendingMs: renewalsInFlight.size > 0 ? now - oldestRenewal : null,
+      deadlineLateMs: cause === "renewal_deadline" ? Math.max(0, now - deadlineDueAt) : null,
+      renewalCount,
+    }));
   };
   const deadlinePassed = () => lost("renewal_deadline");
-  let deadline = setTimeout(deadlinePassed, Math.max(0,
-    (run.controllerLeaseExpiresAt?.getTime() ?? 0) - Date.now()));
-  deadline.unref();
+  const armDeadline = (delayMs: number) => {
+    clearTimeout(deadline);
+    deadlineDueAt = Date.now() + delayMs;
+    deadline = setTimeout(deadlinePassed, delayMs);
+    deadline.unref();
+  };
+  armDeadline(Math.max(0, (run.controllerLeaseExpiresAt?.getTime() ?? 0) - Date.now()));
   const assertOwned = async (stage?: "dispatching") => {
     if (stopped) return;
     controller.signal.throwIfAborted();
     const startedAt = Date.now();
+    const renewal = { startedAt };
+    renewalsInFlight.add(renewal);
     let onAbort!: () => void;
     const aborted = new Promise<never>((_, reject) => {
       onAbort = () => reject(controller.signal.reason);
@@ -99,6 +123,7 @@ export function watchLegacyControllerLease(db: Db, run: Run, controller: AbortCo
     try {
       renewed = await Promise.race([renewLegacyControllerLease(db, run, stage), aborted]);
     } finally {
+      renewalsInFlight.delete(renewal);
       controller.signal.removeEventListener("abort", onAbort);
     }
     if (stopped) return;
@@ -108,9 +133,9 @@ export function watchLegacyControllerLease(db: Db, run: Run, controller: AbortCo
     }
     controller.signal.throwIfAborted();
     if (!stopped) {
-      clearTimeout(deadline);
-      deadline = setTimeout(deadlinePassed, Math.max(0, LEGACY_CONTROLLER_LEASE_MS - (Date.now() - startedAt)));
-      deadline.unref();
+      lastRenewedAt = Date.now();
+      renewalCount += 1;
+      armDeadline(Math.max(0, LEGACY_CONTROLLER_LEASE_MS - (Date.now() - startedAt)));
     }
   };
   const timer = setInterval(() => {
