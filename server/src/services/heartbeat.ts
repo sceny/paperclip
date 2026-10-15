@@ -953,6 +953,7 @@ export function heartbeatService(
     timerClaimWasFirstHeartbeat,
     scheduleInteractionContinuationInfrastructureRetryIfEligible,
     findSharedWorkspaceHolder,
+    findExecutionWorkspaceHolder,
     finalizeAiConnectionBusyDeferral,
     finalizeWorkspaceBusyDeferral,
     promoteDueScheduledRetries,
@@ -2624,7 +2625,7 @@ export function heartbeatService(
           projectExecutionWorkspacePolicy, issueExecutionWorkspaceSettings,
         },
         config: { config, sourceWorkspaceConfig, issueAssigneeOverrides },
-        services: { executionWorkspacesSvc, environmentsSvc, instanceSettings, findSharedWorkspaceHolder },
+        services: { executionWorkspacesSvc, environmentsSvc, instanceSettings, findSharedWorkspaceHolder, findExecutionWorkspaceHolder },
       }));
       let nativeChatExpectedCwd = selectedNativeChatExpectedCwd;
       const executionConfiguration = await timePreparation("execution_configuration", () => prepareHeartbeatExecutionConfiguration(db, {

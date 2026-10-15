@@ -974,7 +974,7 @@ export function authorizationService(db: Db | DbTransaction) {
         id: heartbeatRuns.id,
         companyId: heartbeatRuns.companyId,
         agentId: heartbeatRuns.agentId,
-        contextSnapshot: heartbeatRuns.contextSnapshot,
+        contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object('executionPolicy', ${heartbeatRuns.contextSnapshot}->'executionPolicy')`,
       })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
@@ -992,7 +992,7 @@ export function authorizationService(db: Db | DbTransaction) {
       .select({
         companyId: heartbeatRuns.companyId,
         agentId: heartbeatRuns.agentId,
-        contextSnapshot: heartbeatRuns.contextSnapshot,
+        contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object('issueId', ${heartbeatRuns.contextSnapshot}->'issueId', 'taskId', ${heartbeatRuns.contextSnapshot}->'taskId')`,
       })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))

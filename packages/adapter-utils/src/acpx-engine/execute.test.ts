@@ -5302,10 +5302,17 @@ describe("ACPX engine sandbox-start spans (opt-in root + child parenting)", () =
     const runRootSpan = roots[0]!;
     expect(runRootSpan.name).toBe("task.run");
     expect(runRootSpan.ended).toBe(true);
+    expect(spans.filter((span) => span.name === "task.run")).toHaveLength(1);
+    expect(runRootSpan.parentContextArg).toBeUndefined();
+    expect(runRootSpan.endCalls).toBe(1);
+    expect(runRootSpan.status).toBeNull();
+    expect(runRootSpan.attributes["paperclip.task.run.run_id"]).toMatch(/^[0-9a-f]{12}$/);
+    expect(String(runRootSpan.attributes["paperclip.task.run.run_id"])).not.toContain("run-");
 
     // The sandbox bring-up span parents to the run root span.
     const startupSpan = spans.find((span) => span.name === "sandbox.startup");
     expect(startupSpan).toBeTruthy();
+    expect(startupSpan!.parentContextArg).toEqual({ span: runRootSpan });
     expect(startupSpan!.parent).toBe(runRootSpan);
     expect(startupSpan!.ended).toBe(true);
 
@@ -5313,8 +5320,12 @@ describe("ACPX engine sandbox-start spans (opt-in root + child parenting)", () =
     // run root span, not to the bring-up span.
     const turnSpan = spans.find((span) => span.name === "agent.turn");
     expect(turnSpan).toBeTruthy();
+    expect(spans.filter((span) => span.name === "agent.turn")).toHaveLength(1);
+    expect(turnSpan!.parentContextArg).toEqual({ span: runRootSpan });
     expect(turnSpan!.parent).toBe(runRootSpan);
     expect(turnSpan!.ended).toBe(true);
+    expect(turnSpan!.endCalls).toBe(1);
+    expect(turnSpan!.status).toBeNull();
 
     // The settlement sync-back opens the `sandbox.syncBack` span. It runs at
     // teardown, so it parents to the run root span, not to the bring-up span.
@@ -5393,158 +5404,6 @@ describe("ACPX engine sandbox-start spans (opt-in root + child parenting)", () =
     }
   });
 
-  it("test_task_run_span_opens_and_ends_once_for_remote", async () => {
-    const root = await makeTempRoot();
-    const stateDir = path.join(root, "state");
-    const localCwd = path.join(root, "worktree");
-    const codexHome = path.join(root, "codex-home");
-    await fs.mkdir(localCwd, { recursive: true });
-    await fs.mkdir(codexHome, { recursive: true });
-    const executionTarget = await remoteSandboxTarget(root);
-    const { traceContext, spans } = createRecordingStartupTrace();
-
-    // Run the executor with a fake remote-sandbox tracer. The engine opens one
-    // `task.run` root span and ends it once at the run return.
-    await runExecutor(
-      {
-        agent: "codex",
-        agentCommand: "node ./fake-acp.js",
-        stateDir,
-        cwd: localCwd,
-        env: { CODEX_HOME: codexHome },
-      },
-      { authToken: "real-run-jwt", executionTarget, startupTraceContext: traceContext },
-    );
-
-    // Exactly one `task.run` span opens for a remote-sandbox run.
-    const runSpans = spans.filter((span) => span.name === "task.run");
-    expect(runSpans).toHaveLength(1);
-    const runSpan = runSpans[0]!;
-    // It is the trace root: it opens with no parent-context token.
-    expect(runSpan.parent).toBeNull();
-    expect(runSpan.parentContextArg).toBeUndefined();
-    // It ends exactly once. A clean run sets no error status.
-    expect(runSpan.ended).toBe(true);
-    expect(runSpan.endCalls).toBe(1);
-    expect(runSpan.status).toBeNull();
-    // The run id rides only as a non-reversible hash; the raw run id never rides
-    // the span.
-    expect(runSpan.attributes["paperclip.task.run.run_id"]).toMatch(/^[0-9a-f]{12}$/);
-    expect(String(runSpan.attributes["paperclip.task.run.run_id"])).not.toContain("run-");
-  });
-
-  it("test_sandbox_startup_parents_to_task_run", async () => {
-    const root = await makeTempRoot();
-    const stateDir = path.join(root, "state");
-    const localCwd = path.join(root, "worktree");
-    const codexHome = path.join(root, "codex-home");
-    await fs.mkdir(localCwd, { recursive: true });
-    await fs.mkdir(codexHome, { recursive: true });
-    const executionTarget = await remoteSandboxTarget(root);
-    const { traceContext, spans } = createRecordingStartupTrace();
-
-    // Run the executor startup path with a fake remote-sandbox tracer. The run
-    // root opens the `task.run` span first, then the startup root opens the
-    // `sandbox.startup` span as its child.
-    await runExecutor(
-      {
-        agent: "codex",
-        agentCommand: "node ./fake-acp.js",
-        stateDir,
-        cwd: localCwd,
-        env: { CODEX_HOME: codexHome },
-      },
-      { authToken: "real-run-jwt", executionTarget, startupTraceContext: traceContext },
-    );
-
-    const runSpan = spans.find((span) => span.name === "task.run");
-    expect(runSpan).toBeTruthy();
-    const startupSpan = spans.find((span) => span.name === "sandbox.startup");
-    expect(startupSpan).toBeTruthy();
-    // The `sandbox.startup` `startSpan` call now receives the `task.run` parent
-    // context as its third argument. The recorder builds the token as
-    // `{ span }`, so the token carries the run span and the startup span parents
-    // to `task.run`.
-    expect(startupSpan!.parentContextArg).toEqual({ span: runSpan });
-    expect(startupSpan!.parent).toBe(runSpan);
-  });
-
-  it("test_task_run_span_is_noop_for_local_target", async () => {
-    const root = await makeTempRoot();
-    const stateDir = path.join(root, "state");
-    const localCwd = path.join(root, "worktree");
-    await fs.mkdir(localCwd, { recursive: true });
-    const { traceContext, spans } = createRecordingStartupTrace();
-
-    // A local run has no sandbox, so the run root span stays a no-op even when a
-    // trace context is injected. No real `task.run` span opens.
-    const { result } = await runExecutor(
-      { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, cwd: localCwd },
-      { authToken: "real-run-jwt", startupTraceContext: traceContext },
-    );
-    expect(result.exitCode).toBe(0);
-    expect(spans.some((span) => span.name === "task.run")).toBe(false);
-    expect(spans).toHaveLength(0);
-  });
-
-  it("test_agent_turn_span_parents_to_task_run", async () => {
-    const root = await makeTempRoot();
-    const stateDir = path.join(root, "state");
-    const localCwd = path.join(root, "worktree");
-    const codexHome = path.join(root, "codex-home");
-    await fs.mkdir(localCwd, { recursive: true });
-    await fs.mkdir(codexHome, { recursive: true });
-    const executionTarget = await remoteSandboxTarget(root);
-    const { traceContext, spans } = createRecordingStartupTrace();
-
-    // Run the executor turn path with a fake remote-sandbox tracer. The engine
-    // opens one `agent.turn` span around the turn as a child of `task.run` and
-    // ends it once at the turn return.
-    await runExecutor(
-      {
-        agent: "codex",
-        agentCommand: "node ./fake-acp.js",
-        stateDir,
-        cwd: localCwd,
-        env: { CODEX_HOME: codexHome },
-      },
-      { authToken: "real-run-jwt", executionTarget, startupTraceContext: traceContext },
-    );
-
-    const runSpan = spans.find((span) => span.name === "task.run");
-    expect(runSpan).toBeTruthy();
-    // Exactly one `agent.turn` span opens for a remote-sandbox run.
-    const turnSpans = spans.filter((span) => span.name === "agent.turn");
-    expect(turnSpans).toHaveLength(1);
-    const turnSpan = turnSpans[0]!;
-    // The `agent.turn` `startSpan` call receives the `task.run` parent context
-    // as its third argument. The recorder builds the token as `{ span }`, so the
-    // turn span parents to `task.run`.
-    expect(turnSpan.parentContextArg).toEqual({ span: runSpan });
-    expect(turnSpan.parent).toBe(runSpan);
-    // It ends exactly once. A clean turn sets no error status.
-    expect(turnSpan.ended).toBe(true);
-    expect(turnSpan.endCalls).toBe(1);
-    expect(turnSpan.status).toBeNull();
-  });
-
-  it("test_agent_turn_span_is_noop_for_local_target", async () => {
-    const root = await makeTempRoot();
-    const stateDir = path.join(root, "state");
-    const localCwd = path.join(root, "worktree");
-    await fs.mkdir(localCwd, { recursive: true });
-    const { traceContext, spans } = createRecordingStartupTrace();
-
-    // A local run has no sandbox, so the turn span stays a no-op even when a
-    // trace context is injected. No real `agent.turn` span opens.
-    const { result } = await runExecutor(
-      { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, cwd: localCwd },
-      { authToken: "real-run-jwt", startupTraceContext: traceContext },
-    );
-    expect(result.exitCode).toBe(0);
-    expect(spans.some((span) => span.name === "agent.turn")).toBe(false);
-  });
-
   it("test_run_parent_getter_tracks_task_run_then_turn", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
@@ -5618,105 +5477,6 @@ describe("ACPX engine sandbox-start spans (opt-in root + child parenting)", () =
     expect(startupToken).toEqual({ span: taskRunSpan });
     expect(turnToken).toEqual({ span: agentTurnSpan });
     expect(postToken).toEqual({ span: taskRunSpan });
-  });
-
-  it("test_root_region_exec_parents_to_sandbox_startup", async () => {
-    const root = await makeTempRoot();
-    const stateDir = path.join(root, "state");
-    const localCwd = path.join(root, "worktree");
-    const codexHome = path.join(root, "codex-home");
-    await fs.mkdir(localCwd, { recursive: true });
-    await fs.mkdir(codexHome, { recursive: true });
-    const executionTarget = await remoteSandboxTarget(root);
-    const { traceContext, spans } = createRecordingStartupTrace();
-
-    // Issue one exec from the root region of the bring-up. `getServers()` runs
-    // once inside the bring-up, after the `sandbox.startup` span opens and
-    // outside every measured step, so it stands in for a startup-body exec that
-    // runs at the root region. The run publishes the `sandbox.startup` context to
-    // the runtime-parent store for the whole bring-up, so the exec reads that
-    // token here.
-    const runtimeMcp = {
-      getServers: () => {
-        issueSandboxExecFromStore(traceContext);
-        return [];
-      },
-    };
-
-    await runExecutor(
-      {
-        agent: "codex",
-        agentCommand: "node ./fake-acp.js",
-        stateDir,
-        cwd: localCwd,
-        env: { CODEX_HOME: codexHome },
-      },
-      {
-        authToken: "real-run-jwt",
-        executionTarget,
-        startupTraceContext: traceContext,
-        runtimeMcp: runtimeMcp as never,
-      },
-    );
-
-    const startupSpan = spans.find((span) => span.name === "sandbox.startup");
-    expect(startupSpan).toBeTruthy();
-    const execSpan = spans.find((span) => span.name === "sandbox.exec");
-    expect(execSpan).toBeTruthy();
-    // The root-region exec parents to `sandbox.startup`, not to a detached root.
-    // The third `startSpan` argument is the exact `sandbox.startup` child context
-    // that `contextWithSpan` built, so the exec span is a child of the bring-up.
-    expect(execSpan!.parentContextArg).toEqual({ span: startupSpan });
-    expect(execSpan!.parent).toBe(startupSpan);
-  });
-
-  it("test_in_step_exec_still_parents_to_step_after_root_wrap", async () => {
-    const root = await makeTempRoot();
-    const stateDir = path.join(root, "state");
-    const localCwd = path.join(root, "worktree");
-    const codexHome = path.join(root, "codex-home");
-    await fs.mkdir(localCwd, { recursive: true });
-    await fs.mkdir(codexHome, { recursive: true });
-    const executionTarget = await remoteSandboxTarget(root);
-    const { traceContext, spans } = createRecordingStartupTrace();
-
-    // Issue one exec from inside the `stage.sync` step body, under the same root
-    // wrap. `prepareRemoteManagedHome` runs inside the measured `stage.sync`
-    // step, so the step overrides the runtime-parent store with its own context
-    // there. The in-step exec must read the step context, not the root context.
-    await runExecutor(
-      {
-        agent: "codex",
-        agentCommand: "node ./fake-acp.js",
-        stateDir,
-        cwd: localCwd,
-        env: { CODEX_HOME: codexHome },
-      },
-      {
-        authToken: "real-run-jwt",
-        executionTarget,
-        startupTraceContext: traceContext,
-        prepareRemoteManagedHome: async (input) => {
-          issueSandboxExecFromStore(traceContext);
-          const stagedRuntime = await input.stage([]);
-          return { stagedRuntime };
-        },
-      },
-    );
-
-    const stepSpan = spans.find((span) => span.name === "stage.sync");
-    expect(stepSpan).toBeTruthy();
-    const startupSpan = spans.find((span) => span.name === "sandbox.startup");
-    expect(startupSpan).toBeTruthy();
-    const execSpan = spans.find((span) => span.name === "sandbox.exec");
-    expect(execSpan).toBeTruthy();
-    // The in-step exec still parents to its step span. `measureStartupStep`
-    // overrides the store inside the wrap, so the step context wins over the
-    // root context for an exec that runs inside the step.
-    expect(execSpan!.parentContextArg).toEqual({ span: stepSpan });
-    expect(execSpan!.parent).toBe(stepSpan);
-    // The in-step exec does not parent to `sandbox.startup`.
-    expect(execSpan!.parent).not.toBe(startupSpan);
   });
 
   it("records root wall / work / diff times and the bounded context on the root span", async () => {
@@ -6112,10 +5872,12 @@ describe("ACPX engine sandbox-start spans (opt-in root + child parenting)", () =
     // A root-region exec parents to `sandbox.startup`.
     const rootRegionExec = execSpans.find((span) => span.parent === startupSpan);
     expect(rootRegionExec, "a root-region exec must parent to sandbox.startup").toBeTruthy();
+    expect(rootRegionExec!.parentContextArg).toEqual({ span: startupSpan });
 
     // A `stage.sync` body exec parents to the sync step, not to `sandbox.startup`.
     const syncExec = execSpans.find((span) => span.parent === syncStepSpan);
     expect(syncExec, "a stage.sync exec must parent to the sync step").toBeTruthy();
+    expect(syncExec!.parentContextArg).toEqual({ span: syncStepSpan });
     expect(syncExec!.parent).not.toBe(startupSpan);
 
     // A turn detached exec parents to `agent.turn`.

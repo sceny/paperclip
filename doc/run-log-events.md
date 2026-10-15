@@ -334,6 +334,14 @@ The local lifecycle event includes this evidence. Started cancellations without
 an expected stop are also reported to Sentry; its cancellation diagnostics contain
 only source, expectedness, initiator type, and the closed lease-loss cause, never
 initiator IDs or reason text.
+A lease loss also records `resultJson.controllerLeaseLoss`, including a loss
+during setup that fails the run before adapter dispatch. It holds the closed
+cause and the watchdog timings in milliseconds: `sinceRenewalMs` (since the
+last successful renewal), `renewalPendingMs` (age of a renewal query still in
+flight, or `null`), `deadlineLateMs` (how late the deadline callback ran, for
+`renewal_deadline` only), and `renewalCount`. A long `renewalPendingMs` points
+at a stalled database query; a long `deadlineLateMs` points at a blocked event
+loop. Failure reports carry these bounded numbers and the cause label only.
 Historical ambiguous cancellations stay `unknown` and do not authorize replay.
 
 Provider tool-definition validation failures use

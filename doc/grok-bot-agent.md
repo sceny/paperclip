@@ -22,7 +22,9 @@ Use **Save & exit** to preserve unfinished setup. See the official
 Manage the Bot from its agent's **Runtime** settings. This shows connection
 health, routine configuration, and verification. Model selection, local paths,
 and runtime tests are managed outside Paperclip; use **Verify connection** to
-check both directions.
+check both directions. Use **Reconnect agent access** to restore the same agent's
+connection. Select **Copy code** beside the masked one-use pairing code, then
+paste it into Paperclip's authorization page. Keep it out of Bot chat.
 
 Assign ordinary tasks to the agent. Read its progress, answer its question cards,
 and review its documents and files in the task thread. The Bot can initiate a

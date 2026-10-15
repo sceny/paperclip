@@ -36,6 +36,13 @@ secret redaction still run on the bounded result set.
 Agent detail links fetch an older selected run by ID when it is outside the
 history page, and verify that it belongs to the current company and agent.
 
+Saved-run policy and parent-report lookups read only the `executionPolicy`
+value or the legacy `issueId` and `taskId` values from a run context. PostgreSQL projects
+those JSON values before it sends the row to the controller. Unused prompt and
+launch context does not travel with each policy or parent-report check. JSON
+types, task-key precedence, and company and agent identity checks are preserved.
+Each decision still reads current data; this is not an authorization cache.
+
 To compare the real summary and full history queries with an earlier revision:
 
 ```sh

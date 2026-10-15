@@ -9593,6 +9593,8 @@ async function executePaperclipNativeSessionWithinScope(
     if (collectInstructions && !collectedByOwner) await timeController("instruction_collection", () => instructionCopy!.collectStopped());
   }
   const providerFailure = providerFailureObservation.forTerminal(native.turnId, native.terminal);
+  // Keep the generic failure behavior, but record why the turn failed.
+  const unclassifiedTurnFailure = providerFailureObservation.unclassifiedTurnFailure(native.turnId, native.terminal);
   const adapterResult: AdapterExecutionResult = {
     exitCode: native.terminal.runTerminalState === "succeeded" ? 0 : 1,
     signal: null,
@@ -9607,6 +9609,7 @@ async function executePaperclipNativeSessionWithinScope(
       nativeTerminal: native.terminal as unknown as Record<string, unknown>,
       ...(input.execution.schema === "paperclip.native-execution-input.v6" ? { providerAccounting: { usage: null, cost: null, externallyBilled: true }, externalStopConfirmed: false } : {}),
       ...(providerFailure ? { nativeProviderFailure: providerFailure.diagnostic } : {}),
+      ...(unclassifiedTurnFailure ? { nativeTurnFailure: unclassifiedTurnFailure } : {}),
       ...(native.goalRolloverRequired ? { goalRolloverRequired: true } : {}),
       planSynchronizations,
     },

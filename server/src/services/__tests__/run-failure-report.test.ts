@@ -939,6 +939,27 @@ describeEmbeddedPostgres("reportRunFailure", () => {
       cancellationSource: "controller_lease", cancellationExpected: false, controllerLeaseLossCause: "renewal_deadline" } } });
     expect(JSON.stringify(mockCaptureRunFailure.mock.calls)).not.toMatch(/Legacy controller lease lost/);
   });
+  it("reports bounded lease-loss timings for a setup failure", async () => {
+    await seedCompanyAndAgent();
+    await reportRunFailure(db, buildRun({ status: "failed", errorCode: "setup_failed", startedAt: new Date(0),
+      finishedAt: new Date(1000), resultJson: { controllerLeaseLoss: { cause: "renewal_deadline",
+        sinceRenewalMs: 61_000.4, renewalPendingMs: 59_000, deadlineLateMs: 1e12, renewalCount: -1, note: "private-note" } } }));
+    expect(mockCaptureRunFailure).toHaveBeenCalledOnce();
+    const execution = mockCaptureRunFailure.mock.calls[0][0].diagnostics.execution;
+    expect(execution).toMatchObject({ controllerLeaseLossCause: "renewal_deadline", controllerLeaseSinceRenewalMs: 61_000,
+      controllerLeaseRenewalPendingMs: 59_000, controllerLeaseDeadlineLateMs: 86_400_000 });
+    expect(execution).not.toHaveProperty("controllerLeaseRenewalCount");
+    expect(JSON.stringify(mockCaptureRunFailure.mock.calls)).not.toMatch(/private-note/);
+  });
+  it("drops lease-loss timings without a closed cause", async () => {
+    await seedCompanyAndAgent();
+    await reportRunFailure(db, buildRun({ status: "failed", errorCode: "setup_failed", startedAt: new Date(0),
+      finishedAt: new Date(1000), resultJson: { controllerLeaseLoss: { cause: "forged", sinceRenewalMs: 1 } } }));
+    expect(mockCaptureRunFailure).toHaveBeenCalledOnce();
+    const execution = mockCaptureRunFailure.mock.calls[0][0].diagnostics.execution;
+    expect(execution).not.toHaveProperty("controllerLeaseLossCause");
+    expect(execution).not.toHaveProperty("controllerLeaseSinceRenewalMs");
+  });
   it("does not report an operator's Stop as a failure", async () => {
     await seedCompanyAndAgent();
     await reportRunFailure(db, buildRun({ status: "cancelled", startedAt: new Date(0), resultJson: {
