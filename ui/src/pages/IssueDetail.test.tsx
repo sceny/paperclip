@@ -4341,23 +4341,12 @@ describe("IssueDetail", () => {
     await flushReact();
     await flushReact();
 
-    expect(container.textContent).not.toContain("Plan decomposition");
-    expect(mockIssuesApi.listAcceptedPlanDecompositions).not.toHaveBeenCalled();
-  });
-
-  it("hides file viewer entry points by default", async () => {
-    mockIssuesApi.get.mockResolvedValue(createIssue());
-
-    await act(async () => {
-      renderIssueView();
-    });
-
-    await flushReact();
-    await flushReact();
-
     expect(
       container.querySelector('[aria-label="Open file in this issue"]'),
     ).toBeNull();
+
+    expect(container.textContent).not.toContain("Plan decomposition");
+    expect(mockIssuesApi.listAcceptedPlanDecompositions).not.toHaveBeenCalled();
   });
 
   it("shows file viewer entry points when the experimental flag is enabled", async () => {

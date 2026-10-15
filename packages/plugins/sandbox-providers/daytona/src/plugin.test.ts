@@ -2142,19 +2142,6 @@ describe("Daytona sandbox provider plugin", () => {
       ...overrides,
     });
 
-    it("creates one session on the first execute and reuses it on the next", async () => {
-      process.env.DAYTONA_API_KEY = "host-key";
-      const sandbox = createMockSandbox();
-      mockGet.mockResolvedValue(sandbox);
-
-      await plugin.definition.onEnvironmentExecute?.(sessionExecParams());
-      await plugin.definition.onEnvironmentExecute?.(sessionExecParams());
-
-      expect(sandbox.process.createSession).toHaveBeenCalledTimes(1);
-      const sessionId = sandbox.process.createSession.mock.calls[0]![0] as string;
-      expect(sessionId).toMatch(/^paperclip-/);
-    });
-
     it("opens one session when two first commands overlap", async () => {
       process.env.DAYTONA_API_KEY = "host-key";
       const sandbox = createMockSandbox();
@@ -2541,6 +2528,8 @@ describe("Daytona sandbox provider plugin", () => {
       await plugin.definition.onEnvironmentExecute?.(sessionExecParams());
 
       expect(sandbox.process.createSession).toHaveBeenCalledTimes(1);
+      const sessionId = sandbox.process.createSession.mock.calls[0]![0] as string;
+      expect(sessionId).toMatch(/^paperclip-/);
       const firstSid = sandbox.process.executeSessionCommand.mock.calls[0]![0] as string;
       const secondSid = sandbox.process.executeSessionCommand.mock.calls[1]![0] as string;
       expect(firstSid).toBe(secondSid);

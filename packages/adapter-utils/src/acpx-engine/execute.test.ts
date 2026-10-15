@@ -5564,54 +5564,6 @@ describe("ACPX engine sandbox-start spans (opt-in root + child parenting)", () =
     expect(rootSpan!.attributes[A.rootWorkMs]).toBe(sumExceptReconcile);
   });
 
-  it("parents both concurrent bridge spans to the root (neither orphans)", async () => {
-    const root = await makeTempRoot();
-    const stateDir = path.join(root, "state");
-    const localCwd = path.join(root, "worktree");
-    await fs.mkdir(localCwd, { recursive: true });
-    const executionTarget = await remoteSandboxTarget(root);
-    const { traceContext, spans } = createRecordingStartupTrace();
-
-    await runExecutor(
-      { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, cwd: localCwd },
-      { authToken: "real-run-jwt", executionTarget, startupTraceContext: traceContext },
-    );
-
-    const rootSpan = spans.find((span) => span.name === "sandbox.startup");
-    expect(rootSpan).toBeTruthy();
-    const paperclip = spans.find((span) => span.name === "bridge.paperclip");
-    const processSession = spans.find((span) => span.name === "bridge.process-session");
-    expect(paperclip?.parent).toBe(rootSpan);
-    expect(processSession?.parent).toBe(rootSpan);
-    // Both bridge spans carry the same batch tag, so the trace marks them as one
-    // parallel batch.
-    expect(paperclip?.attributes[A.batch]).toBe("bridge");
-    expect(processSession?.attributes[A.batch]).toBe("bridge");
-    expect(paperclip?.attributes[A.batch]).toBe(processSession?.attributes[A.batch]);
-  });
-
-  it("records the handshake create-runtime and ensure-session sub-times on the acp.handshake span", async () => {
-    const root = await makeTempRoot();
-    const stateDir = path.join(root, "state");
-    const localCwd = path.join(root, "worktree");
-    await fs.mkdir(localCwd, { recursive: true });
-    const executionTarget = await remoteSandboxTarget(root);
-    const { traceContext, spans } = createRecordingStartupTrace();
-
-    await runExecutor(
-      { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir, cwd: localCwd },
-      { authToken: "real-run-jwt", executionTarget, startupTraceContext: traceContext },
-    );
-
-    const handshake = spans.find((span) => span.name === "acp.handshake");
-    expect(handshake).toBeTruthy();
-    // A cold start records both sub-times as finite float ms on the span.
-    expect(typeof handshake!.attributes[A.handshakeCreateRuntimeWallMs]).toBe("number");
-    expect(handshake!.attributes[A.handshakeCreateRuntimeWallMs] as number).toBeGreaterThanOrEqual(0);
-    expect(typeof handshake!.attributes[A.handshakeEnsureSessionWallMs]).toBe("number");
-    expect(handshake!.attributes[A.handshakeEnsureSessionWallMs] as number).toBeGreaterThanOrEqual(0);
-  });
-
   it("keeps every span attribute inside the closed allowlist (no command/path/id keys)", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
@@ -5646,6 +5598,26 @@ describe("ACPX engine sandbox-start spans (opt-in root + child parenting)", () =
         }
       }
     }
+
+    const rootSpan = spans.find((span) => span.name === "sandbox.startup");
+    expect(rootSpan).toBeTruthy();
+    const paperclip = spans.find((span) => span.name === "bridge.paperclip");
+    const processSession = spans.find((span) => span.name === "bridge.process-session");
+    expect(paperclip?.parent).toBe(rootSpan);
+    expect(processSession?.parent).toBe(rootSpan);
+    // Both bridge spans carry the same batch tag, so the trace marks them as one
+    // parallel batch.
+    expect(paperclip?.attributes[A.batch]).toBe("bridge");
+    expect(processSession?.attributes[A.batch]).toBe("bridge");
+    expect(paperclip?.attributes[A.batch]).toBe(processSession?.attributes[A.batch]);
+
+    const handshake = spans.find((span) => span.name === "acp.handshake");
+    expect(handshake).toBeTruthy();
+    // A cold start records both sub-times as finite float ms on the span.
+    expect(typeof handshake!.attributes[A.handshakeCreateRuntimeWallMs]).toBe("number");
+    expect(handshake!.attributes[A.handshakeCreateRuntimeWallMs] as number).toBeGreaterThanOrEqual(0);
+    expect(typeof handshake!.attributes[A.handshakeEnsureSessionWallMs]).toBe("number");
+    expect(handshake!.attributes[A.handshakeEnsureSessionWallMs] as number).toBeGreaterThanOrEqual(0);
   });
 
   it("closes the root span with error status when the bring-up handshake fails", async () => {

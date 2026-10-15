@@ -2643,12 +2643,6 @@ describe("remote runner build metadata", () => {
     prpTransportModes: ["dial_ws_loopback", "dial_wss", "listen_ws"],
   };
 
-  it("accepts the current contract with the required transport", () => {
-    expect(() =>
-      assertRemoteRunnerBuildMetadata(current, "listen_ws"),
-    ).not.toThrow();
-  });
-
   it("requires an explicit Dot bridge capability only for remote Dot execution", () => {
     expect(() => assertRemoteRunnerBuildMetadata(current, "listen_ws", "openai_dot_mcp"))
       .toThrow("runner_remote_dot_capability_missing");

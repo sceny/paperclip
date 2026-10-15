@@ -1210,56 +1210,6 @@ describe("IssueChatThread", () => {
 
   // PAP-12003: initial page load must not jump to the latest comment. If a
   // user wants the newest message, the explicit Jump to latest control owns it.
-  it("does not auto-scroll to the latest comment on initial load", () => {
-    vi.useFakeTimers();
-    container.remove();
-    const scrollHost = document.createElement("main");
-    scrollHost.id = "main-content";
-    scrollHost.style.overflowY = "auto";
-    scrollHost.style.overflow = "auto";
-    scrollHost.style.height = "640px";
-    document.body.appendChild(scrollHost);
-    container = document.createElement("div");
-    scrollHost.appendChild(container);
-
-    const elementScrollToMock = vi.fn();
-    scrollHost.scrollTo =
-      elementScrollToMock as unknown as typeof scrollHost.scrollTo;
-    const originalScrollIntoView = Element.prototype.scrollIntoView;
-    const scrollIntoViewMock = vi.fn();
-    Element.prototype.scrollIntoView =
-      scrollIntoViewMock as unknown as typeof Element.prototype.scrollIntoView;
-
-    const root = createRoot(container);
-    act(() => {
-      renderIssueThread(root, {
-        comments: issueChatLongThreadComments,
-        linkedRuns: issueChatLongThreadLinkedRuns,
-        timelineEvents: issueChatLongThreadEvents,
-        agentMap: issueChatLongThreadAgentMap,
-        currentUserId: "user-board",
-        transcriptsByRunId: issueChatLongThreadTranscriptsByRunId,
-        hasOutputForRun: (runId) =>
-          issueChatLongThreadTranscriptsByRunId.has(runId),
-      });
-    });
-
-    // No jump click: initial render should preserve the page position.
-    act(() => {
-      vi.advanceTimersByTime(500);
-    });
-
-    expect(elementScrollToMock).not.toHaveBeenCalled();
-    expect(scrollIntoViewMock).not.toHaveBeenCalled();
-
-    Element.prototype.scrollIntoView = originalScrollIntoView;
-    act(() => {
-      root.unmount();
-    });
-    scrollHost.remove();
-    vi.useRealTimers();
-  });
-
   it("can keep the page at the top on initial load while preserving manual jump-to-latest", () => {
     vi.useFakeTimers();
     container.remove();
