@@ -176,7 +176,10 @@ describe.skipIf(!support.supported)("heartbeat runtime execution boundary", () =
     expect(input.effects.onNativeDispatchStarted).toHaveBeenCalledOnce();
     expect(input.effects.onLegacyAdapterEntered).not.toHaveBeenCalled();
     expect(await finalizations()).toHaveLength(0);
-    expectCleanup(input);
+    if (error instanceof NativeControllerDetachedForRestartError) {
+      expect(revokeHeartbeatRunGatewayTokens).not.toHaveBeenCalled();
+      expect(input.instructions.releaseInstructionCopy).toHaveBeenCalledOnce();
+    } else expectCleanup(input);
   });
 
   it("dispatches native execution with the selected session and persists its usage", async () => {

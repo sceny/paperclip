@@ -24,6 +24,17 @@ Agent access: `available` — REST / native call_api; CLI issue diagnostics.
 
 Policy: Task/run visibility, run ownership and source/action policy; workspace export
 retry and some operator controls require board.
+The server can recover a prepared remote bootstrap only with a durable
+never-claimed executor receipt and no contradictory execution evidence. This
+automatic classification grants no new agent action or permission; normal
+execution admission and durable runner-state verification still apply.
+The current server's active preparation remains with its existing execution.
+A preparation that loses the coordinator lease cannot fail the shared run or
+revoke the new owner's gateway tokens, even after lease expiry. Only normal
+recovery can establish a takeover claim; no agent permission is added.
+Older unmarked preparations do not qualify for this automatic path during an
+upgrade. The fencing marker comes from fresh server-owned identity creation;
+caller profile data cannot upgrade an existing preparation.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts#L9478) at
 the reviewed commit above.

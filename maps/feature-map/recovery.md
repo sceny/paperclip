@@ -101,6 +101,23 @@ the supported recovery until the source task produces a useful result or a
 specific escalation. Reload and verify that resolved notices retire and attempt
 history remains. A fixture pass does not qualify every live harness/provider.
 
+The [native restart integration suite](../../server/src/services/native-runtime/native-runner-restart-recovery.integration.test.ts)
+also covers a prepared remote workspace interrupted before the executor's first
+claim. Real database tests assert one same-run bootstrap claim under concurrent
+controllers and reject prior claims, launch/provider evidence, and malformed
+workspace references. These cases prove classification, not a live remote
+provider restart. For that journey, interrupt a disposable deployment after
+workspace preparation and before its first executor claim, then confirm one
+provider turn starts on the original run through the normal admission gates.
+
+The same database suite pauses an original preparation while recovery claims
+the remote run. It then verifies that the old preparation yields without opening
+a provider or changing the recovery owner, for both live and expired leases.
+[Heartbeat boundary tests](../../server/src/services/heartbeat/runtime-execution.test.ts)
+verify that the detachment signal transfers recovery ownership before cleanup.
+The suite also rejects an older unmarked preparation and verifies that calling
+preparation again cannot add the fencing marker from supplied profile data.
+
 For a native workspace owner hold, repeat issue reads and recovery checks after
 the task becomes done or cancelled. Verify one unchanged action ID, attempt
 count, and timestamps; task completion must not authorize copyback. Clear only

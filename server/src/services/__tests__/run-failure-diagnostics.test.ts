@@ -190,6 +190,25 @@ describe("run failure diagnostics", () => {
     }
   });
 
+  it("exports only the saved remote recovery stage and reason", () => {
+    const result = sanitizeRunFailureDiagnostics(collectRunFailureDiagnostics(run({
+      errorCode: "runner_remote_process_identity_unavailable", resultJson: {
+        remoteRunnerRecovery: { stage: "identity_marker", reason: "fingerprint_missing",
+          path: "private-path", pid: 123, nonce: "private-nonce", stderr: "private-stderr" },
+      },
+    }), {}));
+    expect(result.execution).toEqual({ remoteRunnerRecoveryStage: "identity_marker", remoteRunnerRecoveryReason: "fingerprint_missing" });
+    expect(result.exceptions).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain("private");
+    for (const value of [null, { stage: "private-stage", reason: "marker_missing" },
+      { stage: "identity_marker", reason: "private-reason" },
+      Object.defineProperty({}, "stage", { get() { throw new Error("private"); } })]) {
+      expect(collectRunFailureDiagnostics(run({ errorCode: "runner_remote_process_identity_unavailable",
+        resultJson: { remoteRunnerRecovery: value } }), {}).execution).toEqual({});
+    }
+    expect(collectRunFailureDiagnostics(run({ errorCode: "adapter_failed" }), {}).execution).toEqual({});
+  });
+
   it("exports which native close barrier failed without tool identities or provider text", () => {
     const closeFailure = (settlement: unknown) => Object.assign(
       new Error("provider_transport_failed: runner did not durably suspend before checkpoint"),

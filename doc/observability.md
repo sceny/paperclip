@@ -792,6 +792,16 @@ only for these labels; its text and stack are not copied, because they bypass th
 executor's identity redaction. These observations do not change close, quarantine
 or recovery behavior.
 
+Remote runner reattachment failures also record `remoteRunnerRecoveryStage`
+and `remoteRunnerRecoveryReason` from the saved run. These fields contain
+closed labels for marker reads and process verification. They distinguish
+missing or unsafe markers, invalid or missing fingerprints, changed or
+unavailable process identity, and failed or timed-out probes. Paths, PIDs,
+nonces, command lines and transport output are excluded. The existing
+`runner_remote_process_identity_unavailable` error message and native failure
+classification remain unchanged. The coordinator also saves these labels in
+its failure detail and recovery evidence. A later failure clears stale labels.
+
 ACP turns record `acpLastEventAgeMs`, `acpObservedEventCount`,
 `acpPendingToolCount`, and `acpToolInventoryComplete` at finalization, before
 usage reads, error logging, and cleanup. The age measures time since the last
