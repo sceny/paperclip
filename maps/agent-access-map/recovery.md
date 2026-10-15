@@ -75,6 +75,13 @@ revised live agent authorization and callback delivery remain `not-run`.
 
 ## `source-action`
 
+The recovery-actions read API includes settled execution reconciliation holds
+with an automatic `replay: blocked` receipt, as well as retained workspace holds.
+The existing company and task-read checks remain in force. The board notice
+reads this history to explain its current hold; this adds no agent mutation
+authority. Route and notice regressions cover the source contract, without
+claiming live agent or provider qualification.
+
 Review: `baseline`.
 
 API: `present` — representative operation IDs:

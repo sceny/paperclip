@@ -38,6 +38,13 @@ Open the affected task from Tasks, Inbox/Blocked, search, or a direct task link.
 Inspect the recovery notice/card in its history, expand details if needed, and
 use the currently offered action. Follow any linked repair task and return owner.
 
+An authorized board user can expand Recovery details on a stopped-run notice to
+read the decision that still blocks replay, including a settled recovery record.
+The notice matches the current action and run; it does not show another run's
+historical decision or authorize a retry. Source-reviewed behavior; the
+[notice regressions](../../ui/src/components/ExecutionBlockerNotice.test.tsx)
+cover empty active recovery, a mismatched source, and failed history reads.
+
 ### `run-detail`
 
 Open the agent's run (`/agents/:agentId/runs/:runId`) from activity or the task's
