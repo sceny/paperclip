@@ -55,10 +55,20 @@ export async function hasLiveLegacyController(db: Db, run: Run): Promise<boolean
   return Boolean(owner);
 }
 
+export type RevokedLegacyControllerState = Pick<Run, "executionStage" | "processPid" | "processGroupId">;
+
 /** Atomically revoke an expired controller. Renewal and revocation serialize on
- * the run row. Expiry permits cleanup, never dispatch of a replacement agent. */
-export async function revokeExpiredLegacyController(db: Db, run: Run): Promise<boolean> {
-  if (run.runtimeMode === "native" || !run.controllerBootId) return true;
+ * the run row. Expiry permits cleanup, never dispatch of a replacement agent.
+ * Returns the stage and process identifiers committed with the revocation, or
+ * null when another writer owns the row. They cannot advance afterwards,
+ * because renewal requires the replaced boot ID. */
+export async function revokeExpiredLegacyControllerWithState(
+  db: Db,
+  run: Run,
+): Promise<RevokedLegacyControllerState | null> {
+  if (run.runtimeMode === "native" || !run.controllerBootId) {
+    return { executionStage: run.executionStage, processPid: run.processPid, processGroupId: run.processGroupId };
+  }
   const [revoked] = await db.update(heartbeatRuns).set({
     controllerBootId: randomUUID(),
     controllerLeaseExpiresAt: sql`clock_timestamp() + interval '60 seconds'`,
@@ -67,8 +77,16 @@ export async function revokeExpiredLegacyController(db: Db, run: Run): Promise<b
     eq(heartbeatRuns.status, "running"),
     eq(heartbeatRuns.controllerBootId, run.controllerBootId),
     lte(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`),
-  )).returning({ id: heartbeatRuns.id });
-  return Boolean(revoked);
+  )).returning({
+    executionStage: heartbeatRuns.executionStage,
+    processPid: heartbeatRuns.processPid,
+    processGroupId: heartbeatRuns.processGroupId,
+  });
+  return revoked ?? null;
+}
+
+export async function revokeExpiredLegacyController(db: Db, run: Run): Promise<boolean> {
+  return (await revokeExpiredLegacyControllerWithState(db, run)) !== null;
 }
 
 /** Abort the adapter if the controller cannot renew. Bound each check by the

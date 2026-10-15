@@ -126,6 +126,13 @@ and must not create reader participation. No live recovery proof is claimed.
 Gaps: Permitted resolutions use native `call_api` under existing eligibility
 and ownership checks. Source/action policy determines whether continuation is allowed.
 
+A recorded operator Stop before legacy runtime selection releases only that
+run's task locks and preserves deferred input for normal later admission. This
+does not grant an agent a new retry or provider-stop authority. Local
+[database regressions](../../server/src/modules/wake-queue/adapters/queued-operator-stop-postgres.test.ts)
+cover the release boundary and a competing active routine cycle; they are not
+live provider-stop proof.
+
 ## `exhaustion`
 
 Review: `baseline`.

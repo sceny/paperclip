@@ -37,7 +37,7 @@ import {
   summarizeAcpxTurnUsage,
   type AcpxEngineExecutorOptions,
 } from "./execute.js";
-import { ACPX_HANDSHAKE_TIMEOUT_MS } from "./constants.js";
+import { ACPX_CLAUDE_MCP_TOOL_TIMEOUT_MS, ACPX_HANDSHAKE_TIMEOUT_MS } from "./constants.js";
 import { sessionCodec } from "./session-codec.js";
 import { runChildProcess } from "../server-utils.js";
 import { createPromptContextFixture } from "../test-fixtures/prompt-context.js";
@@ -2984,6 +2984,24 @@ describe("shared ACPX engine runtime behavior", () => {
     const third = await runExecutor(config, { runtime: { sessionParams: sessionCodec.deserialize(second.result.sessionParams) }, context: { refreshTools: true } });
     expect(third.sessionInputs[0]?.resumeSessionId).toBe("backend-session");
     expect(third.runtimeOptions[0]?.mcpServers).toEqual([]);
+  });
+
+  it("bounds Claude MCP tool calls only when runtime MCP servers are attached", async () => {
+    const server = { name: "paperclip-assigned", url: "https://example.test/mcp/gateways/g", connectionId: "assignment:x", token: "t" };
+    const runtimeMcp = { getServers: () => [server] };
+    const envOf = (run: { meta: Array<Record<string, unknown>> }) => run.meta[0]?.env as Record<string, string>;
+
+    const bounded = await runExecutor({ agent: "claude" }, { runtimeMcp });
+    expect(envOf(bounded).MCP_TOOL_TIMEOUT).toBe(String(ACPX_CLAUDE_MCP_TOOL_TIMEOUT_MS));
+
+    const withoutServers = await runExecutor({ agent: "claude" });
+    expect(envOf(withoutServers).MCP_TOOL_TIMEOUT).toBeUndefined();
+
+    const userConfigured = await runExecutor({ agent: "claude", env: { MCP_TOOL_TIMEOUT: "120000" } }, { runtimeMcp });
+    expect(envOf(userConfigured).MCP_TOOL_TIMEOUT).toBe("120000");
+
+    const codex = await runExecutor({ agent: "codex" }, { runtimeMcp });
+    expect(envOf(codex).MCP_TOOL_TIMEOUT).toBeUndefined();
   });
 
   it("injects runtime MCP servers and fingerprints their identity without persisting bearer tokens", async () => {

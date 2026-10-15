@@ -5,7 +5,8 @@ import { agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { heartbeatService } from "./heartbeat.js";
 import { hasLiveLegacyController, LEGACY_CONTROLLER_RENEW_MS, legacyControllerBootId, legacyControllerClaim, LegacyControllerLeaseLostError,
-  renewLegacyControllerLease, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
+  renewLegacyControllerLease, revokeExpiredLegacyController, revokeExpiredLegacyControllerWithState,
+  watchLegacyControllerLease } from "./legacy-controller-lease.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 (support.supported ? describe : describe.skip)("durable legacy controller ownership", () => {
@@ -78,6 +79,16 @@ const support = await getEmbeddedPostgresTestSupport();
     const attempts = await Promise.all([revokeExpiredLegacyController(db, run), revokeExpiredLegacyController(db, run)]);
     expect(attempts.filter(Boolean)).toHaveLength(1);
     expect(await renewLegacyControllerLease(db, run)).toBe(false);
+  });
+  it("revocation reports the committed dispatch boundary instead of the caller's stale snapshot", async () => {
+    const stale = await seed();
+    expect(await renewLegacyControllerLease(db, stale, "dispatching")).toBe(true);
+    await expire(stale.id);
+    expect(stale.executionStage).toBe("preparing");
+    expect(await revokeExpiredLegacyControllerWithState(db, stale)).toEqual({
+      executionStage: "dispatching", processPid: null, processGroupId: null,
+    });
+    expect(await revokeExpiredLegacyControllerWithState(db, stale)).toBeNull();
   });
   it("a crash after revocation permits a later recovery claim", async () => {
     const run = await seed();

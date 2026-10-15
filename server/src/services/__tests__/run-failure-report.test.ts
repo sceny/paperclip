@@ -393,6 +393,52 @@ describeEmbeddedPostgres("reportRunFailure", () => {
     expect(mockCaptureRunFailure).toHaveBeenCalledOnce();
   });
 
+  function restartInterruptedSetupRun(overrides: Partial<typeof heartbeatRuns.$inferSelect> = {}) {
+    return buildRun({
+      error: "Process lost -- server may have restarted; retrying once",
+      runtimeMode: "legacy", executionStage: "preparing", processPid: null, processGroupId: null,
+      resultJson: {
+        executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+        processLossDiagnostic: {
+          pidRecorded: false, groupRecorded: false, localCheck: "no_identifiers",
+          retryEligible: true, runPredatesObserver: true,
+        },
+      },
+      ...overrides,
+    });
+  }
+
+  it("keeps a retried restart interruption of legacy setup local", async () => {
+    await seedCompanyAndAgent({ adapterType: "paperclip_runner" });
+    await reportRunFailure(db, restartInterruptedSetupRun());
+    expect(mockCaptureRunFailure).not.toHaveBeenCalled();
+  });
+
+  it("reports a retried restart interruption of legacy setup in all mode", async () => {
+    vi.stubEnv("PAPERCLIP_SENTRY_RUN_FAILURES", "all");
+    await seedCompanyAndAgent({ adapterType: "paperclip_runner" });
+    await reportRunFailure(db, restartInterruptedSetupRun());
+    expect(mockCaptureRunFailure).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { executionStage: "dispatching" }, { runtimeMode: "native" }, { processPid: 4242 },
+    { errorCode: "adapter_failed" },
+    { resultJson: { processLossDiagnostic: { localCheck: "no_identifiers", retryEligible: true, runPredatesObserver: true } } },
+    { resultJson: {
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+      processLossDiagnostic: { localCheck: "no_identifiers", retryEligible: false, runPredatesObserver: true },
+    } },
+    { resultJson: {
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+      processLossDiagnostic: { localCheck: "no_identifiers", retryEligible: true, runPredatesObserver: false },
+    } },
+  ])("reports process loss without restart-before-dispatch evidence: %j", async (overrides) => {
+    await seedCompanyAndAgent({ adapterType: "paperclip_runner" });
+    await reportRunFailure(db, restartInterruptedSetupRun(overrides));
+    expect(mockCaptureRunFailure).toHaveBeenCalledOnce();
+  });
+
   async function expiredGrokOffer(input: {
     wakes: Array<{ status: "rejected" | "accepted" | "acknowledged" | "unknown"; httpStatus: number | null }>;
     acceptedAt?: Date | null;

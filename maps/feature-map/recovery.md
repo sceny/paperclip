@@ -203,6 +203,12 @@ Automated: [legacy continuation](../../server/src/services/recovery/legacy-conti
 cover their respective recovery paths. [Legacy failure continuation](../../tests/e2e/legacy-failure-continuation.spec.ts)
 adds a browser journey; it is not native runtime proof.
 
+[Queued Stop database regressions](../../server/src/modules/wake-queue/adapters/queued-operator-stop-postgres.test.ts)
+verify that an operator cancellation before runtime selection releases its own
+locks, preserves deferred input without launching it, and leaves another active
+cycle of the same routine unchanged. Provider cancellations and already selected
+or dispatched runs retain their existing release behavior.
+
 Manual: stop a disposable run, submit a distinguishable follow-up, and observe
 any cleanup wait. After confirmed stop, verify the follow-up reaches one eligible
 continuation and produces the requested answer. Repeat with a task/ancestor

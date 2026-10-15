@@ -3250,6 +3250,72 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(retries).toHaveLength(0);
   });
 
+  // A hard restart can kill the server after it claimed a legacy run but before
+  // the adapter dispatch renewal, leaving an expired lease from another boot.
+  async function seedRestartOrphanedLegacySetup(executionStage: "preparing" | "dispatching") {
+    const fixture = await seedRunFixture({
+      adapterType: "paperclip_runner",
+      agentStatus: "idle",
+      runtimeMode: "legacy",
+    });
+    await db.update(heartbeatRuns).set({
+      controllerBootId: randomUUID(),
+      controllerLeaseExpiresAt: sql`clock_timestamp() - interval '1 second'`,
+      executionStage,
+    }).where(eq(heartbeatRuns.id, fixture.runId));
+    return fixture;
+  }
+
+  it("retries a legacy run that a restart stopped before adapter dispatch", async () => {
+    const { companyId, runId, issueId } = await seedRestartOrphanedLegacySetup("preparing");
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.reapOrphanedRuns();
+
+    expect(result).toEqual({ reaped: 1, runIds: [runId] });
+    const [reaped] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(reaped).toMatchObject({
+      status: "failed",
+      errorCode: "process_lost",
+      error: "Process lost -- server may have restarted; retrying once",
+    });
+    expect(reaped?.resultJson).toMatchObject({
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+      processLossDiagnostic: { localCheck: "no_identifiers", retryEligible: true, runPredatesObserver: true },
+    });
+    const retries = await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId),
+      eq(heartbeatRuns.retryOfRunId, runId),
+    ));
+    expect(retries).toEqual([expect.objectContaining({ status: "scheduled_retry" })]);
+    expect(await db.select().from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId))).toEqual([]);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+  });
+
+  it("keeps an orphaned legacy run that reached adapter dispatch held for reconciliation", async () => {
+    const { companyId, runId, issueId } = await seedRestartOrphanedLegacySetup("dispatching");
+
+    const heartbeat = heartbeatService(db);
+    await heartbeat.reapOrphanedRuns();
+
+    const [reaped] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(reaped).toMatchObject({
+      status: "failed",
+      errorCode: "process_lost",
+      error: "Process lost -- server may have restarted",
+    });
+    expect(reaped?.resultJson).not.toHaveProperty("executionRecovery");
+    expect(await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId),
+      eq(heartbeatRuns.retryOfRunId, runId),
+    ))).toEqual([]);
+    expect(await db.select().from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId))).toEqual([
+      expect.objectContaining({ cause: "legacy_execution_requires_reconciliation" }),
+    ]);
+  });
+
   async function withTempPaperclipHome<T>(
     fn: (home: string) => Promise<T>,
   ): Promise<T> {
