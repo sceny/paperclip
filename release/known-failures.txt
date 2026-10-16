@@ -16,3 +16,6 @@
 
 # The gate runner sources the sandbox env.sh, which exports PAPERCLIP_RUNNER_BINARY; the test does not clear it, so the controller override wins over the mocked packaged daemon. Fails alone and in full runs; passes with that variable unset. Added 2026-10-14 (upstream 2c17d3ca5).
 |@paperclipai/server| src/services/native-runtime/native-codex-runner.test.ts > selected remote daemon target > uses the packaged Linux/x86_64 daemon independent of the controller
+
+# Time/load-sensitive: failed in the full run and in the script's re-run on 2026-10-16 (twice, builds 6e4680102 and 4d89b258d), but passes 22/22 when run alone through box-gate-runner.sh on plain upstream/master and on the failed build. Our branches do not touch Git workspace expiration. Added 2026-10-16 (upstream 9f4a956b9).
+|@paperclipai/server| src/__tests__/git-workspace-expiration.test.ts > reconstructable Git expiration > expires again after a reopened task consumes its fence and finishes
