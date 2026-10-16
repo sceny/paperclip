@@ -60,6 +60,14 @@ and removes them when the final reply arrives. The pinned Slack SDK encodes a
 linear DM with an empty thread timestamp; receipt transport accepts that address
 while still validating the channel and the source message timestamp.
 
+For an agent with two linked Slack endpoints, compare assignment preparation and
+tool discovery in the run trace. Endpoint checks may overlap in pairs. Confirm
+that both permitted tool sets remain available, then revoke one linked identity
+and confirm that the next preparation excludes it. The
+[database regression](../../server/src/__tests__/slack-tool-preparation.test.ts)
+uses real PostgreSQL with one connection and controlled credential resolution;
+it does not prove live provider latency or an end-to-end response target.
+
 ### `endpoint-management`
 
 Automated: [channel integration](../../server/src/__tests__/chat-channels.integration.test.ts) covers shared endpoint/delivery behavior; live credential repair and provider ownership remain manual checks.

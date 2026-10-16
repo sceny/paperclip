@@ -13372,203 +13372,215 @@ export function createRemoteNativeArtifactPreparation(input: {
         return false;
       }
     };
-    let runnerArtifactPrepared = false;
-    if (
-      input.reuseRetainedRunner === true &&
-      existsSync(controllerRunnerBinary)
-    ) {
-      runnerArtifactPrepared = await measureNativeRunnerSpan(
-        input.trace,
-        "runner.artifact.verify_retained",
-        () => matchesControllerRunnerArtifact(remoteBinary),
-      );
-    }
-    const explicitRemoteBinary = input.runnerRemoteBinaryPath?.trim() || null;
-    if (!runnerArtifactPrepared && mayUsePreinstalledRunnerArtifact(explicitRemoteBinary)) {
-      const preinstalledRunner = await measureNativeRunnerSpan(
-        input.trace,
-        "runner.artifact.discover",
-        () => discoverPreinstalledExecutable("paperclip-runnerd"),
-      );
-      if (preinstalledRunner) {
-        try {
-          await measureNativeRunnerSpan(
-            input.trace,
-            "runner.artifact.verify_preinstalled",
-            () => verifyRemoteRunner(requiredMode, preinstalledRunner),
-          );
-          if (existsSync(controllerRunnerBinary) &&
-              !await matchesControllerRunnerArtifact(preinstalledRunner)) {
-            throw new Error("runner_remote_preinstalled_artifact_mismatch");
+    const prepareRunner = async () => {
+      let runnerArtifactPrepared = false;
+      if (
+        input.reuseRetainedRunner === true &&
+        existsSync(controllerRunnerBinary)
+      ) {
+        runnerArtifactPrepared = await measureNativeRunnerSpan(
+          input.trace,
+          "runner.artifact.verify_retained",
+          () => matchesControllerRunnerArtifact(remoteBinary),
+        );
+      }
+      const explicitRemoteBinary = input.runnerRemoteBinaryPath?.trim() || null;
+      if (!runnerArtifactPrepared && mayUsePreinstalledRunnerArtifact(explicitRemoteBinary)) {
+        const preinstalledRunner = await measureNativeRunnerSpan(
+          input.trace,
+          "runner.artifact.discover",
+          () => discoverPreinstalledExecutable("paperclip-runnerd"),
+        );
+        if (preinstalledRunner) {
+          try {
+            await measureNativeRunnerSpan(
+              input.trace,
+              "runner.artifact.verify_preinstalled",
+              () => verifyRemoteRunner(requiredMode, preinstalledRunner),
+            );
+            if (existsSync(controllerRunnerBinary) &&
+                !await matchesControllerRunnerArtifact(preinstalledRunner)) {
+              throw new Error("runner_remote_preinstalled_artifact_mismatch");
+            }
+            await measureNativeRunnerSpan(
+              input.trace,
+              "runner.artifact.link",
+              () => linkPreinstalledExecutable(preinstalledRunner, remoteBinary),
+            );
+            runnerArtifactPrepared = true;
+            await input.onLog?.(
+              "stderr",
+              "[paperclip-runner] using preinstalled runnerd from the sandbox image\n",
+            );
+          } catch {
+            runnerArtifactPrepared = false;
           }
-          await measureNativeRunnerSpan(
-            input.trace,
-            "runner.artifact.link",
-            () => linkPreinstalledExecutable(preinstalledRunner, remoteBinary),
-          );
-          runnerArtifactPrepared = true;
-          await input.onLog?.(
-            "stderr",
-            "[paperclip-runner] using preinstalled runnerd from the sandbox image\n",
-          );
-        } catch {
-          runnerArtifactPrepared = false;
         }
       }
-    }
-    if (!runnerArtifactPrepared) {
-      const sourceBinary = controllerRunnerBinary;
-      if (!existsSync(sourceBinary)) {
-        throw new Error("runner_remote_artifact_unavailable");
-      }
-      if (!explicitRemoteBinary && !input.targetPlatformArtifactVerified) {
-        const platform = await remoteCommandRunner.execute({
-          command: "sh",
-          args: ["-c", "uname -s; uname -m"],
-          cwd: remoteTarget.remoteCwd,
-          bypassSession: true,
-          timeoutMs: 10_000,
+      if (!runnerArtifactPrepared) {
+        const sourceBinary = controllerRunnerBinary;
+        if (!existsSync(sourceBinary)) {
+          throw new Error("runner_remote_artifact_unavailable");
+        }
+        if (!explicitRemoteBinary && !input.targetPlatformArtifactVerified) {
+          const platform = await remoteCommandRunner.execute({
+            command: "sh",
+            args: ["-c", "uname -s; uname -m"],
+            cwd: remoteTarget.remoteCwd,
+            bypassSession: true,
+            timeoutMs: 10_000,
+          });
+          const [remoteOs = "", remoteArch = ""] = platform.stdout
+            .trim()
+            .split(/\r?\n/);
+          const localOs =
+            process.platform === "darwin"
+              ? "Darwin"
+              : process.platform === "linux"
+                ? "Linux"
+                : process.platform;
+          const localArch =
+            process.arch === "x64"
+              ? "x86_64"
+              : process.arch === "arm64"
+                ? "aarch64"
+                : process.arch;
+          const archMatches =
+            remoteArch === localArch ||
+            (localArch === "aarch64" && remoteArch === "arm64");
+          if (
+            platform.exitCode !== 0 ||
+            platform.timedOut ||
+            remoteOs !== localOs ||
+            !archMatches
+          ) {
+            throw new Error(
+              "runner_remote_artifact_platform_mismatch: configure PAPERCLIP_RUNNER_REMOTE_BINARY_PATH for the remote OS and architecture",
+            );
+          }
+        }
+        await stageRemoteRunnerFile({
+          target: remoteTarget,
+          runner: remoteCommandRunner,
+          sourcePath: sourceBinary,
+          targetPath: remoteBinary,
+          mode: 0o700,
         });
-        const [remoteOs = "", remoteArch = ""] = platform.stdout
-          .trim()
-          .split(/\r?\n/);
-        const localOs =
-          process.platform === "darwin"
-            ? "Darwin"
-            : process.platform === "linux"
-              ? "Linux"
-              : process.platform;
-        const localArch =
-          process.arch === "x64"
-            ? "x86_64"
-            : process.arch === "arm64"
-              ? "aarch64"
-              : process.arch;
-        const archMatches =
-          remoteArch === localArch ||
-          (localArch === "aarch64" && remoteArch === "arm64");
-        if (
-          platform.exitCode !== 0 ||
-          platform.timedOut ||
-          remoteOs !== localOs ||
-          !archMatches
-        ) {
+      }
+      await measureNativeRunnerSpan(input.trace, "runner.artifact.verify", () =>
+        verifyRemoteRunner(requiredMode),
+      );
+    };
+    const prepareHarness = async () => {
+      if (remoteCodexBinary && explicitRemoteCodex) {
+        if (!existsSync(explicitRemoteCodex)) {
+          throw new Error("runner_remote_codex_artifact_unavailable");
+        }
+        await stageRemoteRunnerFile({
+          target: remoteTarget,
+          runner: remoteCommandRunner,
+          sourcePath: explicitRemoteCodex,
+          targetPath: remoteCodexBinary,
+          mode: 0o700,
+        });
+        await verifyRemoteCodex();
+      }
+      if (remoteCodexBinary && remoteCodexNpmSpec) {
+        let usedPreinstalledCodex = false;
+        const preinstalledCodex = await measureNativeRunnerSpan(
+          input.trace,
+          "harness.artifact.discover",
+          () => discoverPreinstalledExecutable("codex"),
+        );
+        if (preinstalledCodex) {
+          try {
+            await measureNativeRunnerSpan(
+              input.trace,
+              "harness.artifact.verify_preinstalled",
+              () => verifyRemoteCodex(preinstalledCodex),
+            );
+            await measureNativeRunnerSpan(
+              input.trace,
+              "harness.artifact.link",
+              () =>
+                linkPreinstalledExecutable(preinstalledCodex, remoteCodexBinary),
+            );
+            usedPreinstalledCodex = true;
+            await input.onLog?.(
+              "stderr",
+              "[paperclip-runner] using preinstalled Codex from the sandbox image\n",
+            );
+          } catch {
+            usedPreinstalledCodex = false;
+          }
+        }
+        if (!usedPreinstalledCodex) {
+          const installRoot = posix.join(
+            remoteRuntimeRoot!,
+            "harnesses",
+            "codex",
+          );
+          const installResult = await remoteCommandRunner.execute({
+            command: "npm",
+            args: [
+              "install",
+              "--prefix",
+              installRoot,
+              "--no-audit",
+              "--no-fund",
+              remoteCodexNpmSpec,
+            ],
+            cwd: remoteTarget.remoteCwd,
+            bypassSession: true,
+            timeoutMs: 180_000,
+          });
+          if (installResult.exitCode !== 0 || installResult.timedOut) {
+            throw new Error("runner_remote_codex_install_failed");
+          }
+        }
+        await measureNativeRunnerSpan(
+          input.trace,
+          "harness.artifact.verify",
+          () => verifyRemoteCodex(),
+        );
+      }
+      if (remoteCodexBinary && !explicitRemoteCodex && !remoteCodexNpmSpec) {
+        const preinstalledCodex = await measureNativeRunnerSpan(
+          input.trace,
+          "harness.artifact.discover",
+          () => discoverPreinstalledExecutable("codex"),
+        );
+        if (!preinstalledCodex) {
           throw new Error(
-            "runner_remote_artifact_platform_mismatch: configure PAPERCLIP_RUNNER_REMOTE_BINARY_PATH for the remote OS and architecture",
+            "runner_remote_codex_artifact_unavailable: install codex in the sandbox image or configure PAPERCLIP_RUNNER_REMOTE_CODEX_NPM_SPEC",
           );
         }
-      }
-      await stageRemoteRunnerFile({
-        target: remoteTarget,
-        runner: remoteCommandRunner,
-        sourcePath: sourceBinary,
-        targetPath: remoteBinary,
-        mode: 0o700,
-      });
-    }
-    await measureNativeRunnerSpan(input.trace, "runner.artifact.verify", () =>
-      verifyRemoteRunner(requiredMode),
-    );
-    if (remoteCodexBinary && explicitRemoteCodex) {
-      if (!existsSync(explicitRemoteCodex)) {
-        throw new Error("runner_remote_codex_artifact_unavailable");
-      }
-      await stageRemoteRunnerFile({
-        target: remoteTarget,
-        runner: remoteCommandRunner,
-        sourcePath: explicitRemoteCodex,
-        targetPath: remoteCodexBinary,
-        mode: 0o700,
-      });
-      await verifyRemoteCodex();
-    }
-    if (remoteCodexBinary && remoteCodexNpmSpec) {
-      let usedPreinstalledCodex = false;
-      const preinstalledCodex = await measureNativeRunnerSpan(
-        input.trace,
-        "harness.artifact.discover",
-        () => discoverPreinstalledExecutable("codex"),
-      );
-      if (preinstalledCodex) {
-        try {
-          await measureNativeRunnerSpan(
-            input.trace,
-            "harness.artifact.verify_preinstalled",
-            () => verifyRemoteCodex(preinstalledCodex),
-          );
-          await measureNativeRunnerSpan(
-            input.trace,
-            "harness.artifact.link",
-            () =>
-              linkPreinstalledExecutable(preinstalledCodex, remoteCodexBinary),
-          );
-          usedPreinstalledCodex = true;
-          await input.onLog?.(
-            "stderr",
-            "[paperclip-runner] using preinstalled Codex from the sandbox image\n",
-          );
-        } catch {
-          usedPreinstalledCodex = false;
-        }
-      }
-      if (!usedPreinstalledCodex) {
-        const installRoot = posix.join(
-          remoteRuntimeRoot!,
-          "harnesses",
-          "codex",
+        await measureNativeRunnerSpan(
+          input.trace,
+          "harness.artifact.verify_preinstalled",
+          () => verifyRemoteCodex(preinstalledCodex),
         );
-        const installResult = await remoteCommandRunner.execute({
-          command: "npm",
-          args: [
-            "install",
-            "--prefix",
-            installRoot,
-            "--no-audit",
-            "--no-fund",
-            remoteCodexNpmSpec,
-          ],
-          cwd: remoteTarget.remoteCwd,
-          bypassSession: true,
-          timeoutMs: 180_000,
-        });
-        if (installResult.exitCode !== 0 || installResult.timedOut) {
-          throw new Error("runner_remote_codex_install_failed");
-        }
-      }
-      await measureNativeRunnerSpan(
-        input.trace,
-        "harness.artifact.verify",
-        () => verifyRemoteCodex(),
-      );
-    }
-    if (remoteCodexBinary && !explicitRemoteCodex && !remoteCodexNpmSpec) {
-      const preinstalledCodex = await measureNativeRunnerSpan(
-        input.trace,
-        "harness.artifact.discover",
-        () => discoverPreinstalledExecutable("codex"),
-      );
-      if (!preinstalledCodex) {
-        throw new Error(
-          "runner_remote_codex_artifact_unavailable: install codex in the sandbox image or configure PAPERCLIP_RUNNER_REMOTE_CODEX_NPM_SPEC",
+        await measureNativeRunnerSpan(input.trace, "harness.artifact.link", () =>
+          linkPreinstalledExecutable(preinstalledCodex, remoteCodexBinary),
+        );
+        await measureNativeRunnerSpan(
+          input.trace,
+          "harness.artifact.verify",
+          () => verifyRemoteCodex(),
+        );
+        await input.onLog?.(
+          "stderr",
+          "[paperclip-runner] using preinstalled Codex from the sandbox image\n",
         );
       }
-      await measureNativeRunnerSpan(
-        input.trace,
-        "harness.artifact.verify_preinstalled",
-        () => verifyRemoteCodex(preinstalledCodex),
-      );
-      await measureNativeRunnerSpan(input.trace, "harness.artifact.link", () =>
-        linkPreinstalledExecutable(preinstalledCodex, remoteCodexBinary),
-      );
-      await measureNativeRunnerSpan(
-        input.trace,
-        "harness.artifact.verify",
-        () => verifyRemoteCodex(),
-      );
-      await input.onLog?.(
-        "stderr",
-        "[paperclip-runner] using preinstalled Codex from the sandbox image\n",
-      );
+    };
+    if (remoteCommandRunner.allowConcurrentSyncOperations === true &&
+        remoteCodexBinary && !explicitRemoteCodex && !remoteCodexNpmSpec) {
+      const settled = await Promise.allSettled([prepareRunner(), prepareHarness()]);
+      for (const result of settled) if (result.status === "rejected") throw result.reason;
+    } else {
+      await prepareRunner();
+      await prepareHarness();
     }
   };
   return { prepare, verifyRemoteRunner, verifyRemoteCodex };

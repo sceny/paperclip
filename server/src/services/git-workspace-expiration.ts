@@ -5,8 +5,10 @@ import { executionWorkspaces, issues, heartbeatRuns, nativeRunFinalizations, env
   workspaceRuntimeServices, issueRecoveryActions, projectWorkspaces, withDedicatedDbConnection, type Db } from "@paperclipai/db";
 import { createGitRemoteAuthProvider } from "./git-credentials.js";
 import { withIsolatedRepositorySourceLock, verifiedRecordedIsolatedRemoteSource } from "./isolated-remote-workspace-source.js";
-import { assertReproducibleGitFiles, assertReproducibleBaseGitStorage, inspectGitCacheRecipe, readGitCacheRestoration,
-  verifyRemoteGitCommit, gitCacheCommand, readGitCacheExpiration, finishGitCacheTrash, type GitCacheExpiration, GIT_CACHE_RESTORATION_KEY, GIT_CACHE_EXPIRATION_REASON } from "./git-workspace-restoration.js";
+import { managedProjectCheckoutName } from "./managed-project-checkout-name.js";
+import type { GitRemoteAuthProvider } from "./git-credentials.js";
+import { assertReproducibleGitFiles, assertReproducibleBaseGitStorage, assertReproducibleManagedCheckout, inspectGitCacheRecipe, readGitCacheRestoration,
+  verifyRemoteGitCommit, type ManagedCheckoutProver, gitCacheCommand, readGitCacheExpiration, finishGitCacheTrash, type GitCacheExpiration, GIT_CACHE_RESTORATION_KEY, GIT_CACHE_EXPIRATION_REASON } from "./git-workspace-restoration.js";
 
 
 async function allocatedBytes(target: string, shouldContinue: () => boolean): Promise<number> {
@@ -122,6 +124,26 @@ async function inspectBase(db: Db, workspace: Workspace, signal?: AbortSignal, a
   return allocatedBytes(recipe.sourcePath, () => { signal?.throwIfAborted(); return true; });
 }
 
+/**
+ * Accepts a managed project checkout only when its name maps back to one of
+ * the workspace's project repositories (workspace preparation re-clones it
+ * from that row on the next run) and the checkout is proven reproducible
+ * against that row's repository URL.
+ */
+function managedCheckoutProver(db: Db, workspace: Workspace, auth: GitRemoteAuthProvider): ManagedCheckoutProver {
+  let rows: Promise<Array<{ id: string; repoUrl: string | null; repoRef: string | null; cwd: string | null }>> | undefined;
+  return async (checkoutPath, name, signal) => {
+    if (!workspace.projectId) throw new Error("unknown_managed_checkout");
+    rows ??= db.select({ id: projectWorkspaces.id, repoUrl: projectWorkspaces.repoUrl, repoRef: projectWorkspaces.repoRef,
+      cwd: projectWorkspaces.cwd }).from(projectWorkspaces)
+      .where(and(eq(projectWorkspaces.companyId, workspace.companyId), eq(projectWorkspaces.projectId, workspace.projectId)));
+    const source = (await rows).find(row => row.repoUrl
+      && managedProjectCheckoutName({ id: row.id, repoUrl: row.repoUrl, repoRef: row.repoRef, cwd: row.cwd }) === name);
+    if (!source?.repoUrl) throw new Error("unknown_managed_checkout");
+    await assertReproducibleManagedCheckout(checkoutPath, { repoUrl: source.repoUrl, resolveGitAuth: auth, signal });
+  };
+}
+
 export async function expireReconstructableGitWorkspace(db: Db, snapshot: Workspace, options: {
   dryRun: boolean; expireBase: boolean; now: Date; signal?: AbortSignal;
   beforeDelete?: (workspace: Workspace) => Promise<void>;
@@ -141,8 +163,10 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
         // A restored active workspace starts a new expiration cycle and records its new HEAD.
         if (!hasPendingGitExpiration(workspace) && !["active", "idle", "in_review"].includes(workspace.status)) throw new Error("not_expirable");
         if (["active", "idle", "in_review"].includes(workspace.status)) state = null;
+        const auth = createGitRemoteAuthProvider(db, workspace.companyId, { issueId: workspace.sourceIssueId! });
+        const proveManagedCheckout = managedCheckoutProver(db, workspace, auth);
         let recipe = state ? readGitCacheRestoration(workspace)! : await inspectGitCacheRecipe(workspace,
-          createGitRemoteAuthProvider(db, workspace.companyId, { issueId: workspace.sourceIssueId! }), options.signal);
+          auth, options.signal, { proveManagedCheckout });
         const present = await exists(recipe.worktreePath);
         if (!state && !present) throw new Error("missing_unverified_worktree");
         result.candidate = true;
@@ -185,7 +209,7 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
           const { acquireGitWorktreeCleanupLock } = await import("./workspace-runtime.js");
           const lock = await acquireGitWorktreeCleanupLock(recipe.worktreePath);
           try {
-            await assertReproducibleGitFiles(recipe.worktreePath, options.signal);
+            await assertReproducibleGitFiles(recipe.worktreePath, options.signal, { proveManagedCheckout });
             if ((await gitCacheCommand(recipe.worktreePath, ["rev-parse", "HEAD"], options.signal)).trim() !== recipe.commit) throw new Error("head_changed");
             await fs.rename(recipe.worktreePath, state.worktreeTrash);
             await finishGitCacheTrash(workspace);

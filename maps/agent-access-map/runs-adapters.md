@@ -96,6 +96,15 @@ or Legacy CLI check cannot replace that runtime evidence. Missing dependencies,
 credentials, invalid models and incompatible settings fail without silently
 changing runners. Account login remains board/owner-bound.
 
+Scoped artifact-preparation source evidence: [native preparation](../../server/src/services/native-runtime/native-session-executor.ts)
+can overlap runner and default image-harness work only when the selected command
+runner declares concurrent sync support. Current executable hash, metadata,
+transport, and final-path checks still precede dispatch. The caller waits for
+both operations on failure. Explicit harness uploads and npm installs remain
+serial. This changes no API or agent grant. The
+[real-shell controls](../../server/src/services/native-runtime/native-artifact-preparation.test.ts)
+do not qualify the whole validation capability or a live response-time target.
+
 For a linked Codex subscription with server-resolved managed credential provenance,
 setup checks the resolved owner and stages a private probe copy before local or
 remote isolation. Without a selected API key, an unbound linked `CODEX_HOME` is

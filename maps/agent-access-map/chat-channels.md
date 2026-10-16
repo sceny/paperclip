@@ -129,6 +129,15 @@ The pinned SDK transport regression is covered in
 [receipt tests](../../server/src/services/chat-slack-receipts.test.ts); live
 acknowledgement speed needs a separate provider test.
 
+Slack assignment and tool discovery bound concurrent endpoint preparation to
+two. Every endpoint keeps the live task, company, agent and linked-user checks;
+403 denials omit only that endpoint. Preparation waits for both active checks
+before it returns an ordered result or propagates an error. Tool authority reads
+the current bot token without resolving unrelated webhook credentials. See the
+[real-database preparation controls](../../server/src/__tests__/slack-tool-preparation.test.ts)
+and [batch failure controls](../../server/src/services/connectors/slack-endpoint-preparation.test.ts).
+These local controls do not establish live Slack latency or provider access.
+
 New conversations resolve typed project/workspace defaults from their endpoint
 and destination under the task-creation transaction. Defaults do not authorize
 private sources: admission checks the linked user's authority and assigned agent.

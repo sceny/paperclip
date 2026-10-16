@@ -1,4 +1,5 @@
 import type { EndpointRow, DbOrTransaction } from "../runtime-types.js";
+import type { createChatCredentials } from "../credentials.js";
 
 import { slackSearchActionToken } from "../../connectors/slack-search-context.js";
 import { slackAuthorizationRevision } from "../../connectors/slack-revision.js";
@@ -45,7 +46,7 @@ type SlackTaskAuthorityRegistrationOptions = {
     endpoint: EndpointRow;
     conversation: typeof chatConversations.$inferSelect;
   }>;
-  resolveCredentials: (endpoint: EndpointRow) => Promise<Record<string, string>>;
+  resolveCredentials: ReturnType<typeof createChatCredentials>["resolveCredentials"];
 };
 
 export function createSlackTaskAuthorityRegistration(db: Db, options: SlackTaskAuthorityRegistrationOptions) {
@@ -136,7 +137,7 @@ export function createSlackTaskAuthorityRegistration(db: Db, options: SlackTaskA
       if (!principal) throw forbidden("Slack sender is no longer available");
       return { ...source, principalId: principal.id, slackUserId: principal.externalId };
     });
-    const credentials = await measureRunPhase("connectors.slack.credentials", () => resolveCredentials(resolved.endpoint));
+    const credentials = await measureRunPhase("connectors.slack.credentials", () => resolveCredentials(resolved.endpoint, db, ["botToken"]));
     if (!credentials.botToken) throw forbidden("Slack bot credential is unavailable");
     return {
       endpoint: resolved.endpoint, issueId: binding.issueId, conversation: resolved.conversation,

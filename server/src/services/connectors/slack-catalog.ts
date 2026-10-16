@@ -1,3 +1,4 @@
+import { prepareSlackEndpoints } from "./slack-endpoint-preparation.js";
 import { createHash } from "node:crypto";
 import { measureRunPhase } from "../execution-preparation-timing.js";
 import { and, eq, isNull, sql } from "drizzle-orm";
@@ -271,12 +272,9 @@ export async function slackToolsForSession(
   session: Parameters<typeof slackToolsForEndpoint>[1],
 ): Promise<ToolGatewayDescriptor[]> {
   if (!session.agentId || !session.runId || !session.issueId) return [];
-  const tools: ToolGatewayDescriptor[] = [];
-  for (const endpoint of await slackEndpointCandidates(db, {
+  const endpoints = await slackEndpointCandidates(db, {
     companyId: session.companyId,
     agentId: session.agentId,
-  })) {
-    tools.push(...(await slackToolsForEndpoint(db, session, endpoint.id)));
-  }
-  return tools;
+  });
+  return prepareSlackEndpoints(endpoints, endpoint => slackToolsForEndpoint(db, session, endpoint.id));
 }

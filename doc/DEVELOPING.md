@@ -1874,6 +1874,14 @@ versions across directories. With these artifacts preinstalled, startup links
 and verifies them without uploading a binary or installing packages. Deploy
 the updated sandbox image with the matching runner qualification changes.
 
+When the provider allows concurrent sync operations, native startup prepares the
+runner and the default image Codex harness together, with at most two operations
+in flight. It still verifies the runner contract, selected transport, executable
+hash, and final launch paths. Both preparations must settle before startup can
+return a failure. Providers without this capability, explicit harness uploads,
+and npm installs keep the serial path. See the
+[native artifact controls](../server/src/services/native-runtime/native-artifact-preparation.test.ts).
+
 ### Remote GitHub launcher staging
 
 Managed GitHub launchers stage their nine text files in one bounded control
@@ -2592,8 +2600,20 @@ Before deletion the worker fetches the exact commit into a fresh object store
 using the company's normal Git identity and commits a versioned restoration
 recipe to workspace metadata. Current runs, previews, pending reopening,
 unresolved recovery, dirty/untracked files, unknown ignored files, unproven
-ownership, and unsupported or unique Git state prevent deletion. Only the
-existing repository-ignored regenerable-output allowlist can be discarded.
+ownership, and unsupported or unique Git state prevent deletion. Ignored files
+can be discarded only when they are repository-ignored regenerable output,
+Paperclip's `.claude/settings.local.json` (rewritten on every Claude run), or a
+managed project checkout under `.paperclip-repositories/<repo>-<hash>` that the
+next run re-clones. A checkout qualifies only when its name maps back to one of
+the project's repositories and it passes the same checks as the worktree
+(clean tree, no hidden index flags, allowed local config, no in-progress
+state), stock Git storage (no custom hooks), no linked worktrees, no
+unreachable objects, and every commit reachable from its refs or reflogs is
+reachable from a current upstream branch or tag, read fresh from the project
+repository's URL with the company's Git identity. Task repositories
+(`task-repo-*`) always prevent deletion. Inspection runs Git with
+`core.fsmonitor` disabled, so a repository's local config cannot make it run a
+command.
 Deletion first renames the worktree to recorded trash; restart and reopening
 finish that cleanup under the same source/lifecycle locks.
 

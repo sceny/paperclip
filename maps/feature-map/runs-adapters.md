@@ -66,7 +66,13 @@ recipe first. Discovery/creation read company-bound immutable-image evidence
 without allocating a target. A mutable image or snapshot name does not establish
 native compatibility. Then test the actual selected runtime with its selected
 account/model: a legacy CLI or authentication probe alone cannot establish native
-readiness. Missing dependencies, failed authentication, invalid models and
+readiness. For an image-provided Codex harness, verify both final executables
+after concurrent artifact preparation on an eligible provider. Repeat with a
+failed runner probe and confirm the harness work has settled before failure
+returns. Providers without concurrent sync and explicit harness installs remain
+serial. The [real-shell artifact controls](../../server/src/services/native-runtime/native-artifact-preparation.test.ts)
+cover these source contracts; they do not establish live reply latency.
+Missing dependencies, failed authentication, invalid models and
 incompatible custom settings must remain actionable errors without silent runner
 switching. Saved unchanged execution can still be tested without applying new
 selection policy, but runtime/account validation must still run.
