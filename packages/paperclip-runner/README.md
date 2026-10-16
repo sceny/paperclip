@@ -785,3 +785,58 @@ The external provider history must still exist to resume a session after a remot
 machine is replaced. Missing history fails recovery rather than importing an
 isolated home. OpenCode and the remaining ACPX profiles require separate
 qualification before this mode can be enabled for them.
+
+## Assigned local MCP servers
+
+An execution host can assign local stdio MCP servers alongside the existing
+`PAPERCLIP_NATIVE_MCP_NAME` / `URL` / `TOKEN` HTTP gateway. This is general transport
+support for local MCP implementations that satisfy the executable-verification
+and private Unix socket requirements below. Runner uses each server's own tool
+schemas and responses. Set
+`PAPERCLIP_NATIVE_MCP_STDIO` to a JSON array of bindings with these fields:
+
+```json
+[{"name":"local_tools","command":"/opt/local-tools/bin/mcp-server","args":[],"env":{"HOME":"/home/agent"},"sha256":"sha256:<64 lowercase hex digits>","serialResource":"/home/agent/.local/state/local-tools/runtime/service.sock"}]
+```
+
+`serialResource` identifies the shared resource for cross-process call locking;
+the MCP transport itself uses stdio. It must name an existing private Unix socket
+with the ownership and path requirements below.
+
+Set `PAPERCLIP_NATIVE_MCP_PROXY` to the assigned Runner executable. These are
+execution-host inputs, excluded from configurable task environment and provider
+shell inheritance. Names use letters, digits, underscores or hyphens and cannot
+replace the internal task server or gateway. Commands are verified against their
+assigned digest before execution. The backend receives only its assigned environment.
+
+Runner supplies these session-local bindings to native Codex and through the
+shared ACPX runtime. ACPX clients must support stdio MCP assignments.
+User or project MCP files are never rewritten. Read-only sessions omit these
+bindings. Host assignment authorizes native Codex to use these local tools without
+a new per-call prompt, matching execution-host utilities available through shell.
+ACPX adapters use the existing ACPX permission policy. Explicit native Codex tool
+deny/prompt rules remain effective; requested approvals use the existing PRP
+permission request, bound to the active thread and turn. Only one-time accept, decline or cancel
+decisions are accepted. Shell escalation stays disabled.
+Preconfigured Claude remains unattended and rejects approval requests.
+
+The relay forwards tool schemas and native MCP content. For native Codex
+0.160/0.162, image-bearing results put structured metadata in a text block instead of
+`structuredContent`, because those clients otherwise discard the image blocks.
+ACPX adapters receive the original response unchanged. Tool schemas and actions
+are forwarded without provider-specific translation.
+
+Provider-client smoke tests exercised native Codex 0.160.0 and Claude SDK
+0.3.286 with local MCP servers and loopback model APIs. This records the clients
+used to verify image delivery and approvals; it is not an exhaustive adapter
+compatibility test.
+
+All `tools/call` requests for the same private Unix socket are serialized across
+sessions and processes, including reads. Metadata requests stay responsive.
+Cancelling a queued request prevents dispatch. An active request retains its fence
+until the backend acknowledges it; client cancellation cannot prove daemon work
+stopped. If a relay exits with an unacknowledged call, later calls fail closed until
+the host restarts that resource with a new socket. Do not remove its lock marker
+while daemon work might still be running. The socket and its parent must be private,
+canonical paths owned by the same account. Local stdio assignment requires Unix;
+other platforms retain the HTTP path.

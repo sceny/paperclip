@@ -970,7 +970,12 @@ export function bridgedAcpxPermissionParams(
 
 function acpxPermissionRequestParams(request: Record<string, unknown>, threadId: string, turnId: string): Record<string, unknown> | null {
   if (request.type !== "permission" || request.requestKind !== "permission_approval"
-    || record(request.origin).method !== "session/request_permission") return null;
+    || !["session/request_permission", "mcpServer/elicitation/request"].includes(String(record(request.origin).method))) return null;
+  if (record(request.origin).method === "mcpServer/elicitation/request") {
+    const details = record(request.details);
+    return { threadId, turnId, message: request.prompt, choices: request.choices,
+      serverName: details.serverName, mode: details.mode, _meta: details._meta, requestedSchema: details.requestedSchema, origin: request.origin };
+  }
   const toolCallId = record(request.details).toolCallId;
   // Match the permission adapter's 240-character bound. Never truncate, trim,
   // hash, or substitute itemId: any of those would change the correlation key.
@@ -3251,6 +3256,8 @@ function withRunnerdProviderTrace(
   for (const key of [
     "PAPERCLIP_PROVIDER_TRACE_PATH",
     "PAPERCLIP_PROVIDER_TRACE_MAX_BYTES",
+    "PAPERCLIP_NATIVE_MCP_STDIO",
+    "PAPERCLIP_NATIVE_MCP_PROXY",
   ] as const) {
     const value = source?.[key];
     if (value !== undefined) result[key] = value;
@@ -4221,6 +4228,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       throw new Error(
         `PRP runtime request ${input.requestId} is no longer pending`,
       );
+    if (input.turnId !== this.#turnId) throw new Error("native_runner_runtime_response_stale_turn");
     if (!pending.permission && !("response" in input.resolution) && input.resolution.action !== "cancel" && input.resolution.action !== "decline") {
       throw new Error(
         "runnerd-native runtime requests require a canonical question response",
@@ -6440,7 +6448,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         const origin = record(normalizedRequest.origin);
         const method = typeof origin.method === "string" ? origin.method : "";
         const permission = normalizedRequest.type === "permission" && normalizedRequest.requestKind === "permission_approval"
-          && method === "session/request_permission";
+          && ["session/request_permission", "mcpServer/elicitation/request"].includes(method);
         const params = permission ? bridgedAcpxPermissionParams(
           event,
           this.#threadId,

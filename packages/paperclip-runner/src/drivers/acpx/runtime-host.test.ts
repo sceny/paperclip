@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createPiLaunchSpec } from "./pi-acp-runtime.js";
 import { createCopilotToolEvidence } from "./copilot-tool-evidence.js";
@@ -336,6 +337,28 @@ describe("ACPX runtime host", () => {
       expect(servers[1]).toEqual({ name: "paperclip-assigned", url: "http://127.0.0.1:3211/mcp/gateway",
         bearerToken: "fixture-gateway-token-".repeat(3), runnerOwned: true });
     } finally { await host.close({ reason: "gateway test complete" }); }
+  });
+
+  it.each([false, true])("keeps stdio registration session-local and omits it for readOnly=%s", async readOnly => {
+    const fixture = await hostFixture();
+    const command = join(fixture.root, "desktop-server");
+    await writeFile(command, "#!/bin/sh\nexit 0\n", { mode: 0o555 });
+    const binding = { name: "desktop", command: await realpath(command), args: ["mcp"], env: { HOME: fixture.root },
+      sha256: `sha256:${createHash("sha256").update(await readFile(command)).digest("hex")}`,
+      serialResource: join(fixture.root, "cua.sock") };
+    let servers: AcpxRuntimePortOpenOptions["mcpServers"] = [];
+    const host = await AcpxRuntimeHost.open({ ...fixture.options, agent: "claude", model: "claude-sonnet-5",
+      permissionMode: "approve-reads", providerPolicy: { readOnly },
+      environment: { ...fixture.options.environment, PAPERCLIP_NATIVE_MCP_STDIO: JSON.stringify([binding]), PAPERCLIP_NATIVE_MCP_PROXY: "/verified/runnerd" },
+    }, fixture.dependencies({ openRuntime: async options => {
+      servers = options.mcpServers;
+      return runtimePort({ getStatus: async () => ({ models: { currentModelId: "claude-sonnet-5" } }) });
+    } }));
+    try {
+      const desktop = servers.find(server => server.name === "desktop");
+      if (readOnly) expect(desktop).toBeUndefined();
+      else expect(desktop).toMatchObject({ name: "desktop", command: "/verified/runnerd", runnerOwned: false, env: {} });
+    } finally { await host.close({ reason: "stdio policy verified" }); }
   });
 
   it.each([

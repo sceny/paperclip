@@ -236,7 +236,7 @@ async function handleServerRequestBody(
       };
     }
 
-    const requestKind = runtimeRequestKind(request.method);
+    const requestKind = runtimeRequestKind(request.method, request.params);
     if (requestKind === null) return safeRequestResponse(request.method);
     const requestTurnId = text(request.params.turnId);
     if (

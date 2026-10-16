@@ -368,7 +368,10 @@ export async function openQualifiedAcpxRuntime(
         ? [...options.permissionPolicy.escalate]
         : undefined,
     },
-    mcpServers: options.mcpServers.map((server) => ({
+    mcpServers: options.mcpServers.map((server) => "command" in server ? {
+      name: server.name, command: server.command, args: server.args,
+      env: Object.entries(server.env).map(([name, value]) => ({ name, value })),
+    } : ({
       type: "http" as const,
       name: server.name,
       url: server.url,
@@ -443,7 +446,7 @@ export async function openQualifiedAcpxRuntime(
             // This URL comes from the runner-owned authenticated tool bridge,
             // never provider-supplied permission-request metadata.
             PAPERCLIP_ACPX_TASK_TOOL_BRIDGE_URL: options.mcpServers.find(
-              (server) => server.runnerOwned && server.name === "paperclip",
+              (server): server is Extract<typeof server, { url: string }> => "url" in server && server.runnerOwned && server.name === "paperclip",
             )?.url ?? "",
           }
         : {}),

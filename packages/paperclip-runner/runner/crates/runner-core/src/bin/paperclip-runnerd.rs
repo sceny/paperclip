@@ -349,6 +349,12 @@ fn run_durable(args: &[String]) -> Result<(), LocalRunnerError> {
 }
 
 fn run(args: &[String]) -> Result<(), LocalRunnerError> {
+    if args.first().map(String::as_str) == Some("--stdio-mcp")
+        && (args.len() == 2 || (args.len() == 3 && args[2] == "--content-images"))
+    {
+        return paperclip_runner_core::stdio_mcp::run_proxy(Path::new(&args[1]), args.len() == 3)
+            .map_err(|e| LocalRunnerError::invalid(e.to_string()));
+    }
     if args == ["--build-metadata"] {
         println!("{}", build_metadata());
         return Ok(());

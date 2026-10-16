@@ -9,6 +9,7 @@ import { assertAcpxProfileEnvironment, assertAcpxProfileWorkspace, classifyAcpxP
 import { createAcpxRuntimeSkillLease } from "./runtime-skill-lease.js";
 import { stageManagedGrokCredential } from "./grok-credentials.js";
 import { claudeNativeSkillPrompt } from "./native-skill-prompt.js";
+import { prepareStdioMcpBindings } from "../stdio-mcp.js";
 import { nativeMcpLaunchBinding } from "../native-mcp.js";
 
 import type {
@@ -184,12 +185,11 @@ export interface AcpxRuntimePortOpenOptions {
   retainFailedAdmissionCleanup(cleanup: Promise<void>): void;
 }
 
-export interface AcpxMcpServerBinding {
-  name: string;
-  url: string;
-  bearerToken: string;
-  runnerOwned: boolean;
-}
+export type AcpxMcpServerBinding = {
+  name: string; url: string; bearerToken: string; runnerOwned: boolean;
+} | {
+  name: string; command: string; args: string[]; env: Record<string, string>; runnerOwned: false;
+};
 
 export type AcpxSemanticToolSession = Omit<RunnerToolBridgeOptions, "secret">;
 
@@ -606,6 +606,7 @@ export class AcpxRuntimeHost {
               : { assertWorkspaceHeld: () => { options.assertWorkspaceHeld?.(); agentFiles?.assertHeld(); } }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
             mcpServers: [
+              ...(options.providerPolicy?.readOnly ? [] : prepareStdioMcpBindings(options.environment ?? {}, sandbox.root)),
               ...(toolBridge ? [{ name: preconfigured ? `paperclip_runner_${binding.profileSessionKey.slice(-16)}` : "paperclip", url: toolBridge.url,
                 bearerToken: toolBridge.secret, runnerOwned: true }] : []),
               // This is Paperclip's authenticated gateway, not a direct upstream

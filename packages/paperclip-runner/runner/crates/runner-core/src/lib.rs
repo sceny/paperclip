@@ -31,6 +31,7 @@ pub mod qualified_launch;
 pub mod question_response;
 pub mod replay;
 mod stable_identity;
+pub mod stdio_mcp;
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
