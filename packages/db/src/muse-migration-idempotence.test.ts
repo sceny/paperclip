@@ -14,6 +14,7 @@ const museMigrations = [
   { file: "0350_friendly_rhodey.sql", preview: "0345_lumpy_celestials.sql", hash: "a9373b52e02fa985bf10c15da91f6681c49d8726d94d5d68fd77e5802fd47a68" },
   { file: "0351_hard_albert_cleary.sql", preview: "0346_powerful_epoch.sql", hash: "65f4f08c6a8fed7396db491e0691e693636f48c4ca4fa63cd2057af38039861a" },
   { file: "0352_special_warbound.sql", preview: "0347_big_meggan.sql", hash: "1d2d5834fd499b60a43778d6d14b2520e3e2980258b8c0997d80cb95465f4abf" },
+  { file: "0353_skinny_gamma_corps.sql", preview: "0348_foamy_lightspeed.sql", hash: "1a379bc03d80c34815546bb9f50bf1408ccf156f4a1df2d86edb0a01acdc55c0" },
 ] as const;
 const museTables = [
   "external_agent_holds", "muse_agent_bindings", "muse_credentials", "muse_idle_receipts",
@@ -89,6 +90,12 @@ async function seedRows(sql: ReturnType<typeof postgres>, complete: boolean) {
     VALUES (${company.id}, ${binding.id}, 3, ${randomUUID()}, '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', '2026-01-01T00:00:03Z', 2, 1, 2000)`;
   await sql`INSERT INTO muse_runner_operations (company_id, assignment_id, request_id, digest, command, status, outcome)
     VALUES (${company.id}, ${assignment.id}, ${randomUUID()}, 'retained-operation', '{"retained":true}'::jsonb, 'unknown', '{"retained":true}'::jsonb)`;
+  const userId = randomUUID(), clientId = `replay-client-${randomUUID()}`;
+  await sql`INSERT INTO "user" (id, name, email, created_at, updated_at) VALUES (${userId}, 'Synthetic operator', ${`${userId}@example.test`}, now(), now())`;
+  await sql`INSERT INTO mcp_oauth_clients (id, name, redirect_uris) VALUES (${clientId}, 'Synthetic client', '["https://example.test/callback"]'::jsonb)`;
+  const [grant] = await sql`INSERT INTO mcp_oauth_grants (company_id, user_id, client_id, resource, purpose, agent_id, scopes)
+    VALUES (${company.id}, ${userId}, ${clientId}, 'https://example.test/api/muse/v1', 'agent', ${agent.id}, '["paperclip:agent","offline_access"]'::jsonb) RETURNING id`;
+  await sql`UPDATE muse_agent_bindings SET grant_id = ${grant.id} WHERE id = ${binding.id}`;
   if (complete) {
     await sql`UPDATE muse_agent_bindings SET qualification_started_at = '2026-01-01T00:00:00Z', deadline_enforced_at = '2026-01-02T00:00:00Z',
       cadence_evidence_incomplete_at = '2026-01-03T00:00:00Z', detector_removal_requested_at = '2026-01-04T00:00:00Z' WHERE id = ${binding.id}`;
@@ -98,7 +105,7 @@ async function seedRows(sql: ReturnType<typeof postgres>, complete: boolean) {
   }
   return async () => {
     const rows: Record<string, unknown[]> = {};
-    for (const table of [...museTables, "companies", "issues", "heartbeat_runs"] as const) {
+    for (const table of [...museTables, "companies", "issues", "heartbeat_runs", "mcp_oauth_grants"] as const) {
       rows[table] = Array.from(await sql.unsafe(`SELECT to_jsonb(t) AS row FROM "${table}" t WHERE ${table === "companies" ? "id" : "company_id"} = $1 ORDER BY id`, [company.id])).map(row => row.row);
     }
     return rows;

@@ -45,6 +45,18 @@ describe("delivery work coordinator", () => {
     expect(vi.getTimerCount()).toBe(0);
     expect(idleWorkSnapshot().active).toBe(0);
   });
+  it("preserves a future deadline when the clock advances between scheduling reads", async () => {
+    const s = setup(), t = task();
+    let now = Date.now();
+    const due = now + 1000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now++);
+    try {
+      await s.coordinator.register(DELIVERY_QUEUES.chatGitHubPublications, { ...t, nextRunAt: () => due }).ready;
+      expect(s.coordinator.nextWakeAt()).toBe(due);
+      expect(t.run).toHaveBeenCalledTimes(1);
+      expect(s.onError).not.toHaveBeenCalled();
+    } finally { clock.mockRestore(); }
+  });
   it("schedules maintenance without holding idle intent, and lets new work preempt it", async () => {
     const s = setup(), t = task();
     let next: number | null = Date.now() + 60_000;

@@ -2,14 +2,52 @@ import { z } from "zod";
 import { paperclipQuestionSetPayloadSchema } from "./validators/issue.js";
 
 export const MUSE_PROTOCOL_VERSION = 1 as const;
-export const MUSE_ASSET_VERSION = 1 as const;
+export const MUSE_ASSET_VERSION = 9 as const;
+export const MUSE_CLIENT_VERSION = "9" as const;
 export const MUSE_PUBLIC_ROUTES = [
   { method: "GET", path: "/api/muse/v1/assets/1/manifest.json" },
   { method: "GET", path: "/api/muse/v1/assets/1/client.py" },
   { method: "GET", path: "/api/muse/v1/assets/1/detector.sh" },
   { method: "GET", path: "/api/muse/v1/assets/1/instructions.md" },
+  { method: "GET", path: "/api/muse/v1/assets/2/manifest.json" },
+  { method: "GET", path: "/api/muse/v1/assets/2/client.py" },
+  { method: "GET", path: "/api/muse/v1/assets/2/detector.sh" },
+  { method: "GET", path: "/api/muse/v1/assets/2/instructions.md" },
+  { method: "GET", path: "/api/muse/v1/assets/3/manifest.json" },
+  { method: "GET", path: "/api/muse/v1/assets/3/client.py" },
+  { method: "GET", path: "/api/muse/v1/assets/3/detector.sh" },
+  { method: "GET", path: "/api/muse/v1/assets/3/instructions.md" },
+  { method: "GET", path: "/api/muse/v1/assets/4/manifest.json" },
+  { method: "GET", path: "/api/muse/v1/assets/4/client.py" },
+  { method: "GET", path: "/api/muse/v1/assets/4/detector.sh" },
+  { method: "GET", path: "/api/muse/v1/assets/4/instructions.md" },
+  { method: "GET", path: "/api/muse/v1/assets/5/manifest.json" },
+  { method: "GET", path: "/api/muse/v1/assets/5/client.py" },
+  { method: "GET", path: "/api/muse/v1/assets/5/detector.sh" },
+  { method: "GET", path: "/api/muse/v1/assets/5/instructions.md" },
+  { method: "GET", path: "/api/muse/v1/assets/6/manifest.json" },
+  { method: "GET", path: "/api/muse/v1/assets/6/client.py" },
+  { method: "GET", path: "/api/muse/v1/assets/6/detector.sh" },
+  { method: "GET", path: "/api/muse/v1/assets/6/instructions.md" },
+  { method: "GET", path: "/api/muse/v1/assets/7/manifest.json" },
+  { method: "GET", path: "/api/muse/v1/assets/7/client.py" },
+  { method: "GET", path: "/api/muse/v1/assets/7/detector.sh" },
+  { method: "GET", path: "/api/muse/v1/assets/7/instructions.md" },
+  { method: "GET", path: "/api/muse/v1/assets/8/manifest.json" },
+  { method: "GET", path: "/api/muse/v1/assets/8/client.py" },
+  { method: "GET", path: "/api/muse/v1/assets/8/detector.sh" },
+  { method: "GET", path: "/api/muse/v1/assets/8/instructions.md" },
+  { method: "GET", path: "/api/muse/v1/assets/9/manifest.json" },
+  { method: "GET", path: "/api/muse/v1/assets/9/client.py" },
+  { method: "GET", path: "/api/muse/v1/assets/9/detector.sh" },
+  { method: "GET", path: "/api/muse/v1/assets/9/instructions.md" },
   { method: "POST", path: "/api/muse/v1/pair" },
   { method: "POST", path: "/api/muse/v1/refresh" },
+  { method: "POST", path: "/api/muse/v1/oauth/register" },
+  { method: "GET", path: "/api/muse/v1/oauth/authorize" },
+  { method: "POST", path: "/api/muse/v1/oauth/token" },
+  { method: "POST", path: "/api/muse/v1/oauth/revoke" },
+  { method: "GET", path: "/api/muse/v1/oauth/metadata" },
   { method: "GET", path: "/api/muse/v1/signal" },
   { method: "POST", path: "/api/muse/v1/commands" },
   { method: "POST", path: "/api/muse/v1/queries" },
@@ -17,16 +55,19 @@ export const MUSE_PUBLIC_ROUTES = [
   { method: "POST", path: "/api/muse/v1/detector-cleanup" },
 ] as const;
 
-/** Machine identity is never a human actor or a Dot OAuth grant. */
-export interface AgentConnectionSubject {
+export const MUSE_RESOURCE_PATH = "/api/muse/v1" as const;
+export const MUSE_OAUTH_PATH = "/api/muse/v1/oauth" as const;
+export const MUSE_OAUTH_SCOPES = ["paperclip:agent", "offline_access"] as const;
+/** Dedicated machine identity, never a board actor or Dot grant. */
+interface MuseSubjectIdentity {
   provider: "muse";
-  companyId: string;
-  agentId: string;
-  bindingId: string;
-  generation: number;
-  authorizingUserId: string;
-  credentialId: string;
+  companyId: string; agentId: string; bindingId: string; generation: number;
+  authorizingUserId: string; credentialId: string;
 }
+export type AgentConnectionSubject = MuseSubjectIdentity & (
+  { credentialSource: "oauth"; grantId: string }
+  | { credentialSource: "legacy"; grantId?: never }
+);
 export const MUSE_MAX_BODY_BYTES = 256 * 1024;
 export const MUSE_TICKET_TTL_MS = 10 * 60_000;
 export const MUSE_ACCESS_TTL_MS = 15 * 60_000;
@@ -70,7 +111,7 @@ export const museCommandSchema = z.discriminatedUnion("command", [
   z.object({ ...operation, command: z.literal("consume_input"), nativeRequestId, inputDigest: z.string().regex(/^sha256:[a-f0-9]{64}$/), continuationReceiptId: id, continuationPersisted: z.literal(true) }).strict(),
 ]);
 export const museQuerySchema = z.discriminatedUnion("query", [
-  z.object({ ...envelope, query: z.literal("identify") }).strict(),
+  z.object({ ...envelope, query: z.literal("identify"), clientVersion: z.enum(["2", "3", "4", "5", "6", "7", "8", MUSE_CLIENT_VERSION]).optional() }).strict(),
   z.object({ ...envelope, query: z.literal("mailbox"), after: z.number().int().nonnegative().default(0) }).strict(),
   z.object({ ...envelope, query: z.literal("assignment.read"), assignmentId: id }).strict(),
   z.object({ ...envelope, query: z.literal("input.pending"), assignmentId: id, nativeRequestId }).strict(),
@@ -81,7 +122,7 @@ export const museQuerySchema = z.discriminatedUnion("query", [
   z.object({ ...envelope, query: z.literal("task.history"), issueId: id }).strict(),
   z.object({ ...envelope, query: z.literal("task.document.read"), issueId: id, key: z.string().min(1).max(100) }).strict(),
 ]);
-export const musePairSchema = z.object({ ...envelope, ticket: z.string().min(20).max(200), clientVersion: z.literal("1") }).strict();
+export const musePairSchema = z.object({ ...envelope, ticket: z.string().min(20).max(200), clientVersion: z.enum(["2", "3", "4", "5", "6", "7", "8", MUSE_CLIENT_VERSION]) }).strict();
 export const museRefreshSchema = z.object({ ...envelope, refreshToken: z.string().min(20).max(200) }).strict();
 export const museStopBoundarySchema = z.object({ bindingId: id, generation: z.number().int().positive(), assignmentId: id, runId: id,
   turnId: boundedId, assignmentRevision: z.number().int().positive(), stopNonce: id, operationBoundary: z.string().max(200).nullable() }).strict();
@@ -99,5 +140,5 @@ export type MuseStopBoundary = z.infer<typeof museStopBoundarySchema>;
 export interface MuseCredentials {
   version: 1; bindingId: string; generation: number; companyId: string; agentId: string;
   accessToken: string; accessExpiresAt: string; refreshToken: string;
-  refreshExpiresAt: string; signalToken: string; cleanupToken: string; detectorCleanupToken: string;
+  refreshExpiresAt: string; cleanupToken: string; detectorCleanupToken: string;
 }

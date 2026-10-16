@@ -4,11 +4,13 @@ import type { MuseStopBoundary } from "@paperclipai/shared";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
+import { mcpOauthGrants } from "./public_mcp.js";
 const time = (name: string) => timestamp(name, { withTimezone: true });
 
 export const museAgentBindings = pgTable("muse_agent_bindings", {
   id: uuid("id").primaryKey().defaultRandom(), companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
   agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }), operatorId: text("operator_id").notNull(),
+  grantId: uuid("grant_id").references(() => mcpOauthGrants.id, { onDelete: "set null" }),
   generation: integer("generation").notNull().default(1), revision: integer("revision").notNull().default(1),
   status: text("status").$type<"pairing" | "connected" | "ready" | "revoked">().notNull().default("pairing"),
   ticketHash: text("ticket_hash"), ticketExpiresAt: time("ticket_expires_at"), pairedAt: time("paired_at"),
@@ -18,7 +20,7 @@ export const museAgentBindings = pgTable("muse_agent_bindings", {
   qualificationId: uuid("qualification_id"), qualificationStartedAt: time("qualification_started_at"), qualificationExpiresAt: time("qualification_expires_at"), deadlineEnforcedAt: time("deadline_enforced_at"), cadenceEvidenceIncompleteAt: time("cadence_evidence_incomplete_at"),
   cleanupExpiresAt: time("cleanup_expires_at"), detectorRemovalRequestedAt: time("detector_removal_requested_at"), detectorRemovedAt: time("detector_removed_at"), revokedAt: time("revoked_at"),
   createdAt: time("created_at").notNull().defaultNow(), updatedAt: time("updated_at").notNull().defaultNow(),
-}, t => [uniqueIndex("muse_bindings_active_agent_uq").on(t.companyId, t.agentId).where(sql`${t.revokedAt} IS NULL`), uniqueIndex("muse_bindings_ticket_uq").on(t.ticketHash)]);
+}, t => [uniqueIndex("muse_bindings_active_agent_uq").on(t.companyId, t.agentId).where(sql`${t.revokedAt} IS NULL`), uniqueIndex("muse_bindings_ticket_uq").on(t.ticketHash), uniqueIndex("muse_bindings_active_grant_uq").on(t.grantId).where(sql`${t.revokedAt} IS NULL AND ${t.grantId} IS NOT NULL`)]);
 
 export const museCredentials = pgTable("muse_credentials", {
   id: uuid("id").primaryKey().defaultRandom(), companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),

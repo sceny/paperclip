@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { museCommandSchema, museQuerySchema } from "./muse-protocol.js";
+import { MUSE_ASSET_VERSION, MUSE_CLIENT_VERSION, MUSE_PUBLIC_ROUTES, museCommandSchema, musePairSchema, museQuerySchema } from "./muse-protocol.js";
 import { paperclipQuestionSetPayloadSchema } from "./validators/issue.js";
 
 const assignmentId = "00000000-0000-4000-8000-000000000001";
@@ -67,6 +67,31 @@ describe("Muse progress UTF-8 bounds", () => {
     if (parsed.success && parsed.data.command === "progress") expect(parsed.data.text).toBe(text);
     expect(validate(" \n\t ").success).toBe(false);
   });
+});
+
+
+it("keeps installed-version declarations finite and backward compatible", () => {
+  expect(MUSE_ASSET_VERSION).toBe(9);
+  expect(MUSE_CLIENT_VERSION).toBe("9");
+  expect(museQuerySchema.parse({ version: 1, query: "identify" })).toEqual({ version: 1, query: "identify" });
+  for (const clientVersion of ["2", "3", "4", "5", "6", "7", "8", "9"]) {
+    expect(museQuerySchema.parse({ version: 1, query: "identify", clientVersion })).toMatchObject({ clientVersion });
+    expect(musePairSchema.parse({ version: 1, ticket: "synthetic-unused-ticket", clientVersion })).toMatchObject({ clientVersion });
+  }
+  for (const clientVersion of ["1", "10"]) {
+    expect(() => museQuerySchema.parse({ version: 1, query: "identify", clientVersion })).toThrow();
+    expect(() => musePairSchema.parse({ version: 1, ticket: "synthetic-unused-ticket", clientVersion })).toThrow();
+  }
+});
+
+it("exposes only the exact immutable asset paths for all nine versions", () => {
+  expect(MUSE_PUBLIC_ROUTES).toHaveLength(48);
+  expect(new Set(MUSE_PUBLIC_ROUTES.map(({ method, path }) => `${method} ${path}`)).size).toBe(48);
+  expect(MUSE_PUBLIC_ROUTES.filter(({ path }) => path.includes("/assets/"))).toEqual(
+    [1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((version) => ["manifest.json", "client.py", "detector.sh", "instructions.md"].map((name) => ({
+      method: "GET", path: `/api/muse/v1/assets/${version}/${name}`,
+    }))),
+  );
 });
 
 describe("Muse native question-set durable byte bound", () => {

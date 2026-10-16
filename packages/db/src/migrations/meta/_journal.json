@@ -2458,6 +2458,13 @@
       "when": 1792172232859,
       "tag": "0352_special_warbound",
       "breakpoints": true
+    },
+    {
+      "idx": 353,
+      "version": "7",
+      "when": 1792172416248,
+      "tag": "0353_skinny_gamma_corps",
+      "breakpoints": true
     }
   ]
 }
