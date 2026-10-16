@@ -58,6 +58,11 @@ own policy and access review.
 
 Gaps: Agent access to tools does not permit profile editing.
 
+Backend evidence: [profile entry validation](../../server/src/__tests__/tool-profile-entry-validation.test.ts)
+covers company-scoped selector references and bounded reads for a large immutable
+runtime assignment. Batched validation retains the checks before profile and
+entry writes. It grants no profile-management authority to agents.
+
 ## `client-connect`
 
 Review: `baseline`.

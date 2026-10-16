@@ -14,6 +14,7 @@ import { isUnexpectedRunCancellation } from "./run-cancellation.js";
 import { readConnectionFailure, type ConnectionFailure } from "@paperclipai/adapter-utils/connection-failure";
 import { isAiConnectionConfigurationReason } from "./ai-connection-configuration-failure.js";
 import { readRunFailureReportingMode, type RunFailureReportingMode } from "../sentry-run-failure-policy.js";
+import { RESTRICTED_WORKSPACE_SOURCE_REASON } from "./workspace-source-restriction.js";
 
 type HeartbeatRun = typeof heartbeatRuns.$inferSelect;
 
@@ -123,6 +124,19 @@ function isLocalPathWorkspaceConfigurationBlocker(run: HeartbeatRun, options: Ru
     recovery?.kind === "bootstrap" && recovery.providerWorkStarted === false;
 }
 
+/** A retained shared checkout denied by task privacy before dispatch; the task notice names the owner action. */
+function isRestrictedWorkspaceSourceBlocker(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
+  if (
+    run.status !== "failed" || run.errorCode !== "configuration_incomplete" ||
+    run.executionStage !== "preparing" || options.phase !== "setup" ||
+    run.exitCode != null || run.signal != null
+  ) return false;
+  const configuration = asRecord(run.resultJson?.configurationIncomplete);
+  const recovery = asRecord(run.resultJson?.executionRecovery);
+  return configuration?.reason === RESTRICTED_WORKSPACE_SOURCE_REASON &&
+    recovery?.kind === "bootstrap" && recovery.providerWorkStarted === false;
+}
+
 /** Only the managed-clone producer can attach this bounded pre-dispatch evidence. */
 function isGitConnectionFailure(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
   const connection = readConnectionFailure(run.resultJson?.connectionFailure);
@@ -193,6 +207,14 @@ function isProviderQuotaFailure(run: HeartbeatRun, options: RunFailureReportOpti
     options.phase !== "setup" && run.signal == null;
 }
 
+function isCodexAcpModelCapacityFailure(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
+  const result = asRecord(run.resultJson);
+  return run.status === "failed" && run.errorCode === "codex_transient_upstream" &&
+    result?.errorFamily === "transient_upstream" &&
+    asRecord(result.terminalSessionFailure)?.category === "service" &&
+    options.phase !== "setup" && run.signal == null;
+}
+
 /**
  * The Grok endpoint refused every work wake with an HTTP 4xx, so the offer
  * expired unaccepted. Durable delivery receipts prove the external cause. A
@@ -234,8 +256,10 @@ export function reportRunFailure(db: Db, run: HeartbeatRun, options: RunFailureR
     isMissingSecretConfigurationBlocker(run, options) ||
     isAiConnectionSelectionBlocker(run, options) ||
     isLocalPathWorkspaceConfigurationBlocker(run, options) ||
+    isRestrictedWorkspaceSourceBlocker(run, options) ||
     isGitConnectionFailure(run, options) ||
     isProviderQuotaFailure(run, options) ||
+    isCodexAcpModelCapacityFailure(run, options) ||
     isRestartInterruptedSetup(run)
   )) return Promise.resolve();
   const runStatus = run.status;

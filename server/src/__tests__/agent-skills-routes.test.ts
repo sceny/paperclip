@@ -1,7 +1,7 @@
 import express from "express";
 import { readFile } from "node:fs/promises";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const runnerTarget = vi.hoisted(() => ({ driver: "local", platform: "linux", architecture: "x64" }));
 vi.mock("../services/agent-runner-selection.js", async (importOriginal) => {
@@ -272,14 +272,21 @@ function skillSnapshot(adapterType = "claude_local", mode = "ephemeral") {
 }
 
 describe("agent skill routes", () => {
-  beforeEach(async () => {
-    runnerTarget.platform = "linux";
-    runnerTarget.architecture = "x64";
+  beforeAll(async () => {
     vi.resetModules();
     vi.doUnmock("../routes/agents.js");
     vi.doUnmock("../routes/authz.js");
     vi.doUnmock("../middleware/index.js");
     registerModuleMocks();
+    [{ agentRoutes }, { errorHandler }] = await Promise.all([
+      vi.importActual<typeof import("../routes/agents.js")>("../routes/agents.js"),
+      vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
+    ]);
+  });
+
+  beforeEach(() => {
+    runnerTarget.platform = "linux";
+    runnerTarget.architecture = "x64";
     vi.clearAllMocks();
     for (const mock of Object.values(mockAgentService)) mock.mockReset();
     for (const mock of Object.values(mockAccessService)) mock.mockReset();
@@ -384,13 +391,6 @@ describe("agent skill routes", () => {
     mockAccessService.listPrincipalGrants.mockResolvedValue([]);
     mockAccessService.ensureMembership.mockResolvedValue(undefined);
     mockAccessService.setPrincipalPermission.mockResolvedValue(undefined);
-
-    // Prepare the module graph inside the setup budget after every reset. Each
-    // test still constructs its own app after configuring its request-specific mocks.
-    [{ agentRoutes }, { errorHandler }] = await Promise.all([
-      vi.importActual<typeof import("../routes/agents.js")>("../routes/agents.js"),
-      vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
-    ]);
   });
 
   it("skips runtime materialization when listing Claude skills", async () => {

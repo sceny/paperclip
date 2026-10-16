@@ -177,11 +177,12 @@ export async function evaluateNativeControllerTakeover(input: {
   } | null;
   isProcessAlive?: (pid: number) => boolean;
   readProcessStartedAt?: (pid: number) => Promise<Date | null>;
+  requireStoppedController?: boolean;
 }): Promise<{ allowed: boolean; reason: string }> {
   const { owner, now } = input;
   const isAlive = input.isProcessAlive ?? processIsAlive;
   const readStartedAt = input.readProcessStartedAt ?? observedProcessStart;
-  if (!owner.leaseOwner || !owner.leaseExpiresAt) {
+  if ((!owner.leaseOwner || !owner.leaseExpiresAt) && !input.requireStoppedController) {
     return { allowed: true, reason: "unowned" };
   }
 
@@ -190,7 +191,7 @@ export async function evaluateNativeControllerTakeover(input: {
     return {
       allowed: false,
       reason:
-        owner.leaseExpiresAt <= now
+        owner.leaseExpiresAt !== null && owner.leaseExpiresAt <= now
           ? "expired_lease_without_controller_identity"
           : "live_legacy_lease_without_controller_identity",
     };
@@ -199,7 +200,7 @@ export async function evaluateNativeControllerTakeover(input: {
     return {
       allowed: true,
       reason:
-        owner.leaseExpiresAt <= now
+        owner.leaseExpiresAt !== null && owner.leaseExpiresAt <= now
           ? "expired_lease_controller_process_dead"
           : "controller_process_dead",
     };

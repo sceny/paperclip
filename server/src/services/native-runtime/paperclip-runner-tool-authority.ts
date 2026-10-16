@@ -1,3 +1,4 @@
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import { skillAccessService } from "../skill-access.js";
 import { callTaskWorkspaceTool } from "../task-workspace-tools.js";
 import { TaskAttachmentReadCache, TASK_ATTACHMENT_DEFINITIONS, TASK_ATTACHMENT_SCHEMAS, listTaskAttachments, readTaskAttachment } from "./runner-task-attachments.js";
@@ -139,7 +140,7 @@ type Binding = {
   apiUrl?: string;
   storage?: StorageService;
   /** Server-owned suppression for baseline evals; true never overrides operator opt-in. */
-  connectorAssignments?: ConnectorAssignment[];
+  connectorAssignments?: Pick<ConnectorAssignment, "tools">[];
   assignedMcpTools?: Awaited<ReturnType<typeof createAssignedMcpTools>>;
   apiToolsEnabled?: boolean;
   workMode?: "standard" | "planning" | "ask";
@@ -1647,6 +1648,7 @@ export class PaperclipRunnerToolAuthority {
         return { taskId: target.id, status: target.status, monitor: replayMonitor };
       }
       const patch = prepareIssueMonitorUpdate(target, input.monitor, actor);
+      await notifyDeliveryWork(tx, DELIVERY_QUEUES.issueMonitors);
       const [updated] = await tx.update(issues).set({ ...patch, updatedAt: new Date() })
         .where(and(eq(issues.id, target.id), eq(issues.companyId, this.binding.companyId))).returning();
       if (!updated) throw notFound("Task not found");

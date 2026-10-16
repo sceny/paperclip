@@ -10,7 +10,7 @@ import { ACP_TOOL_KINDS } from "@paperclipai/adapter-utils/acpx-engine/constants
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText, REDACTED_EVENT_VALUE } from "../redaction.js";
 import { readNativeModelRejectionDiagnostic, readNativeTurnFailureDiagnostic } from "./native-runtime/native-provider-failure.js";
-import { readRemoteRunnerRecoveryDiagnostic } from "./native-runtime/remote-runner-recovery-diagnostics.js";
+import { readRemoteRunnerRecoveryDiagnostic, readRemoteRunnerRecoveryError } from "./native-runtime/remote-runner-recovery-diagnostics.js";
 import { MANAGED_GIT_WORKTREE_REASON_CODES, PERSISTED_WORKSPACE_SOURCE_REASON_CODES, readManagedGitInspectionDiagnostic } from "./workspace-validation-diagnostics.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
@@ -240,7 +240,11 @@ export function collectRunFailureDiagnostics(run: Run, options: RunFailureReport
     if (Number.isFinite(durationMs) && durationMs >= 0) execution.durationMs = durationMs;
   }
   const result = run.resultJson;
-  const remoteRunnerRecovery = readRemoteRunnerRecoveryDiagnostic(read(result, "remoteRunnerRecovery"));
+  // Restart reattachment can fail before the native coordinator saves its
+  // result. The thrown error then reaches the generic run failure path, so
+  // read the same closed labels from the error.
+  const remoteRunnerRecovery = readRemoteRunnerRecoveryDiagnostic(read(result, "remoteRunnerRecovery")) ??
+    readRemoteRunnerRecoveryError(options.error);
   if (remoteRunnerRecovery) {
     execution.remoteRunnerRecoveryStage = remoteRunnerRecovery.stage;
     execution.remoteRunnerRecoveryReason = remoteRunnerRecovery.reason;

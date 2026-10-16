@@ -3,6 +3,7 @@ import { EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@paperclipai/db";
 import * as conversationContinuation from "../services/conversation-continuation.js";
 import { environmentRuntimeService } from "../services/environment-runtime.js";
 import * as workspaceRuntime from "../services/workspace-runtime.js";
+import { nativeWorkspaceSyncInternals } from "../services/native-runtime/native-workspace-sync.js";
 import { ensureNativeCompletionContract } from "../services/native-runtime/completion-contracts.js";
 import { readNativePlanWait, hasCommittedNativePlanWait } from "../services/native-runtime/native-plan-wait.js";
 import { nativeSha256 } from "../services/native-runtime/canonical.js";
@@ -3519,6 +3520,67 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       await fs.rm(home, { recursive: true, force: true });
     }
   }
+
+  it.each([false, true])("settles a failed saved native descriptor without inventing files when workspace access is disabled: %s", async withoutWorkspace => {
+    await withTempPaperclipHome(async () => {
+      const f = await seedQueuedIssueRunFixture();
+      await db.update(agents).set({ adapterType: "paperclip_runner",
+        adapterConfig: { provider: "codex", model: "gpt-5.6-luna" },
+      }).where(eq(agents.id, f.agentId));
+      const originalFactory = environmentOrchestrator.environmentRunOrchestrator;
+      const release = vi.fn(async () => ({ released: [], errors: [] }));
+      const factory = vi.spyOn(environmentOrchestrator, "environmentRunOrchestrator").mockImplementation((...args) => ({
+        ...originalFactory(...args), releaseForRun: release,
+      }));
+      const provider = vi.fn(() => { throw new Error("provider must not start"); });
+      let leaseId: string | undefined;
+      try {
+        const heartbeat = heartbeatService(db, {
+          nativeSessionBackendFactory: provider,
+          beforeNativeRuntimeSelection: async runId => {
+            const [lease] = await db.insert(environmentLeases).values({ companyId: f.companyId, issueId: f.issueId,
+              heartbeatRunId: runId, provider: "daytona", providerLeaseId: randomUUID(), status: "active", leasePolicy: "ephemeral",
+              metadata: { driver: "sandbox", pluginId: randomUUID(), sandboxProviderPlugin: true, remoteCwd: "/work" },
+            }).returning();
+            leaseId = lease!.id;
+            const reference = { schema: "paperclip.native-workspace-sync/v3" as const, state: "prepared" as const,
+              descriptorSha256: "a".repeat(64), baselineSha256: "b".repeat(64), finalHostSha256: null,
+              workspaceId: randomUUID(), leaseId: lease!.id, providerLeaseId: lease!.providerLeaseId!, remoteCwd: "/work", resourceDisposition: "destroy" as const };
+            await db.update(heartbeatRuns).set({ runtimeMode: "native", nativeIssueId: f.issueId, nativePhase: "observed",
+              driverKind: withoutWorkspace ? "grok_bot_mcp" : null,
+              runnerProfileJson: { nativeWorkspaceSync: reference, ...(withoutWorkspace ? { nativeExecutionInput: {
+                schema: "paperclip.native-execution-input.v6", provider: { kind: "grok_bot" },
+                binding: { companyId: f.companyId, agentId: f.agentId, runId, issueId: f.issueId },
+                workspace: { access: "none", cwd: null, repoUrl: null, repoRef: null, branchName: null },
+              } } : {}) },
+            }).where(eq(heartbeatRuns.id, runId));
+            await db.insert(nativeRunFinalizations).values({ runId, companyId: f.companyId, issueId: f.issueId, phase: "observed" });
+            await nativeWorkspaceSyncInternals.readDescriptor({ companyId: f.companyId, runId, workspaceId: reference.workspaceId, reference });
+          },
+        });
+        await heartbeat.resumeQueuedRuns();
+        await heartbeat.drainActiveRunExecutions();
+        expect(leaseId).toBeDefined();
+        const failed = await heartbeat.getRun(f.runId, { includeExecutionEvidence: true });
+        expect(failed).toMatchObject({ status: "failed", runtimeMode: "native", nativePhase: "terminal_failure" });
+        if (withoutWorkspace) {
+          expect(failed?.resultJson?.workspaceRestoreFailure ?? null).toBeNull();
+          expect(failed?.resultJson?.workspaceRestoreRecovery ?? null).toBeNull();
+          expect((await getExecutionBlocker(db, f.companyId, f.issueId))?.workspaceRepairRequired).not.toBe(true);
+          expect(release).toHaveBeenCalled();
+          expect(release).not.toHaveBeenCalledWith(expect.objectContaining({ providerResourceDisposition: "stop_and_retain" }));
+        } else {
+          expect(failed?.resultJson).toMatchObject({ workspaceRestoreFailure: "restore_failed", workspaceRestoreRecovery: { leaseIds: [leaseId] } });
+          expect(await db.select().from(environmentLeases).where(eq(environmentLeases.id, leaseId!)))
+            .toMatchObject([{ status: "pending_cleanup", leasePolicy: "retain_on_failure" }]);
+          expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toMatchObject({ workspaceRepairRequired: true, canRetry: false });
+          expect(release).toHaveBeenCalledWith(expect.objectContaining({ providerResourceDisposition: "stop_and_retain" }));
+        }
+        expect(provider).not.toHaveBeenCalled();
+        expect(mockAdapterExecute).not.toHaveBeenCalled();
+      } finally { factory.mockRestore(); }
+    });
+  });
 
   it("fences native selection when cancellation wins during preparation", async () => {
     await withTempPaperclipHome(async () => {

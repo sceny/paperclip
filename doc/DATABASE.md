@@ -884,6 +884,8 @@ Migration [0338_absurd_vengeance.sql](../packages/db/src/migrations/0338_absurd_
 
 Repository admission loads retained workspace and task sources in bounded batches. Readers share source rows and privacy evaluation for identical principals, but each retained run receives its own trust and responsible-user decision. The snapshot lasts only for one read batch; later admission and publication reload current authority. Keep source-loading query counts bounded as both workspace history and retained reader counts grow.
 
+Each physical-root scan resolves duplicate workspace paths once, with bounded concurrency for distinct paths. Alias results are discarded after that scan so later admission and publication recheck symlink targets. Provenance identities select overlapping root records through the company/root index; source retention writes use bounded batches under the existing company lock, including deny-only ownership retained after a failed copy authorization.
+
 Git-source capture checks the actual common Git storage directory and verified
 checkout owners. Separately stored metadata does not make its parent a checkout.
 When a linked worktree cannot identify its primary checkout, the service verifies

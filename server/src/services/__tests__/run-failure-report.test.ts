@@ -393,6 +393,43 @@ describeEmbeddedPostgres("reportRunFailure", () => {
     expect(mockCaptureRunFailure).toHaveBeenCalledOnce();
   });
 
+  function codexModelCapacityRun(overrides: Partial<typeof heartbeatRuns.$inferSelect> = {}) {
+    return buildRun({
+      error: "ACP agent reported a terminal service failure.\nSelected model is at capacity. Please try a different model.",
+      errorCode: "codex_transient_upstream", executionStage: "dispatching", exitCode: 1, signal: null,
+      resultJson: {
+        errorFamily: "transient_upstream", stopReason: "adapter_failed",
+        terminalSessionFailure: { category: "service", title: "Selected model is at capacity. Please try a different model." },
+      },
+      ...overrides,
+    });
+  }
+
+  it("keeps a classified Codex ACP model capacity retry local", async () => {
+    await seedCompanyAndAgent({ adapterType: "codex_local" });
+    for (const phase of [undefined, "execute"] as const) await reportRunFailure(db, codexModelCapacityRun(), { phase });
+    expect(mockCaptureRunFailure).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: "timed_out" }, { signal: "SIGTERM" }, { errorCode: "acpx_turn_failed" },
+    { resultJson: { errorFamily: "transient_upstream" } },
+    { resultJson: { errorFamily: "provider_quota", terminalSessionFailure: { category: "service" } } },
+    { resultJson: { errorFamily: "transient_upstream", terminalSessionFailure: { category: "connection" } } },
+  ])("reports a Codex transient outcome without typed capacity evidence: %j", async (overrides) => {
+    await seedCompanyAndAgent({ adapterType: "codex_local" });
+    await reportRunFailure(db, codexModelCapacityRun(overrides), { phase: "execute" });
+    expect(mockCaptureRunFailure).toHaveBeenCalledOnce();
+  });
+
+  it("reports a Codex ACP model capacity failure during setup or in all mode", async () => {
+    await seedCompanyAndAgent({ adapterType: "codex_local" });
+    await reportRunFailure(db, codexModelCapacityRun(), { phase: "setup" });
+    vi.stubEnv("PAPERCLIP_SENTRY_RUN_FAILURES", "all");
+    await reportRunFailure(db, codexModelCapacityRun(), { phase: "execute" });
+    expect(mockCaptureRunFailure).toHaveBeenCalledTimes(2);
+  });
+
   function restartInterruptedSetupRun(overrides: Partial<typeof heartbeatRuns.$inferSelect> = {}) {
     return buildRun({
       error: "Process lost -- server may have restarted; retrying once",
@@ -698,6 +735,40 @@ describeEmbeddedPostgres("reportRunFailure", () => {
 
     await reportRunFailure(db, run);
 
+    expect(mockCaptureRunFailure).toHaveBeenCalledTimes(1);
+  });
+
+  function restrictedWorkspaceSourceRun(overrides: Partial<typeof heartbeatRuns.$inferSelect> = {}) {
+    return buildRun({
+      errorCode: "configuration_incomplete",
+      executionStage: "preparing",
+      resultJson: {
+        configurationIncomplete: { reason: "workspace_source_restricted", issueId: randomUUID() },
+        executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+      },
+      ...overrides,
+    });
+  }
+
+  it("keeps a restricted shared workspace source actionable on the task", async () => {
+    await seedCompanyAndAgent();
+    await reportRunFailure(db, restrictedWorkspaceSourceRun(), { phase: "setup" });
+    expect(mockCaptureRunFailure).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: "timed_out" }, { errorCode: "setup_failed" }, { executionStage: "executing" }, { exitCode: 1 }, { signal: "SIGTERM" },
+    { resultJson: { configurationIncomplete: { reason: "workspace_source_restricted" } } },
+    { resultJson: { configurationIncomplete: { reason: "workspace_source_restricted" }, executionRecovery: { kind: "bootstrap", providerWorkStarted: true } } },
+  ])("reports restricted-source markers without an exact pre-dispatch outcome: %j", async (overrides) => {
+    await seedCompanyAndAgent();
+    await reportRunFailure(db, restrictedWorkspaceSourceRun(overrides), { phase: "setup" });
+    expect(mockCaptureRunFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([undefined, "execute"] as const)("reports restricted-source markers outside the setup report: %s", async (phase) => {
+    await seedCompanyAndAgent();
+    await reportRunFailure(db, restrictedWorkspaceSourceRun(), { phase });
     expect(mockCaptureRunFailure).toHaveBeenCalledTimes(1);
   });
 

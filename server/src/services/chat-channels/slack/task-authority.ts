@@ -5,6 +5,8 @@ import { slackAuthorizationRevision } from "../../connectors/slack-revision.js";
 
 import { instanceSettingsService } from "../../instance-settings.js";
 import { registerSlackTaskAuthority, slackRunOrigin } from "../../connectors/slack-authority.js";
+import { measureRunPhase } from "../../execution-preparation-timing.js";
+import { measureRunTransaction } from "../../execution-transaction-timing.js";
 
 import {
   createHash,
@@ -51,13 +53,13 @@ export function createSlackTaskAuthorityRegistration(db: Db, options: SlackTaskA
 
 
   const unregisterSlackTaskAuthority = registerSlackTaskAuthority(db, async (binding) => {
-    if (!(await instanceSettingsService(db).getExperimental()).enableChatConnectors)
+    if (!(await measureRunPhase("connectors.slack.settings", () => instanceSettingsService(db).getExperimental())).enableChatConnectors)
       throw forbidden("Chat connectors are disabled");
-    const identity = await slackRunOrigin(db, binding);
+    const identity = await measureRunPhase("connectors.slack.identity", () => slackRunOrigin(db, binding));
     const run = identity.run;
     if ((run.contextSnapshot?.issueId ?? run.contextSnapshot?.taskId) !== binding.issueId || !run.responsibleUserId)
       throw forbidden("Slack tools require the bound task and an accepted linked user");
-    const resolved = await db.transaction(async (tx) => {
+    const resolved = await measureRunTransaction(db, "connectors.slack.authority", async (tx) => {
       const [action] = await tx.select().from(chatActions).where(and(
         eq(chatActions.companyId, binding.companyId),
         eq(chatActions.kind, "inbound_wakeup"),
@@ -134,7 +136,7 @@ export function createSlackTaskAuthorityRegistration(db: Db, options: SlackTaskA
       if (!principal) throw forbidden("Slack sender is no longer available");
       return { ...source, principalId: principal.id, slackUserId: principal.externalId };
     });
-    const credentials = await resolveCredentials(resolved.endpoint);
+    const credentials = await measureRunPhase("connectors.slack.credentials", () => resolveCredentials(resolved.endpoint));
     if (!credentials.botToken) throw forbidden("Slack bot credential is unavailable");
     return {
       endpoint: resolved.endpoint, issueId: binding.issueId, conversation: resolved.conversation,
@@ -145,7 +147,7 @@ export function createSlackTaskAuthorityRegistration(db: Db, options: SlackTaskA
       revision: createHash("sha256").update(JSON.stringify([
         resolved.endpoint.status, resolved.endpoint.allowDirectMessages, resolved.conversation?.sessionGeneration ?? null,
         run.responsibleUserId, credentials.botToken,
-        await slackAuthorizationRevision(db, binding.companyId, resolved.endpoint.id, resolved.endpoint.connectionId, binding.agentId, run.responsibleUserId),
+        await measureRunPhase("connectors.slack.revision", () => slackAuthorizationRevision(db, binding.companyId, resolved.endpoint.id, resolved.endpoint.connectionId, binding.agentId, run.responsibleUserId!)),
       ])).digest("hex"),
       botToken: credentials.botToken,
       searchActionToken: resolved.delivery ? slackSearchActionToken(db, resolved.endpoint.id, resolved.endpoint.providerAccountId!, resolved.slackUserId, String((resolved.delivery.normalizedEvent.message as Record<string, unknown> | undefined)?.providerMessageId ?? "")) : null,

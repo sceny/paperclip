@@ -2566,6 +2566,8 @@ export function agentRoutes(
     adapterConfig: Record<string, unknown>,
     path = "adapterConfig",
   ) {
+    if (req.actor.type === "agent" && hasOwn(adapterConfig, "homeMode"))
+      throw forbidden("Only an operator can configure Runner homeMode.");
     if (req.actor.type === "agent" && ["dotAttachmentAccess", "dotWorkspaceAccess", "dotBindingId", "externalBindingId"].some(key => hasOwn(adapterConfig, key)))
       throw forbidden("Only an operator can configure external-agent pairing, attachment access, or workspace access.");
     assertNoAgentInstructionsConfigMutation(req, adapterConfig, path);
@@ -4098,6 +4100,8 @@ export function agentRoutes(
       await assertSelectableAdapterType(rollbackAdapterType, rollbackAdapterConfig);
     }
     assertNoAgentAdapterConfigMutation(req, rollbackAdapterConfig);
+    if (req.actor.type === "agent" && rollbackAdapterConfig.homeMode !== asRecord(existing.adapterConfig)?.homeMode)
+      throw forbidden("Only an operator can configure Runner homeMode.");
     assertNoAgentLocalAdapterHostCommandMutation(req, rollbackAdapterType, rollbackAdapterConfig);
     assertNoAgentProcessAdapterMutation(
       req,
@@ -5316,6 +5320,8 @@ export function agentRoutes(
       if (requestedAdapterType === "paperclip_runner") {
         rawEffectiveAdapterConfig = normalizePaperclipRunnerAdapterConfig(requestedAdapterType, rawEffectiveAdapterConfig);
       }
+      if (req.actor.type === "agent" && rawEffectiveAdapterConfig.homeMode !== existingAdapterConfig.homeMode)
+        throw forbidden("Only an operator can configure Runner homeMode.");
       if (changingAdapterType || requestedAdapterConfig) {
         assertNoAgentLocalAdapterHostCommandMutation(
           req,

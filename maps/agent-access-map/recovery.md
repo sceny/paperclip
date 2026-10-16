@@ -108,7 +108,7 @@ retry and some operator controls require board. Completion or cancellation of a
 task does not clear its exact unresolved native workspace owner hold. Physical
 owner release still requires the [operator stop-verification procedure](../../doc/native-workspace-finalization-recovery.md).
 
-For a resolved legacy action that retains a file hold, the same resolution API
+For a resolved legacy or native action that retains a file hold, the same resolution API
 supports source-only file repair. Board runtime management and recovery-resolution
 authority are required. The request identifies the exact source action/run and
 records recovered-file evidence; the server verifies the original stop receipt.

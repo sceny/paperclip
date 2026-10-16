@@ -1,5 +1,21 @@
 # Native workspace finalization ownership and recovery
 
+A native provider can fail before it submits a result while its workspace still
+contains unpublished edits. A prepared workspace reference is not an export
+receipt. Terminal provider failure pins the exact bound sandbox and records a
+file-recovery obligation in the same transaction as the failed run. Both setup
+failure handlers record that obligation before their terminal writer and provider
+cleanup run. This includes descriptor reads that fail inside runtime selection. Only its exact live recovery claim can settle an owned
+preparation failure; another owner or a stale claim prevents cleanup. Settling
+that claim and recording file retention share a transaction.
+
+The recovery card names the original run and requires evidence that its exact
+allocation stopped and its files were recovered. Recording that evidence does
+not retry the old turn, certify unknown external actions, change the current task
+owner or status, or require an accepted native result. Accepted-result export
+recovery and same-run provider recovery keep their existing paths. An export
+that has already finalized does not create this file obligation.
+
 Native workspace export and merge acquire a PostgreSQL advisory lock scoped to
 company and run before the first physical copyback. The live heartbeat and the
 reconciler share that lock. Recovery skips a busy owner without recording another

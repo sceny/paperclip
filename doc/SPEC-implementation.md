@@ -2084,6 +2084,12 @@ unavailable. Preserve current ownership and newer-work fences. See
   and history. New key collisions cannot overwrite unrelated skills. Only changed package
   bytes or executable modes create versions. Library reads, tests, and subsequent unpinned
   runs use local installed snapshots; pinned/active runs retain their versions.
+- Runtime version directories are disposable caches. An hourly, bounded sweep may
+  evict non-current copies unused for one hour, preserving active and unresolved
+  execution pins. Selection, materialization, and pin persistence serialize with
+  eviction across processes. Missing copies rebuild from immutable database bytes
+  without upstream access. See [recoverable disk cleanup](recoverable-disk-cleanup.md)
+  for rollout controls, legacy grace periods, and interrupted cleanup recovery.
 - Manually selected sources retain reviewed selection, with new candidates checked by default and
   explicit folder exclusions retained. Upstream deletion keeps installed content with
   removed status; moves are removal plus discovery. Deselect retains content

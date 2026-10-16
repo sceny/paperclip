@@ -227,7 +227,8 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
       await execFile("git", ["-C", source, "checkout", "main"]);
       if (scenario === "literal-branch") input.config.mergedConfig = { workspaceStrategy: { type: "git_worktree", baseRef: "main", branchTemplate: "feature/literal-pin" } };
       const acquire = vi.spyOn(input.services.envOrchestrator, "acquireForRun");
-      await expect(prepareHeartbeatWorkspace(db, input)).rejects.toThrow("Task workspace access is no longer available");
+      await expect(prepareHeartbeatWorkspace(db, input)).rejects.toMatchObject({ code: "configuration_incomplete",
+        resultJson: { configurationIncomplete: { reason: "workspace_source_restricted", issueId: issue.id } } });
       expect(clone).not.toHaveBeenCalled();
       expect(acquire).not.toHaveBeenCalled();
       expect((await readIssue(issue.id)).executionWorkspaceId).toBeNull();
@@ -296,6 +297,32 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     expect(reopened).toMatchObject({ ok: true });
     expect(await readFile(join(workspace.cwd!, "README.md"), "utf8")).toBe("source content\n");
     expect(await readFile(join(privateCwd, "confidential.txt"), "utf8")).toBe("Private source must not be copied");
+  });
+
+  it("keeps a reused shared-checkout workspace denied with an owner action after a restricted worktree appears", async () => {
+    const { input, source, issue } = await fixture(true);
+    const first = await prepareHeartbeatWorkspace(db, input);
+    const workspace = first.persistedExecutionWorkspace!;
+    expect(first.executionWorkspace.baseCwd).toBe(source);
+    await writeFile(join(workspace.cwd!, "unpublished-work.txt"), "Keep this task's local work\n");
+    const [privateIssue] = await db.insert(issues).values({ companyId: issue.companyId, title: "Private work",
+      visibility: "private", projectId: issue.projectId }).returning();
+    const privateCwd = join(source, "private-work");
+    await execFile("git", ["-C", source, "worktree", "add", "-b", "restricted-task", privateCwd, "main"]);
+    const [privateWorkspace] = await db.insert(executionWorkspaces).values({ companyId: issue.companyId,
+      name: "Private workspace", projectId: issue.projectId, sourceIssueId: privateIssue.id, cwd: privateCwd, mode: "isolated_workspace",
+      strategyType: "git_worktree", providerType: "git_worktree", providerRef: privateCwd, branchName: "restricted-task", status: "idle" }).returning();
+    await db.update(issues).set({ executionWorkspaceId: privateWorkspace.id }).where(eq(issues.id, privateIssue.id));
+    await reuse(input, workspace);
+    const clone = vi.spyOn(managedRepositoryCheckout, "materializeManagedProjectWorkspace");
+    const acquire = vi.spyOn(input.services.envOrchestrator, "acquireForRun");
+    await expect(prepareHeartbeatWorkspace(db, input)).rejects.toMatchObject({ code: "configuration_incomplete",
+      resultJson: { configurationIncomplete: { reason: "workspace_source_restricted", issueId: issue.id } } });
+    expect(clone).not.toHaveBeenCalled();
+    expect(acquire).not.toHaveBeenCalled();
+    expect((await readIssue(issue.id)).executionWorkspaceId).toBe(workspace.id);
+    expect(await readFile(join(workspace.cwd!, "unpublished-work.txt"), "utf8")).toBe("Keep this task's local work\n");
+    await expect(access(isolatedRemoteSourcePath(issue.companyId, issue.id))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it.each(["sandbox", "ssh", "local", null] as const)("uses the selected %s placement for controller provisioning", async driver => {

@@ -2184,6 +2184,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       .select({
         id: issueComments.id,
         body: issueComments.body,
+        presentation: issueComments.presentation,
       })
       .from(issueComments)
       .where(

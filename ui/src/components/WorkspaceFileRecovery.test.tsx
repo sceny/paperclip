@@ -7,10 +7,11 @@ import type { ExecutionBlocker, Issue } from "@paperclipai/shared";
 import { WorkspaceFileRecovery } from "./WorkspaceFileRecovery";
 const resolve = vi.hoisted(() => vi.fn());
 vi.mock("../api/issues", () => ({ issuesApi: { resolveRecoveryAction: resolve } }));
-const blocker = { recoveryActionId: "held-source", runId: "original-run", cause: "legacy_execution_requires_reconciliation",
+const baseBlocker = { recoveryActionId: "held-source", runId: "original-run",
   workspaceRepairRequired: true, canRecordWorkspaceRepair: true, canRetry: false, canContinue: false, nextAction: "Recover the original files." } as ExecutionBlocker;
 
-describe("workspace file recovery", () => {
+describe.each(["legacy_execution_requires_reconciliation", "native_continuation_requires_reconciliation"] as const)("workspace file recovery: %s", cause => {
+  const blocker = { ...baseBlocker, cause };
   let root: Root, container: HTMLDivElement, client: QueryClient;
   const onRecorded = vi.fn();
   beforeEach(() => {
@@ -37,7 +38,7 @@ describe("workspace file recovery", () => {
     await act(async () => Array.from(container.querySelectorAll("button")).find(b => b.textContent === "Record file recovery")!.click());
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
   }
-  it.each(["in_progress", "in_review", "done", "cancelled"] as Issue["status"][])("records verified source files without changing the %s task", async issueStatus => {
+  it.each(["blocked", "in_progress", "in_review", "done", "cancelled"] as Issue["status"][])("records verified source files without changing the %s task", async issueStatus => {
     await mount({ issueStatus });
     const button = Array.from(container.querySelectorAll("button")).find(b => b.textContent === "Record file recovery")!;
     expect(button.disabled).toBe(true); await enterEvidence(); expect(button.disabled).toBe(true);

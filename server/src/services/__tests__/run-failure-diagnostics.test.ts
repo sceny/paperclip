@@ -1,6 +1,7 @@
 import { captureEnvironmentAcquisitionDiagnostic } from "../environment-acquisition-diagnostics.js";
 import { describe, expect, it } from "vitest";
 import type { heartbeatRuns } from "@paperclipai/db";
+import { attachRemoteRunnerRecoveryDiagnostic, RemoteRunnerRecoveryError } from "../native-runtime/remote-runner-recovery-diagnostics.js";
 import { collectRunFailureDiagnostics, collectRunFailureSecretValues, redactRunFailureSecretValues, sanitizeRunFailureDiagnostics, sanitizeRunFailureText } from "../run-failure-diagnostics.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
@@ -220,6 +221,28 @@ describe("run failure diagnostics", () => {
         resultJson: { remoteRunnerRecovery: value } }), {}).execution).toEqual({});
     }
     expect(collectRunFailureDiagnostics(run({ errorCode: "adapter_failed" }), {}).execution).toEqual({});
+  });
+
+  it("exports the remote recovery stage and reason from an error thrown before the result was saved", () => {
+    const thrown = Object.assign(new RemoteRunnerRecoveryError({ stage: "process_verification", reason: "process_not_running" }),
+      { path: "private-path", pid: 123 });
+    const result = sanitizeRunFailureDiagnostics(collectRunFailureDiagnostics(run({ errorCode: "adapter_failed" }), { error: thrown }));
+    expect(result.execution).toEqual({ remoteRunnerRecoveryStage: "process_verification", remoteRunnerRecoveryReason: "process_not_running" });
+    expect(result.exceptions).toMatchObject([{ code: "runner_remote_process_identity_unavailable" }]);
+    expect(JSON.stringify(result)).not.toContain("private");
+
+    const transport = attachRemoteRunnerRecoveryDiagnostic(new Error("socket closed"),
+      { stage: "identity_marker", reason: "probe_transport_failed" });
+    expect(collectRunFailureDiagnostics(run({ errorCode: "adapter_failed" }), { error: new Error("wrapped", { cause: transport }) }).execution)
+      .toEqual({ remoteRunnerRecoveryStage: "identity_marker", remoteRunnerRecoveryReason: "probe_transport_failed" });
+
+    const saved = collectRunFailureDiagnostics(run({ errorCode: "runner_remote_process_identity_unavailable",
+      resultJson: { remoteRunnerRecovery: { stage: "identity_marker", reason: "marker_missing" } } }), { error: thrown });
+    expect(saved.execution).toEqual({ remoteRunnerRecoveryStage: "identity_marker", remoteRunnerRecoveryReason: "marker_missing" });
+    expect(collectRunFailureDiagnostics(run({ errorCode: "adapter_failed" }), {
+      error: Object.assign(new Error("runner_remote_process_identity_unavailable"), { code: "runner_remote_process_identity_unavailable",
+        remoteRunnerRecovery: { stage: "private-stage", reason: "marker_missing" } }),
+    }).execution).toEqual({});
   });
 
   it("exports which native close barrier failed without tool identities or provider text", () => {

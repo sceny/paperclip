@@ -75,6 +75,20 @@ When changing the workflow path or branch, authorize the new reference before
 updating the caller. Retain older authorized SHA references while queued runs or
 supported reruns still use them.
 
+General server shards run at most two test files at a time in separate Vitest
+forks. Each file retains its own home, config and process state, and its test
+cases run serially. An explicit `PAPERCLIP_TEST_DATABASE_URL` keeps those shards
+serial because the database is shared. Unsharded local tests, route/authz lanes,
+and native Runner lanes retain their existing concurrency. Sharded chat jobs run
+two independent partitions, each with its own embedded PostgreSQL, home and
+config; an explicit shared test database retains one partition per job.
+The Runner transport lease-expiry and cold-admission regressions live in their
+own file so those real-clock waits overlap other files in the existing pool.
+
+For a full wall-clock profile of all main PR CI jobs, add `profile-ci` to the PR.
+See [CI profiling](ci-profiling.md) for the Honeycomb waterfall, coverage,
+operator setup, and activation requirements.
+
 ## Start Dev
 
 From repo root:
@@ -669,6 +683,29 @@ pnpm exec vitest run server/src/__tests__/task-search-quality.test.ts
 Set `SEARCH_EVAL_SCALE=1` to additionally measure a disposable 10,000-task,
 30,000-comment dataset. `SEARCH_EVAL_REPORT=/tmp/search-quality.json` saves
 per-query results and latency measurements; scale measurements are opt-in.
+
+### Repository workspace admission benchmark
+
+Measure the real repository preparation service with a disposable embedded
+PostgreSQL database and synthetic history, without invoking an agent:
+
+```sh
+pnpm perf:workspace-admission
+pnpm perf:workspace-admission -- --realpath-delay-ms 2.3
+pnpm perf:workspace-admission -- --distinct-cwds --realpath-delay-ms 2.3
+```
+
+Defaults model 8,516 workspaces, 27,971 provenance records and 28 retained
+readers on the shared root. The first command measures ordinary local I/O;
+the others inject filesystem metadata latency for sensitivity comparisons.
+Injected latency does not establish the actual latency of a hosted volume.
+`--distinct-cwds` creates separate folders to exercise bounded concurrent I/O.
+`--service /absolute/path/to/baseline/server/src/services/execution-workspace-repositories.ts`
+compares another checkout, which needs its workspace dependencies installed.
+The JSON report times only the service call, counts filesystem lookups and SQL
+statements, and verifies retained source identities. Setup and cleanup are
+excluded. Source tasks and permissions are synthetic; this is not an end-to-end
+agent latency measurement.
 
 ### Recent task ordering
 
@@ -1411,6 +1448,23 @@ When a workspace service runs Paperclip for browser OAuth QA, configure its `exp
 
 ## Heartbeat Service Extractions
 
+Routine and issue-monitor dispatch uses saved future deadlines through
+`server/src/services/scheduled-work.ts` and the existing delivery coordinator.
+Startup restores the next deadline. Routine edits and monitor changes notify
+their worker after the enclosing database transaction settles, including native
+`set_task_monitor` writes. Deadlines crossed during a scan receive an immediate
+follow-up scan. Work already overdue at scan start retains heartbeat recovery.
+Each worker runs
+independently and retains the existing atomic claims and execution checks.
+The heartbeat interval still requests a recovery scan; it does not determine
+the dispatch time of a known future deadline. Failed scans retry at that same
+interval. Future timers do not hold idle work open, and standby, idle drain and
+shutdown retain the coordinator's admission gates. During idle drain, expired
+deadlines retry at the recovery interval while dispatch is paused; future
+deadlines keep their original timer so a canceled drain does not delay them. External database writers
+rely on the periodic recovery scan. Sparse cron searches reuse one parsed
+expression and skip impossible UTC dates before localized formatting.
+
 Keep relevant heartbeat extractions and their focused tests in `server/src/services/heartbeat/`.
 Follow [Heartbeat execution boundaries](../rules/heartbeat-execution-boundaries.mdc)
 for state lifetime, admission, recovery ownership, cleanup ordering, and verification.
@@ -1756,6 +1810,17 @@ versions across directories. With these artifacts preinstalled, startup links
 and verifies them without uploading a binary or installing packages. Deploy
 the updated sandbox image with the matching runner qualification changes.
 
+### Remote GitHub launcher staging
+
+Managed GitHub launchers stage their nine text files in one bounded control
+command. Each file retains its content-hash check, process lock, upload check,
+and atomic rename. The command runs outside the persistent agent session and
+stops at the first failed file. Earlier files can remain after a later failure;
+the launcher environment is returned only after the whole command succeeds.
+The batch permits at most 16 files and 1 MiB of shell input. Launcher staging
+keeps its 15-second deadline. Run `packages/adapter-utils/src/github-launcher-environment.test.ts`
+and `packages/adapter-utils/src/sandbox-callback-bridge.test.ts` for these contracts.
+
 ### Native runner restart recovery
 
 Custom source-mode HTTP launchers should create their listener with
@@ -1865,6 +1930,14 @@ Only successful turns retain a live warm provider session. A structured failed
 or cancelled result must retire that session and collect its managed files before
 heartbeat stops the reusable sandbox. A later retry can resume the same sandbox
 without inheriting the stopped provider transport.
+
+An idle warm owner proves only the exact prior run in the same company, session,
+workspace and environment. Mutable configuration compatibility is checked
+separately: changed settings retire the owned provider before a replacement can
+execute. A copied older owner record, an active or missing owner, and a different
+environment cannot use this in-memory proof. Database terminal status alone is
+not proof that an unsuspended remote runner can be adopted.
+
 The shared lease-release boundary rechecks the durable run status for recovery
 and ordinary teardown. Successful workspace copy-back alone must not keep a
 failed turn's sandbox running.
@@ -1953,6 +2026,46 @@ executable script). The build contract is documented in
 CI runs `pnpm --filter @paperclipai/skills-catalog validate` and the package's
 vitest suite, so always regenerate the manifest in the same commit as the
 catalog change.
+
+## Skill Version Snapshot Retention
+
+A run uses a skill version from a directory on disk:
+`<instance>/skills/<companyId>/__versions__/<skillId>/<versionId>/`. The server
+writes this directory from the stored files of the `company_skill_versions` row.
+The directory is a cache. When the server removes it and the row stays, the next
+run that selects the version writes it again.
+
+The server starts scanning one minute after startup, then hourly, in batches of
+50 inspected directories with one-second continuations. Current versions,
+explicit agent pins, active runs, and unresolved recovery pins stay. A company
+with an active or unsettled run whose pins are unknown is skipped. Optional
+`PAPERCLIP_SKILL_VERSION_RETENTION_KEEP` retains additional newest versions
+(default `0`). Idle versions expire after `PAPERCLIP_SKILL_VERSION_RETENTION_GRACE_MINUTES`
+(default `60`). Separate `__version_access__` records track use; existing caches
+without records receive a full observation period before expiration.
+
+Preparation, durable run pins, audits, and eviction share a company-scoped
+PostgreSQL lock across processes. Eligible directories are atomically renamed
+to unique managed `.trash-<UUID>` names. Deletion runs outside the preparation
+lock and resumes after a crash. Saved version and repository snapshot rows are
+retained, and normal runtime use restores missing caches without upstream access.
+
+Paperclip Runner preparation skips this lock when the effective selection has no
+skills or a saved selection is explicitly empty. It still records the empty
+version snapshot. Explicit skill references, selected versions, and the legacy
+operational skill keep their existing authorization and cache-lock requirements.
+
+The sweep also handles orphan version directories after explicit skill deletion,
+preserving captured run pins until they settle. Only recognized staging/trash
+names are eligible; unknown directories and symlinked paths are retained.
+
+Set `PAPERCLIP_SKILL_VERSION_RETENTION_DRY_RUN=true` before rollout to inspect
+candidate bytes and skip reasons without deleting or changing access records.
+Set `PAPERCLIP_SKILL_VERSION_RETENTION_ENABLED=false` to disable sweeps while
+leaving restoration available. Internal `skillVersionRetentionService` methods
+support company-scoped diagnosis and bounded instance-wide continuations.
+Server logs report candidates, allocated bytes reclaimed, and skip reasons.
+Compare volume usage separately because concurrent writes affect net savings.
 
 ## App-Shipped Teams Catalog
 
@@ -2075,6 +2188,13 @@ Environment overrides:
   non-numeric value falls back to the default.
 - `PAPERCLIP_WORKSPACE_COMPACTION_ENABLED=false` turns compaction off. Any other
   value keeps it on.
+- `PAPERCLIP_SKILL_VERSION_RETENTION_KEEP=<count>` sets how many of the newest
+  materialized versions of each skill stay on disk (see "Skill Version Snapshot
+  Retention" above). The default is `0`. A negative, empty, or non-numeric value
+  falls back to the default.
+- `PAPERCLIP_SKILL_VERSION_RETENTION_GRACE_MINUTES=<minutes>` sets how long a
+  materialized skill version stays after its last use. The default is `60`. A
+  negative, empty, or non-numeric value falls back to the default.
 
 Without `PAPERCLIP_DB_BACKUP_ALERT_FILE`, health checks look for
 `db-backup-to-s3.failure` in the backup directory, beside the backup directory,
@@ -2383,6 +2503,40 @@ from stored configuration problems. Verify connection transport and endpoint
 fields before disabling a connection. Verify workspace ownership, active runs,
 Git state, and runtime-service readiness before closing a workspace. A missing
 URL or old workspace timestamp alone does not prove that a row is disposable.
+
+### Reconstructable Git cache expiration
+
+The terminal-workspace worker can expire Paperclip-owned isolated Git worktrees
+24 hours after every task in their tree is done or cancelled, independently of
+PR merge or delivery status. Enable it with
+`PAPERCLIP_GIT_CACHE_EXPIRATION_ENABLED=true`. It defaults to dry run; set
+`PAPERCLIP_GIT_CACHE_EXPIRATION_DRY_RUN=false` after inspecting the structured
+`execution_workspace.git_cache_expiration` logs. Logs report candidate and
+reclaimed bytes, base removal, and skip reasons. The existing bounded lifecycle
+sweep supplies scheduling and shutdown cancellation.
+
+Before deletion the worker fetches the exact commit into a fresh object store
+using the company's normal Git identity and commits a versioned restoration
+recipe to workspace metadata. Current runs, previews, pending reopening,
+unresolved recovery, dirty/untracked files, unknown ignored files, unproven
+ownership, and unsupported or unique Git state prevent deletion. Only the
+existing repository-ignored regenerable-output allowlist can be discarded.
+Deletion first renames the worktree to recorded trash; restart and reopening
+finish that cleanup under the same source/lifecycle locks.
+
+`PAPERCLIP_GIT_BASE_EXPIRATION_ENABLED=true` additionally permits removal of an
+owned isolated remote-source base after all consumers expire and all remaining
+refs and files are verified reproducible. Shared project clones remain intact.
+Normal authorized reopening recreates a missing source and checks out the saved
+commit, even after upstream advances. Inaccessible upstream produces an explicit
+retryable restoration failure. It never substitutes the default branch.
+Reopening failures reject the consuming request with HTTP 409 before saving a
+comment or changing its task. The response preserves the restoration message, so
+the composer keeps an editable draft and permits retry after access is restored.
+
+Both enable switches default off. Rollback disables further expiration while
+leaving saved recipes and restoration support intact. Recovery archives, runner
+backups, non-Git workspaces, and immutable skill snapshots are unaffected.
 
 ### Terminal workspace compaction
 

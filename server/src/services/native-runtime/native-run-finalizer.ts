@@ -986,7 +986,7 @@ export async function repairCommittedNativeChatResponse(
           }),
         });
         if (!finalAgentMessage) return false;
-        const comments = await tx.select({ id: issueComments.id, body: issueComments.body })
+        const comments = await tx.select({ id: issueComments.id, body: issueComments.body, presentation: issueComments.presentation })
           .from(issueComments).where(and(
             eq(issueComments.companyId, input.companyId),
             eq(issueComments.issueId, input.issueId),

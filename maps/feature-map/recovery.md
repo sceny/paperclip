@@ -160,7 +160,7 @@ The recovery-card suite covers workspace divergence, reissue, reconcile, and
 confirmation. [Workspace export](../../ui/src/components/WorkspaceExportRecovery.test.tsx)
 covers quiet restoration, legacy/operator assistance and resolved states.
 
-For a retained legacy file hold, open the source task after its recovery action
+For a retained legacy or native file hold, open the source task after its recovery action
 has resolved but its files still need recovery. An authorized board operator can
 record the verified recovered files and backup link without changing the current
 task status or starting another run. The server must independently validate the

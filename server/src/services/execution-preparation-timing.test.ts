@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createRunPreparationTiming } from "./execution-preparation-timing.js";
+import { createRunPreparationTiming, measureRunPhase, withRunExecutionTiming } from "./execution-preparation-timing.js";
 
 const handles = vi.hoisted(() => ({ getTracer: vi.fn(), startActiveSpan: vi.fn() }));
 vi.mock("@opentelemetry/api", () => ({
@@ -37,6 +37,25 @@ it.each(["lookup", "start", "after_callback", "missing_callback", "rejected", "e
 it.each([undefined, "", "  "])("does not consult tracing for endpoint %s", async endpoint => {
   vi.stubEnv("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint);
   handles.getTracer.mockClear();
-  await expect(createRunPreparationTiming("run", "native.controller")("backend_setup", () => 42)).resolves.toBe(42);
-  expect(handles.getTracer).not.toHaveBeenCalled();
+  const warn = vi.spyOn(console, "warn");
+  const error = vi.spyOn(console, "error");
+  try {
+    await expect(createRunPreparationTiming("run", "native.controller")("backend_setup", () => 42)).resolves.toBe(42);
+    for (const phase of ["execution.usage_startup", "execution.mcp_handoff", "execution.dispatch_admission", "execution.budget_reservation"] as const) {
+      const result = {};
+      const work = vi.fn(() => result);
+      await expect(withRunExecutionTiming("run", () => measureRunPhase(phase, work))).resolves.toBe(result);
+      expect(work).toHaveBeenCalledOnce();
+      const original = new Error("original startup failure");
+      const failed = vi.fn(() => { throw original; });
+      await expect(withRunExecutionTiming("run", () => measureRunPhase(phase, failed))).rejects.toBe(original);
+      expect(failed).toHaveBeenCalledOnce();
+    }
+    expect(handles.getTracer).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+  } finally {
+    warn.mockRestore();
+    error.mockRestore();
+  }
 });

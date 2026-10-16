@@ -48,6 +48,7 @@ import type {
 } from "@paperclipai/plugin-sdk";
 import { performSyncIn, performSyncOut, withProviderSpan } from "./file-sync.js";
 import { DEFAULT_DAYTONA_OPERATION_TIMEOUT_MS } from "./manifest.js";
+import { observeSessionStreamExit } from "./session-stream-exit.js";
 
 // The Claude `setup-token` login pseudo-terminal (PTY) session for this provider.
 // The session runs the login command on a real pseudo-terminal, streams the
@@ -1808,6 +1809,7 @@ async function executeOneShot(
 // Fallback reads full log snapshots as well as status. Limit the heavier
 // polling path while keeping output available to interactive commands.
 const SESSION_LOG_POLL_INTERVAL_MS = 1000;
+const SESSION_INITIAL_STATUS_TIMEOUT_MS = 500;
 // A socket can stay open after it stops delivering output. Switch to saved
 // logs after this much silence; silence never proves that the command exited.
 const SESSION_LOG_STREAM_IDLE_MS = 15_000;
@@ -2049,6 +2051,7 @@ async function runSessionLogStream(
   while (true) {
     let streamClosed = false;
     let acceptingOutput = true;
+    let exitObservation: ReturnType<typeof observeSessionStreamExit> | undefined;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     let signalIdle!: () => void;
     const idle = new Promise<"idle">((resolve) => { signalIdle = () => resolve("idle"); });
@@ -2064,15 +2067,24 @@ async function runSessionLogStream(
     };
     try {
       armIdleTimer();
-      const outcome = await withinCommandDeadline(commandDeadline, () => Promise.race([
-        sandbox.process.getSessionCommandLogs(
-          sessionId,
-          commandId,
-          (chunk) => receive("stdout", chunk),
-          (chunk) => receive("stderr", chunk),
-        ).then(() => "closed" as const),
-        idle,
-      ]));
+      const observed = await withinCommandDeadline(commandDeadline, () => {
+        exitObservation = observeSessionStreamExit(Promise.race([
+          sandbox.process.getSessionCommandLogs(
+            sessionId,
+            commandId,
+            (chunk) => receive("stdout", chunk),
+            (chunk) => receive("stderr", chunk),
+          ).then(() => "closed" as const),
+          idle,
+        ]), async () => {
+          const status = await observeSessionCommand(Math.min(timeoutMs, SESSION_INITIAL_STATUS_TIMEOUT_MS),
+            () => sandbox.process.getSessionCommand(sessionId, commandId), commandDeadline);
+          return typeof status.exitCode === "number" ? status.exitCode : null;
+        });
+        return exitObservation.result;
+      });
+      if (observed.kind === "exit") return { exitCode: observed.exitCode, pollUntilExit: false, buffer };
+      const outcome = observed.value;
       if (outcome === "idle") {
         // Do not wait for the abandoned socket or open another one. The SDK
         // exposes no cancellation handle. Fence its callbacks before the
@@ -2088,6 +2100,7 @@ async function runSessionLogStream(
       // The SDK exposes no cancellation handle for this socket. Session
       // teardown owns closing it; late data cannot change a settled execution.
       acceptingOutput = false;
+      exitObservation?.stop();
       clearTimeout(idleTimer);
     }
     if (streamClosed) {
@@ -2189,6 +2202,17 @@ async function executeInSession(
       timeoutSeconds,
     ));
     const commandId = dispatched.cmdId;
+    let initialExitCode: number | null = null;
+    try {
+      const status = await observeSessionCommand(
+        Math.min(effectiveTimeoutMs, SESSION_INITIAL_STATUS_TIMEOUT_MS),
+        () => sandbox.process.getSessionCommand(sessionId, commandId),
+        commandDeadline,
+      );
+      if (typeof status.exitCode === "number") initialExitCode = status.exitCode;
+    } catch (error) {
+      if (error instanceof SessionCommandDeadlineError) throw error;
+    }
 
     // Log-stream path. A session command always tries the stream first: it
     // streams stdout and stderr from the callback log form, then reads the exit
@@ -2199,7 +2223,9 @@ async function executeInSession(
     // call. The host routes it to the runner log sink by the host-issued
     // invocation id. This is a no-op when no plugin context is set (a direct
     // test call) or when the host has no active execute route.
-    const streamResult = await runSessionLogStream(
+    const streamResult = initialExitCode !== null
+      ? { exitCode: initialExitCode, pollUntilExit: false, buffer: streamBuffer }
+      : await runSessionLogStream(
       sandbox,
       sessionId,
       commandId,

@@ -80,6 +80,12 @@ Automated: [instruction service](../../server/src/__tests__/agent-instructions-s
 
 Manual: Save a harmless instruction edit, reload, and verify its revision and effect in the next eligible run. Pause and resume the disposable agent; confirm pause prevents new work and does not erase previous runs.
 
+For failed setup, use an unavailable model or invalid command on a disposable agent.
+Confirm the profile names the failed verification step and gives a relevant action.
+Check that it explains automatic retry and offers **Retry now**. Fix the configuration,
+retry, and reload; the failure must disappear only after readiness commits.
+Provider output and credentials must not appear in the lifecycle message.
+
 An explicit runner change is a configuration change, with normal revisions and
 session invalidation. Incompatible settings must produce a field-specific error;
 selecting another runner must not silently discard them or change an active run's

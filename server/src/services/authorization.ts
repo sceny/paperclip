@@ -755,7 +755,8 @@ function createAuthorizationService(db: Db | DbTransaction, readSnapshot?: ReadA
 
   async function decideReadsForActors(actors: AuthorizationActor[], resources: ReadAuthorizationResource[]): Promise<AuthorizationDecision[][]> {
     if (!actors.length) return [];
-    const snapshots: ReadAuthorizationSnapshot[] = actors.map(() => ({ issues: new Map(), projects: new Map(), memo: new Map() }));
+    const memo = new Map<string, Promise<unknown>>();
+    const snapshots: ReadAuthorizationSnapshot[] = actors.map(() => ({ issues: new Map(), projects: new Map(), memo }));
     const batchActors: ResponsibleUserActorWithMemo[] = actors.map(actor => ({ ...actor, __responsibleUserSnapshotMemo: undefined }));
     const privacyKey = (actor: AuthorizationActor) => JSON.stringify([actor.type, actor.agentId, actor.userId, actor.onBehalfOfUserId]);
     const privacyActors = [...new Map(batchActors.map(actor => [privacyKey(actor), actor])).values()];
@@ -892,7 +893,8 @@ function createAuthorizationService(db: Db | DbTransaction, readSnapshot?: ReadA
       return promise;
     }
 
-    const promise = loadResponsibleUserSnapshot(input.companyId, input.userId);
+    const promise = batchRead(`responsible:${input.companyId}:${input.userId}`,
+      () => loadResponsibleUserSnapshot(input.companyId, input.userId));
     actorWithMemo.__responsibleUserSnapshotMemo.set(key, promise);
     void promise.catch(() => {
       if (actorWithMemo.__responsibleUserSnapshotMemo?.get(key) === promise) {

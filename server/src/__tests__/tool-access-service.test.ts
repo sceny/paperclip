@@ -5363,7 +5363,11 @@ describeEmbeddedPostgres("tool access service", () => {
     ).toBe(false);
     expect(
       nonPilotGmail.methods.map((method: { key: string }) => method.key),
-    ).toEqual(["customer-read-oauth", "customer-draft-oauth"]);
+    ).toEqual([
+      "customer-read-oauth",
+      "customer-draft-oauth",
+      "customer-archive-oauth",
+    ]);
 
     const pilot = await request(
       createRouteApp(
@@ -5384,6 +5388,34 @@ describeEmbeddedPostgres("tool access service", () => {
       "paperclip-read",
       "customer-read-oauth",
       "customer-draft-oauth",
+      "customer-archive-oauth",
+    ]);
+
+    const archivePilotConnector = fakeGoogleWorkspaceConnector(
+      company.id,
+      userId,
+      "gmail.archive",
+    );
+    const archivePilot = await request(
+      createRouteApp(
+        db,
+        boardSessionActor(company.id, "owner", userId),
+        undefined,
+        { paperclipCloudConnector: archivePilotConnector },
+      ),
+    ).get(`/api/companies/${company.id}/tools/gallery`);
+    expect(archivePilot.status).toBe(200);
+    const archivePilotGmail = archivePilot.body.apps.find(
+      (app: { slug: string }) => app.slug === "gmail",
+    );
+    expect(archivePilotGmail.ownershipAvailability.platform_shared).toBe(true);
+    expect(
+      archivePilotGmail.methods.map((method: { key: string }) => method.key),
+    ).toEqual([
+      "customer-read-oauth",
+      "customer-draft-oauth",
+      "paperclip-archive",
+      "customer-archive-oauth",
     ]);
   });
 

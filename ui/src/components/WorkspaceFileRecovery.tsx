@@ -30,7 +30,8 @@ export function WorkspaceFileRecovery({ issueId, issueStatus, blocker, canManage
     }),
     onSuccess: onRecorded,
   });
-  if (!blocker.workspaceRepairRequired || !blocker.canRecordWorkspaceRepair || blocker.cause !== "legacy_execution_requires_reconciliation"
+  if (!blocker.workspaceRepairRequired || !blocker.canRecordWorkspaceRepair ||
+    !["legacy_execution_requires_reconciliation", "native_continuation_requires_reconciliation"].includes(blocker.cause)
     || !blocker.recoveryActionId || !blocker.runId) return null;
   return <section aria-label="Record workspace file recovery" className="flex w-full flex-col gap-2">
     {record.isSuccess ? <p role="status">File recovery recorded. The task status is unchanged. Continue the task when it is ready.</p>

@@ -5275,7 +5275,7 @@ describe("ACPX engine sandbox-start spans (opt-in root + child parenting)", () =
     };
   }
 
-  it("emits one root span with a child span per bring-up boundary, each parented to the root", async () => {
+  it("emits one root with startup and nested workspace boundaries", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
     const localCwd = path.join(root, "worktree");
@@ -5334,12 +5334,6 @@ describe("ACPX engine sandbox-start spans (opt-in root + child parenting)", () =
     expect(syncBackSpan!.parent).toBe(runRootSpan);
     expect(syncBackSpan!.ended).toBe(true);
 
-    // A codex bring-up over the remote sandbox lane crosses all 7 boundaries.
-    // Each boundary span parents to the sandbox bring-up span, not to the run
-    // root or the turn span. The `stage.sync` step also opens the two pre-task
-    // sub-step spans — `snapshot.git` and `snapshot.baseline` — plus the
-    // `stage.workspace` inbound task span, and the `pack` span nests one level
-    // deeper under `stage.workspace`.
     const childNames = spans
       .filter(
         (span) =>
@@ -5362,16 +5356,21 @@ describe("ACPX engine sandbox-start spans (opt-in root + child parenting)", () =
         "snapshot.git",
         "stage.sync",
         "stage.workspace",
+        "workspace.ignore_rules",
+        "workspace.inbound_barrier",
+        "workspace.overlay_archive",
+        "workspace.progress",
+        "workspace.progress",
+        "workspace.repositories",
         "workspace.resolve",
+        "workspace.source_root",
+        "workspace.transfer",
       ],
     );
 
-    // The two pre-task sub-step spans and the `stage.workspace` task span nest
-    // under the `stage.sync` step span (that host work runs inside the step), not
-    // directly under the bring-up span. The `pack` span nests under
-    // `stage.workspace`, because the host builds the tarball inside the task.
     const stageSyncSpan = spans.find((span) => span.name === "stage.sync");
     const stageWorkspaceSpan = spans.find((span) => span.name === "stage.workspace");
+    const inboundSpan = spans.find((span) => span.name === "workspace.inbound_barrier");
     const packSpan = spans.find((span) => span.name === "pack");
     const snapshotGitSpan = spans.find((span) => span.name === "snapshot.git");
     const snapshotBaselineSpan = spans.find((span) => span.name === "snapshot.baseline");
@@ -5380,15 +5379,12 @@ describe("ACPX engine sandbox-start spans (opt-in root + child parenting)", () =
     expect(packSpan).toBeTruthy();
     expect(snapshotGitSpan).toBeTruthy();
     expect(snapshotBaselineSpan).toBeTruthy();
-    expect(stageWorkspaceSpan!.parent).toBe(stageSyncSpan);
+    expect(stageWorkspaceSpan!.parent).toBe(inboundSpan);
     expect(packSpan!.parent).toBe(stageWorkspaceSpan);
     expect(snapshotGitSpan!.parent).toBe(stageSyncSpan);
     expect(snapshotBaselineSpan!.parent).toBe(stageSyncSpan);
     expect(packSpan!.ended).toBe(true);
 
-    // Every boundary step span parents to the sandbox bring-up span and ends.
-    // The `stage.sync` sub-step spans and the run-parented `sandbox.syncBack`
-    // span are the exceptions: they parent above.
     const nonStartupChildren = new Set([
       packSpan,
       stageWorkspaceSpan,
@@ -5396,6 +5392,23 @@ describe("ACPX engine sandbox-start spans (opt-in root + child parenting)", () =
       snapshotBaselineSpan,
       syncBackSpan,
     ]);
+    for (const [name, parent] of [
+      ["workspace.source_root", stageSyncSpan], ["workspace.repositories", stageSyncSpan],
+      ["workspace.ignore_rules", stageSyncSpan], ["workspace.inbound_barrier", stageSyncSpan],
+      ["workspace.overlay_archive", packSpan], ["workspace.transfer", stageWorkspaceSpan],
+    ] as const) {
+      const span = spans.find(span => span.name === name);
+      expect(span?.parent, name).toBe(parent);
+      expect(span?.ended, name).toBe(true);
+      expect(span?.endCalls, name).toBe(1);
+      nonStartupChildren.add(span);
+    }
+    const progress = spans.filter(span => span.name === "workspace.progress");
+    expect(progress.map(span => span.parent)).toEqual([packSpan, stageWorkspaceSpan]);
+    for (const span of progress) {
+      expect(span.endCalls).toBe(1);
+      nonStartupChildren.add(span);
+    }
     for (const span of spans) {
       if (span === runRootSpan || span === startupSpan || span === turnSpan) continue;
       if (nonStartupChildren.has(span)) continue;

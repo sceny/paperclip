@@ -1,3 +1,6 @@
+import { stableHash, descriptorHash } from "./tool-catalog-hash.js";
+import { assertProfileEntryInputs, assertProfileEntryShape } from "./tool-profile-entry-validation.js";
+import { DAYTONA_TOOLS, daytonaClient, daytonaRisk, isDaytonaConnection, isDaytonaToolName } from "./daytona.js";
 import { chatCredentialMutationLease } from "./chat-credential-mutation-lease.js";
 import { notifyChatEndpointWork } from "./chat-work-notifications.js";
 import { removeSlackRegistration } from "./chat-slack-registration-cleanup.js";
@@ -253,6 +256,7 @@ import {
   profileIdsInBindingOrder,
 } from "./tool-profile-binding-precedence.js";
 import { assertGoogleChatToolArgumentsSupported, googleChatToolDescription, googleChatToolInputSchema } from "./google-chat-tool-policy.js";
+import { gmailArchiveToolDescription, gmailArchiveToolInputSchema } from "./gmail-archive-tool-policy.js";
 import {
   recordToolRuntimeAuditWriteFailure,
   TOOL_RUNTIME_AUDIT_WRITE_FAILURE_METRIC,
@@ -1343,6 +1347,7 @@ export function projectedConnectionToolInputSchema(
   const managed = honchoManagedArguments(connection, inputSchema);
   if (managed) inputSchema = stripManagedToolArgumentSchema(inputSchema, managed);
   inputSchema = googleChatToolInputSchema(connection, toolName, inputSchema);
+  inputSchema = gmailArchiveToolInputSchema(connection, toolName, inputSchema);
   const sourceTemplateKey =
     typeof connection.config.sourceTemplateKey === "string"
       ? connection.config.sourceTemplateKey
@@ -1737,7 +1742,11 @@ function toCatalogEntryForConnection(
       rawCatalogEntry.inputSchema ?? {},
       row.toolName,
     ),
-    description: googleChatToolDescription(connection, row.toolName, rawCatalogEntry.description),
+    description: gmailArchiveToolDescription(
+      connection,
+      row.toolName,
+      googleChatToolDescription(connection, row.toolName, rawCatalogEntry.description),
+    ),
   };
   if (
     connection.transport === "local_stdio" &&
@@ -2249,11 +2258,6 @@ function buildProfileDetails(input: {
   };
 }
 
-function stableHash(value: unknown): string {
-  return createHash("sha256")
-    .update(JSON.stringify(value, Object.keys(flattenKeys(value)).sort()))
-    .digest("hex");
-}
 
 function connectionSetupMutationFingerprint(
   row: typeof toolConnections.$inferSelect,
@@ -2274,20 +2278,6 @@ function connectionSetupMutationFingerprint(
   });
 }
 
-function flattenKeys(
-  value: unknown,
-  keys: Record<string, true> = {},
-): Record<string, true> {
-  if (value && typeof value === "object") {
-    for (const [key, nested] of Object.entries(
-      value as Record<string, unknown>,
-    )) {
-      keys[key] = true;
-      flattenKeys(nested, keys);
-    }
-  }
-  return keys;
-}
 
 function normalizeToolDescriptor(tool: unknown): McpToolDescriptor | null {
   const record = asRecord(tool);
@@ -2395,6 +2385,7 @@ export function classifyRisk(
   if (sourceTemplateKey === "browser-use-cloud") {
     return BROWSER_USE_TOOLS.find(t => t.name === tool.name)?.annotations.readOnlyHint ? "read" : "destructive";
   }
+  if (sourceTemplateKey === "daytona") return daytonaRisk(tool.name);
   if (sourceTemplateKey === "railway") {
     const reviewed = railwayRisk(normalizedToolName);
     return reviewed === "read" && (annotations.readOnlyHint === false || annotations.writeHint === true) ? "write" : reviewed;
@@ -2409,6 +2400,10 @@ export function classifyRisk(
   // safe. Treat it as write so Ask-first defaults can restrict it.
   if (sourceTemplateKey === "enterpret" && normalizedToolName === "run-graph-query")
     return "write";
+  // Gmail archive removes a system label. Keep it behind the archive method's
+  // destructive Ask-first default even when the preview provider omits hints.
+  if (sourceTemplateKey === "gmail" && normalizedToolName === "unlabel-thread")
+    return "destructive";
   if (sourceTemplateKey === "posthog" && normalizedToolName === "exec")
     return "destructive";
   // Superagent mirrors its REST API, and several mutations use verbs the
@@ -2460,6 +2455,7 @@ export function classifyRisk(
 export function isGmailToolPermanentlyBlocked(
   tool: McpToolDescriptor,
 ): boolean {
+  if (googleWorkspaceToolLeafName(tool.name) === "unlabel-thread") return false;
   const riskLevel = classifyRisk(tool, "gmail");
   return (
     verbMatches(
@@ -2855,19 +2851,6 @@ function recordValue(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function descriptorHash(
-  tool: McpToolDescriptor,
-  riskLevel: ToolRiskLevel,
-): string {
-  return stableHash({
-    name: tool.name,
-    title: tool.title ?? null,
-    description: tool.description ?? null,
-    inputSchema: tool.inputSchema ?? {},
-    annotations: tool.annotations ?? {},
-    riskLevel,
-  });
-}
 
 /**
  * Did this error come from the OAuth endpoint gate (PAP-17099)? Such a refusal
@@ -3677,7 +3660,7 @@ export function toolAccessService(
   function shouldQuarantineNewEntries(
     connection: typeof toolConnections.$inferSelect,
   ): boolean {
-    return asRecord(connection.config).quarantineNewEntries === true;
+    return isDaytonaConnection(connection) || asRecord(connection.config).quarantineNewEntries === true;
   }
 
   function isAttentionHealthStatus(
@@ -5887,21 +5870,7 @@ export function toolAccessService(
     companyId: string,
     input: CreateToolProfileEntryForProfile,
   ) {
-    if (input.selectorType === "application" && !input.applicationId) {
-      throw badRequest("Application profile entries require applicationId");
-    }
-    if (input.selectorType === "connection" && !input.connectionId) {
-      throw badRequest("Connection profile entries require connectionId");
-    }
-    if (input.selectorType === "catalog_entry" && !input.catalogEntryId) {
-      throw badRequest("Catalog-entry profile entries require catalogEntryId");
-    }
-    if (input.selectorType === "tool_name" && !input.toolName) {
-      throw badRequest("Tool-name profile entries require toolName");
-    }
-    if (input.selectorType === "risk_level" && !input.riskLevel) {
-      throw badRequest("Risk-level profile entries require riskLevel");
-    }
+    assertProfileEntryShape(input);
     if (input.applicationId)
       await assertApplication(companyId, input.applicationId);
     if (input.connectionId)
@@ -6255,9 +6224,7 @@ export function toolAccessService(
     profileId: string,
     entries: CreateToolProfileEntryForProfile[],
   ) {
-    for (const entry of entries) {
-      await assertProfileEntryInput(companyId, entry);
-    }
+    await assertProfileEntryInputs(db, companyId, entries);
     if (entries.length === 0) return;
     await db.insert(toolProfileEntries).values(
       entries.map((entry) => ({
@@ -6280,9 +6247,7 @@ export function toolAccessService(
     profileId: string,
     entries: CreateToolProfileEntryForProfile[],
   ) {
-    for (const entry of entries) {
-      await assertProfileEntryInput(companyId, entry);
-    }
+    await assertProfileEntryInputs(db, companyId, entries);
     await db
       .delete(toolProfileEntries)
       .where(
@@ -7491,6 +7456,11 @@ export function toolAccessService(
   ): Promise<McpToolDescriptor[]> {
     assertSupportedConnection(connection);
     if (connection.connectionPurpose === "ai") throw unprocessable("AI connections provide runtime authentication, not tool actions");
+    if (isDaytonaConnection(connection)) {
+      const headers = credentialHeaders ?? await resolveCredentialHeaders(connection, actor);
+      await daytonaClient(headers, (url, init) => requestRemoteHttpEndpoint(new URL(url), init), asRecord(connection.config.methodConfig).organizationId).probe();
+      return DAYTONA_TOOLS;
+    }
     if (isBrowserUseConnection(connection)) {
       const headers = credentialHeaders ?? await resolveCredentialHeaders(connection, actor);
       await browserUseClient(headers, (url, init) => requestRemoteHttpEndpoint(new URL(url), init), connection.id).probe();
@@ -7646,7 +7616,7 @@ export function toolAccessService(
           });
         for (const grant of grantsToCheck)
           await refreshManagedGitHubGrantAccess(connection, grant, actor);
-      } else if (isBrowserUseConnection(connection)) {
+      } else if (isBrowserUseConnection(connection) || isDaytonaConnection(connection)) {
         await discoverTools(connection, undefined, actor);
       } else if (isAgentMailConnection(connection)) {
         await validateAgentMailConnection(connection);
@@ -7680,6 +7650,8 @@ export function toolAccessService(
         config.sourceTemplateKey === "github" &&
           oauth.connectorProfile === "github.code"
           ? "GitHub account, installation, and repository access are available."
+          : isDaytonaConnection(connection)
+            ? "Daytona API access is connected."
           : isBrowserUseConnection(connection)
             ? "Browser Use API key is connected."
           : isAgentMailConnection(connection)
@@ -7790,11 +7762,13 @@ export function toolAccessService(
     const existingByName = new Map(
       existingRows.map((entry) => [entry.toolName, entry]),
     );
-    if (isRemoteMcpConnectorMethod(connection.config.sourceTemplateKey, connection.config.connectionMethodKey)) {
+    const nativeDaytona = isDaytonaConnection(connection);
+    if (nativeDaytona || isRemoteMcpConnectorMethod(connection.config.sourceTemplateKey, connection.config.connectionMethodKey)) {
       const discoveredNames = new Set(descriptors.map((descriptor) => descriptor.name));
-      const removedIds = existingRows.filter((entry) => !discoveredNames.has(entry.toolName) && entry.status !== "disabled").map((entry) => entry.id);
+      const removedStatus = nativeDaytona ? "removed" : "disabled";
+      const removedIds = existingRows.filter((entry) => !discoveredNames.has(entry.toolName) && entry.status !== removedStatus).map((entry) => entry.id);
       if (removedIds.length) await db.update(toolCatalogEntries)
-        .set({ status: "disabled", quarantineReason: "mcp_tool_removed", updatedAt: refreshedAt })
+        .set({ status: removedStatus, quarantineReason: nativeDaytona ? "provider_tool_removed" : "mcp_tool_removed", updatedAt: refreshedAt })
         .where(and(eq(toolCatalogEntries.companyId, connection.companyId), eq(toolCatalogEntries.connectionId, connection.id), inArray(toolCatalogEntries.id, removedIds)));
     }
     // Retired native actions are absent from discovery, but old catalog rows
@@ -7832,7 +7806,7 @@ export function toolAccessService(
         ? googleProfileValue
         : null;
     const preserveReviewedCatalog =
-      (isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret") &&
+      (isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret" || isDaytonaConnection(connection)) &&
       existingRows.length > 0;
     const quarantineOnRefresh =
       (!refreshOptions.enableAllByDefault || preserveReviewedCatalog) &&
@@ -7854,7 +7828,7 @@ export function toolAccessService(
         quarantineOnRefresh &&
         (!existing || changed) &&
         existing?.status !== "disabled" &&
-        (!safeDefault || riskLevel !== "read");
+        (!safeDefault || riskLevel !== "read" || nativeDaytona);
       const providerPermanentlyBlocked = Boolean(
         googleProfile &&
         !isGoogleWorkspaceToolAllowed(googleProfile, descriptor),
@@ -7935,7 +7909,7 @@ export function toolAccessService(
     }
 
     const preserveQuarantine =
-      isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret";
+      isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret" || isDaytonaConnection(connection);
     const normalizedConfig = preserveQuarantine
       ? { ...connection.config, quarantineNewEntries: true }
       : refreshOptions.enableAllByDefault
@@ -12824,7 +12798,7 @@ export function toolAccessService(
           // Grant-backed setup keeps the full discovered catalog selectable;
           // the wizard projects the app's action defaults into policies at
           // finish time instead of using catalog quarantine as access state.
-          quarantineNewEntries: galleryEntry.slug === "railway" || galleryEntry.slug === "enterpret",
+          quarantineNewEntries: ["railway", "enterpret", "daytona"].includes(galleryEntry.slug),
           ...(remoteMcpConnector ? {
             mcpSessionRequired: true,
             mcpAuthMode: input.authMode ?? "auto",
@@ -13152,7 +13126,7 @@ export function toolAccessService(
                 applicationKey: `app-gallery:${galleryEntry?.slug ?? "link"}:${randomUUID()}`,
                 name: applicationName,
                 description: safeApplicationDescription,
-                type: transport === "rest_api" && galleryEntry?.slug === "browser-use-cloud" ? "rest_api" : transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
+                type: transport === "rest_api" && ["browser-use-cloud", "daytona"].includes(galleryEntry?.slug ?? "") ? "rest_api" : transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
                 status: "draft",
                 metadata: galleryEntry
                   ? {
@@ -18112,7 +18086,7 @@ export function toolAccessService(
             companyId,
             applicationKey: normalizeKey(input.applicationName ?? input.name),
             name: input.applicationName ?? input.name,
-            type: isBrowserUseConnection({ transport, config }) ? "rest_api" : transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
+            type: isBrowserUseConnection({ transport, config }) || isDaytonaConnection({ transport, config }) ? "rest_api" : transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
             status: "active",
             metadata: {},
           })
@@ -19134,6 +19108,7 @@ export function toolAccessService(
     listCatalog: async (
       connectionId: string,
       companyId?: string,
+      actor?: ActorInfo,
     ): Promise<ToolCatalogEntry[]> => {
       const connection = await getConnectionRow(connectionId, companyId);
       let rows = await db
@@ -19141,17 +19116,29 @@ export function toolAccessService(
         .from(toolCatalogEntries)
         .where(eq(toolCatalogEntries.connectionId, connection.id))
         .orderBy(desc(toolCatalogEntries.updatedAt));
-      const cacheExpired =
+      // Native provider catalogs change with the deployed code. Upgrade saved
+      // Daytona connections too; their first small catalog must not survive
+      // merely because REST discovery has no remote MCP cache timer.
+      const nativeDaytona = isDaytonaConnection(connection);
+      const rowsByName = new Map(rows.map((row) => [row.toolName, row]));
+      const daytonaCatalogChanged = nativeDaytona && connection.status === "active" && (
+        rows.some((row) => row.status !== "removed" && !isDaytonaToolName(row.toolName))
+        || DAYTONA_TOOLS.some((tool) => {
+          const existing = rowsByName.get(tool.name);
+          return !existing || existing.versionHash !== descriptorHash(tool, daytonaRisk(tool.name));
+        })
+      );
+      const cacheExpired = daytonaCatalogChanged || (
         connection.transport === "mcp_remote" &&
         connection.status !== "archived" &&
         (rows.length === 0 ||
           !connection.lastCatalogRefreshAt ||
           connection.lastCatalogRefreshAt.getTime() <=
-            now().getTime() - catalogCacheTtlMs);
+            now().getTime() - catalogCacheTtlMs));
       if (cacheExpired) {
         try {
           await singleFlight(catalogRefreshFlights, connection.id, () =>
-            refreshCatalog(connection.id, {
+            refreshCatalog(connection.id, nativeDaytona && actor ? actor : {
               actorType: "system",
               actorId: "tool_catalog_cache",
             }),
@@ -19168,7 +19155,11 @@ export function toolAccessService(
           if (rows.length === 0) throw error;
         }
       }
-      return rows.map((row) => toCatalogEntryForConnection(row, connection));
+      // Even failed discovery must not keep retired native tools visible.
+      // Their database rows remain available to historical invocation records.
+      return rows
+        .filter((row) => !nativeDaytona || (row.status !== "removed" && isDaytonaToolName(row.toolName)))
+        .map((row) => toCatalogEntryForConnection(row, connection));
     },
 
     /** Recent tool-call events for one connection — drives App detail · Recent activity. */
@@ -19605,9 +19596,7 @@ export function toolAccessService(
       companyId: string,
       input: CreateToolProfileWithEntries,
     ): Promise<ToolProfileWithDetails> => {
-      for (const entry of input.entries ?? []) {
-        await assertProfileEntryInput(companyId, entry);
-      }
+      await assertProfileEntryInputs(db, companyId, input.entries ?? []);
       const [row] = await db
         .insert(toolProfiles)
         .values({
@@ -19636,9 +19625,7 @@ export function toolAccessService(
     ): Promise<ToolProfileWithDetails> => {
       const existing = await getProfileRow(profileId);
       if (input.entries) {
-        for (const entry of input.entries) {
-          await assertProfileEntryInput(existing.companyId, entry);
-        }
+        await assertProfileEntryInputs(db, existing.companyId, input.entries);
       }
       await db
         .update(toolProfiles)
@@ -20183,6 +20170,7 @@ export function toolAccessService(
         input.connectionId,
         input.companyId,
       );
+      if (isDaytonaConnection(connection)) throw forbidden("Daytona credentials stay in the governed tool gateway and cannot be exported.");
       if (isBrowserUseConnection(connection)) throw forbidden("Browser Use credentials stay in the governed tool gateway and cannot be exported.");
       if (connection.connectionPurpose === "ai") throw unprocessable("AI credentials are available only through the runtime resolver");
       const application = await getConnectionApplication(connection);

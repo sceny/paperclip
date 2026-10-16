@@ -243,6 +243,9 @@ describe("durable Dot Runner integration", () => {
     try {
       const requests = await Promise.all([1, 2, 3].map(() => f.broker.requestTurn(f.principal, "Create hello and assign it to my owner", requestId)));
       expect(requests[1]).toEqual(requests[0]); expect(requests[2]).toEqual(requests[0]);
+      expect(requests[0]!.instruction).toContain(provider === "grok_bot"
+        ? "Queued admission does not start another Grok routine"
+        : "Events also notify queued work");
       const intake = await db.select().from(issues).where(eq(issues.id, requests[0]!.issueId));
       expect(intake).toHaveLength(1);
       expect(intake[0]).toMatchObject({ assigneeAgentId: f.agent.id, createdByAgentId: f.agent.id, responsibleUserId: f.userId });

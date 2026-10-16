@@ -132,6 +132,8 @@ API: `present` — representative operation IDs:
 - `POST /api/agents/{id}/pause`.
 - `POST /api/agents/{id}/resume`.
 - `POST /api/agents/{id}/terminate`.
+- `POST /api/agents/{id}/lifecycle/retry`.
+- `GET /api/agents/{id}` returns the safe failed phase/step and action in `lifecycleError`.
 
 Agent access: `partial` — REST / native `call_api` resume under agent_config:update
 change-grant authorization; pause and termination remain board-only.

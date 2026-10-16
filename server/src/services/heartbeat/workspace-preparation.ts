@@ -30,7 +30,9 @@ import { readNativeWorkspaceSyncReference, readNativeWorkspaceSyncLocalCwd } fro
 import { parseObject } from "../../adapters/utils.js";
 import { materializeNativeChatTaskRoot } from "../native-runtime/native-chat-workspace.js";
 import { materializeIsolatedTaskDirectory } from "../isolated-task-directory.js";
-import { canIsolateRemoteWorkspaceSource, materializeIsolatedRemoteWorkspaceSource } from "../isolated-remote-workspace-source.js";
+import { canIsolateRemoteWorkspaceSource, materializeIsolatedRemoteWorkspaceSource, withIsolatedRepositorySourceLock } from "../isolated-remote-workspace-source.js";
+import { isRestrictedWorkspaceSourceDenial, RESTRICTED_WORKSPACE_SOURCE_REASON } from "../workspace-source-restriction.js";
+import { ConfigurationIncompleteFailure } from "./run-preparation.js";
 import {
   assertIsolatedWorkspaceSourceReadAccess,
   retainIsolatedWorkspaceSourceAccess,
@@ -148,7 +150,28 @@ function readNonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
 }
 
+/**
+ * A restricted task worktree in the shared checkout keeps this task's source denied when
+ * no fresh isolated clone is safe (an existing workspace may hold unpublished work).
+ * Name the owner action instead of failing as an opaque setup error.
+ */
+function restrictedWorkspaceSourceFailure(error: unknown, issueId: string): unknown {
+  if (!isRestrictedWorkspaceSourceDenial(error)) return error;
+  return new ConfigurationIncompleteFailure(
+    "This task's workspace source is a shared project checkout that also holds a task workspace this run cannot read, so Paperclip did not use it.",
+    { configurationIncomplete: { reason: RESTRICTED_WORKSPACE_SOURCE_REASON, issueId } },
+  );
+}
+
 export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspacePreparationInput) {
+  const sourceIssueId = input.reuse.reusableExistingExecutionWorkspace?.sourceIssueId
+    ?? input.reuse.existingExecutionWorkspace?.sourceIssueId ?? input.task.issueId;
+  if (!sourceIssueId || input.reuse.isDotRun) return prepareHeartbeatWorkspaceLocked(db, input);
+  return withIsolatedRepositorySourceLock(db, input.agent.companyId, sourceIssueId,
+    () => prepareHeartbeatWorkspaceLocked(db, input));
+}
+
+async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspacePreparationInput) {
   const { run, agent, controllerLease, nativeRunnerPreparationSpans } = input;
   const timeWorkspace = createHeartbeatPreparationTiming(run.id);
   const {
@@ -502,14 +525,16 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
         selection: issues.workspaceSelection }).from(issues)
         .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId)));
       if (!sourceChoice || sourceChoice.executionWorkspaceId
-        || (sourceChoice.projectWorkspaceId && sourceChoice.projectWorkspaceId !== resolvedWorkspace.workspaceId)) throw error;
+        || (sourceChoice.projectWorkspaceId && sourceChoice.projectWorkspaceId !== resolvedWorkspace.workspaceId)) {
+        throw restrictedWorkspaceSourceFailure(error, issueId);
+      }
       if (!canIsolateRemoteWorkspaceSource({ error, repoUrl: executionWorkspaceBase.repoUrl,
         reuseExisting: requestedShouldReuseExisting, hasExistingWorkspace: Boolean(existingExecutionWorkspace),
         selectedProjectWorkspaceId: sourceChoice.projectWorkspaceId ?? readNonEmptyString(context.projectWorkspaceId),
         selection: sourceChoice.selection, strategy: parseObject(hostExecutionWorkspaceConfig.workspaceStrategy),
-        trustPresetKind: trustPreset.kind })) throw error;
-      const cwd = await materializeIsolatedRemoteWorkspaceSource({ companyId: agent.companyId,
-        issueId, repoUrl: executionWorkspaceBase.repoUrl!, resolveGitAuth: workspaceGitAuthProvider });
+        trustPresetKind: trustPreset.kind })) throw restrictedWorkspaceSourceFailure(error, issueId);
+      const cwd = await timeWorkspace("workspace_source_materialize", () => materializeIsolatedRemoteWorkspaceSource({ companyId: agent.companyId,
+        issueId, repoUrl: executionWorkspaceBase.repoUrl!, resolveGitAuth: workspaceGitAuthProvider }));
       executionWorkspaceBase.baseCwd = cwd;
       resolvedWorkspace.cwd = cwd;
       isolatedRemoteSource = { schema: "paperclip.isolated-remote-source.v1", companyId: agent.companyId,
@@ -762,9 +787,9 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     try {
       persistedWorktreeInstanceRoot =
         (
-          await readManagedWorktreeInstanceOwnership(
-            executionWorkspace.worktreePath,
-          )
+          await timeWorkspace("workspace_ownership_read", () => readManagedWorktreeInstanceOwnership(
+            executionWorkspace.worktreePath!,
+          ))
         )?.instanceRoot ?? null;
     } catch (error) {
       logger.warn(
@@ -1007,7 +1032,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
         recoveryWorkspace.remoteCwd !== remoteRecovery.remote.remoteCwd)) {
       throw new Error("native_remote_recovery_lease_mismatch");
     }
-    acquiredEnvironment = await envOrchestrator.acquireForRun({
+    acquiredEnvironment = await timeWorkspace("workspace_environment_acquire", () => envOrchestrator.acquireForRun({
       companyId: agent.companyId,
       selectedEnvironmentId,
       localEnvironmentId: localEnvironment.id,
@@ -1024,7 +1049,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
         providerLeaseId: remoteRecovery.remote.providerLeaseId,
         remoteCwd: remoteRecovery.remote.remoteCwd,
       } } : {}),
-    });
+    }));
     await controllerLease.assertOwned();
     nativeRunnerPreparationSpans.push({
       name: "environment.acquire",
@@ -1100,7 +1125,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     ReturnType<typeof envOrchestrator.realizeForRun>
   >;
   try {
-    realizationResult = await envOrchestrator.realizeForRun({
+    realizationResult = await timeWorkspace("workspace_environment_realize", () => envOrchestrator.realizeForRun({
       environment: selectedEnvironment,
       lease: activeEnvironmentLease.lease,
       adapterType: agent.adapterType,
@@ -1111,7 +1136,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
       effectiveExecutionWorkspaceMode,
       persistedExecutionWorkspace,
       duplexObservabilityRecorder,
-    });
+    }));
     nativeRunnerPreparationSpans.push({
       name: "environment.workspace.realize",
       parentName: "task.provider_session",
