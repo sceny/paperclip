@@ -49,10 +49,12 @@ vi.mock("../services/company-skills.js", async importOriginal => {
   const actual = await importOriginal<typeof import("../services/company-skills.js")>();
   return { ...actual, companySkillService: (...args: Parameters<typeof actual.companySkillService>) => {
     const service = actual.companySkillService(...args);
-    return { ...service, listRuntimeSkillEntries: async (...input: Parameters<typeof service.listRuntimeSkillEntries>) => {
-      const failure = skillFailures.get(input[0]);
+    return { ...service, withRuntimeSkillEntries: async <T>(companyId: string,
+      options: Parameters<typeof service.withRuntimeSkillEntries>[1],
+      consume: (entries: Awaited<ReturnType<typeof service.listRuntimeSkillEntries>>) => T | Promise<T>) => {
+      const failure = skillFailures.get(companyId);
       if (failure) throw new Error(failure);
-      return service.listRuntimeSkillEntries(...input);
+      return service.withRuntimeSkillEntries(companyId, options, consume);
     } };
   } };
 });

@@ -142,8 +142,10 @@ describePostgres("immutable skill version cache", () => {
     const run = await activeRun(f.companyId, null);
     const ready = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
-    const preparing = withSkillVersionCacheLock(db, f.companyId, async () => {
-      await f.resolve(f.versions[0]!.id);
+    const preparing = companySkillService(db).withRuntimeSkillEntries(f.companyId, {
+      onlyKeys: new Set([f.key]), versionSelections: new Map([[f.key, f.versions[0]!.id]]),
+    }, async entries => {
+      expect(entries).toMatchObject([{ key: f.key, versionId: f.versions[0]!.id, sourceStatus: "available" }]);
       await touchSkillVersionCache(f.companyId, f.skillId, f.versions[0]!.id, Date.now() - 7_200_000);
       ready.resolve();
       await release.promise;
@@ -159,6 +161,21 @@ describePostgres("immutable skill version cache", () => {
     } finally { release.resolve(); }
     await preparing;
     expect(await sweepSkillVersionCache(other, { companyId: f.companyId })).toMatchObject({ evicted: 0, skipped: { protected_version: 1 } });
+    await other.$client.end({ timeout: 0 });
+  });
+
+  it("releases the cache lock after a runtime selection consumer fails", async () => {
+    const f = await fixture();
+    await expect(companySkillService(db).withRuntimeSkillEntries(f.companyId, {
+      onlyKeys: new Set([f.key]), versionSelections: new Map([[f.key, f.versions[0]!.id]]),
+    }, async entries => {
+      expect(entries[0]!.sourceStatus).toBe("available");
+      throw new Error("durable pin write failed");
+    })).rejects.toThrow("durable pin write failed");
+    const other = createDb(database.connectionString);
+    try {
+      expect(await withSkillVersionCacheLock(other, f.companyId, async () => "released", true)).toBe("released");
+    } finally { await other.$client.end({ timeout: 0 }); }
   });
 
   it("reads company-wide protection twice per batch regardless of version count", async () => {

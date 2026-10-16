@@ -1506,6 +1506,12 @@ as they are available, so later setup failures still clean up acquired resources
 Busy-account deferral returns explicitly before session/workspace preparation.
 Public-path tests are in `server/src/__tests__/heartbeat-execution-configuration.test.ts`.
 
+Concurrent skill preparations join the company inventory refresh before taking
+the version-cache lock. Each preparation then reads its actor's current skill
+visibility under that lock. Snapshot materialization and the durable run version
+pins stay in the same locked callback. Only the in-flight inventory work is
+shared; completed refreshes and permission results are not cached.
+
 Browser Use skill assignment first checks for an enabled, active Browser Use
 connection in the run's company. With none, it skips full tool discovery.
 With one, the existing task, tool-policy and credential-grant checks still apply.

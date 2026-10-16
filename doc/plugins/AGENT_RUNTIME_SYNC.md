@@ -65,3 +65,32 @@ revision, so repeated identical saves against that revision create no audit rows
 or events. Later runtime changes invalidate that deduplication. The file API still
 returns `changed: false` for identical content and keeps conditional-write checks.
 Consumers can skip rewriting content whose hash already matches.
+
+## Skills
+
+Migration 0348 invalidates referencing agents when installed skill content,
+companion files, versions, source bindings, or identities change. Rename checks
+both old and new keys. String selections, structured selections, and supported
+legacy aliases are recognized. Unrelated agents and other companies receive no
+content invalidation. Private-source bindings, membership, and privacy changes
+invalidate only agents assigned skills from the affected sources. Project workspace
+authorization-policy changes use the same boundary. Company policy
+changes conservatively invalidate the company.
+Source retry/lease bookkeeping and skill popularity counters do not emit changes.
+Multi-skill source publication defers its skill invalidation until transaction
+commit, after it acquires all skill rows. This avoids an agent-lock/skill-lock
+cycle with concurrent version saves. Individual file edits retain immediate
+journaling and their existing filesystem rollback behavior.
+
+Assignment edits already use the configuration boundary. The runtime reader
+returns selected skill entries with host source paths and immutable version IDs.
+It uses the execution resolver, current agent access, the instance pin flag, and
+legacy operational-skill rules. It performs no upstream refresh. The resolver can
+rebuild an expired version cache from saved bytes. Slow materialization happens
+outside the agent row lock. The reader rechecks ownership and revision afterward;
+it retries concurrent changes three times and then returns a conflict.
+
+Pinned assignments receive conservative content invalidations too. Their resolved
+version and bytes stay pinned when pin support is enabled. Consumers can compare
+versions or destination hashes and avoid rewriting unchanged trees. Task-only
+skill mentions and a running task's saved version selection remain task-owned.

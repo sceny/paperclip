@@ -139,22 +139,45 @@ API: `present` — representative operation IDs:
 
 - `GET /api/heartbeat-runs/{runId}`.
 - `GET /api/heartbeat-runs/{runId}/log`.
+- `GET /api/heartbeat-runs/{runId}/events`.
+- `GET /api/heartbeat-runs/{runId}/workspace-operations`.
+- `GET /api/heartbeat-runs/{runId}/issues`.
+- `GET /api/companies/{companyId}/heartbeat-runs`.
+- `GET /api/companies/{companyId}/live-runs`.
+- `GET /api/issues/{id}/runs`.
+- `GET /api/issues/{id}/recovery-actions`.
 
-Agent access: `available` — REST / native call_api / CLI run.
+Agent access: `available` — REST / native call_api / CLI run, plus the listed
+read-only paths through the default queue and HTTP/2 sandbox callback bridge.
+The sandbox uses its injected run credential. See
+[run diagnostics](../../skills/paperclip/references/run-diagnostics.md) and the
+[activity access contract](activity.md#runs).
 
-Policy: Run/cost visibility and agent configuration policy; adapter installation/account
-login/session control require board/admin.
+Policy: Same company, company-scope read authority and run/task visibility still
+apply. Task-bound history and recovery records require task read authority.
+Each run-linked task is filtered by the caller's task-read predicate; a readable
+company run cannot expose inaccessible private task titles. Existing content
+and credential redaction apply. Adapter installation, account login, session
+control, recovery writes and raw provider-trace administration retain their
+existing board/admin or dedicated-tool gates.
 
-Evidence: `source-only` — [implementation](../../server/src/routes/agents.ts#L6608) at
-the reviewed commit above.
+Evidence: `source-only` — diagnostic scope reviewed at
+`f10210990a3c9cad1a4359318388f237de3169dd` in the
+[bridge route list](../../packages/adapter-utils/src/sandbox-callback-bridge.ts),
+[run routes](../../server/src/routes/agents.ts),
+[task-link route](../../server/src/routes/activity.ts), and
+[private-run regression suite](../../server/src/__tests__/heartbeat-run-privacy-routes.test.ts).
 
-Verification: `not-run` — exercise a listed permitted operation with actual agent
-credentials/run context; inspect its result and applicable persistence/attribution.
-Assert the relevant denied actor, owner, company or mode from Policy. Review the
-remaining operations before qualifying the whole capability.
+Verification: `not-run` for a live sandbox using the updated routes. Bridge and
+controller fixtures cover permitted reads, denied writes, redaction and private
+task-link filtering. After deployment, verify with an actual run identity and
+assert foreign-company, private-task and restricted-mode denial. Source review,
+board reads and skipped fixtures do not qualify that live path.
 
 Gaps: Provider trace reveals/downloads require instance-admin and cannot be counted as
 ordinary run output access.
+The new bridge surface does not qualify retry, cancellation, workspace repair or
+session-control access. Deployed diagnostic usefulness remains unverified.
 
 ## `session`
 
