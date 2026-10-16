@@ -1,4 +1,5 @@
 import { allowLegacyShutdownWorkspaceCleanup, legacyShutdownWorkspaceResourceProtected } from "./legacy-shutdown-workspace-settlement.js";
+import { nativeWorkspaceExportPendingForLease } from "./native-runtime/native-workspace-finalization-state.js";
 import { beginIdleTrackedWork } from "./task-admission.js";
 import { hasStopOnlyCleanup, prepareSandboxStopAndRetain, readStopOnlyCleanup, settleStopOnlyCleanup, stopOnlyCleanupKey } from "./sandbox-stop-and-retain.js";
 import { JsonRpcCallError, readEnvironmentAcquisitionDiagnostic, readEnvironmentCreationCleanupError } from "@paperclipai/plugin-sdk";
@@ -2611,6 +2612,9 @@ function createSandboxEnvironmentDriver(
 
     async retryPendingSandboxTeardown(input) {
       const exportResume = hasStopOnlyCleanup(input.lease);
+      if (!exportResume && await nativeWorkspaceExportPendingForLease(db, input.lease)) {
+        throw new Error("Native workspace export is pending; destructive cleanup is forbidden.");
+      }
       const resumeIntent = readStopOnlyCleanup(input.lease);
       const assertExportResumeOwnership = async () => {
         if (!resumeIntent) throw new Error("Workspace export resume ownership is invalid.");
@@ -3900,6 +3904,7 @@ export function environmentRuntimeService(
     scopeCondition?: ReturnType<typeof and>;
     failureReason: string;
   }): Promise<EnvironmentLease | null> {
+    if (await nativeWorkspaceExportPendingForLease(db, input.leaseRow)) return null;
     if (!(await allowLegacyShutdownWorkspaceCleanup(db, input.leaseRow))) return null;
     const now = new Date();
     const attemptId = randomUUID();
@@ -4080,6 +4085,8 @@ export function environmentRuntimeService(
       const released: EnvironmentRuntimeLeaseRecord[] = [];
       for (let leaseRow of leaseRows) {
         try {
+          if (providerResourceDisposition !== "stop_and_retain" && providerResourceDisposition !== "keep_running"
+            && !hasStopOnlyCleanup(leaseRow) && await nativeWorkspaceExportPendingForLease(db, leaseRow)) continue;
           if (!(await allowLegacyShutdownWorkspaceCleanup(db, leaseRow, new Date(), {
             ownerStopOnly: cancelActiveWork === true && providerResourceDisposition === "stop_and_retain",
           }))) continue;
@@ -4445,6 +4452,7 @@ export function environmentRuntimeService(
     },
 
     async destroyRunLease(input: EnvironmentDriverLeaseInput): Promise<EnvironmentLease | null> {
+      if (await nativeWorkspaceExportPendingForLease(db, input.lease)) return null;
       if (await legacyShutdownWorkspaceResourceProtected(db, input.lease)) return null;
       if (input.lease.metadata?.legacyShutdownWorkspaceSettlement) {
         if (!(await allowLegacyShutdownWorkspaceCleanup(db, input.lease))) return null;

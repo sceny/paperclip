@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { activityLog, agents, companies, createDb, environmentLeases, environments, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations } from "@paperclipai/db";
+import { activityLog, agents, companies, createDb, environmentLeases, environments, externalAgentHolds, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { getExecutionBlocker } from "../execution-blocker.js";
 import { markExecutionReconciliation, validateExecutionReconciliation } from "../execution-recovery-resolution.js";
@@ -76,23 +76,27 @@ const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTes
       eq(activityLog.action, "issue.workspace_recovery_required")))).toHaveLength(1);
   });
 
-  async function bindExternalInput(f: Awaited<ReturnType<typeof seed>>, provider: "grok_bot" | "openai_dot", change?: (input: { schema: string; binding: { runId: string; companyId: string; agentId: string }; workspace: { access: string } }) => void) {
+  async function bindExternalInput(f: Awaited<ReturnType<typeof seed>>, provider: "grok_bot" | "openai_dot" | "muse", change?: (input: { schema: string; binding: { runId: string; companyId: string; agentId: string; issueId: string }; provider: { kind: string; bridgeRevision?: string }; workspace: { access: string; cwd: string | null } }) => void) {
     const run = await readRun(f.runId);
-    const input = { schema: "paperclip.native-execution-input.v6",
+    const input = { schema: provider === "muse" ? "paperclip.native-execution-input.v8" : "paperclip.native-execution-input.v6",
       binding: { runId: f.runId, companyId: f.companyId, agentId: f.agentId, issueId: f.issueId },
-      provider: { kind: provider }, workspace: { access: "none", cwd: null, repoUrl: null, repoRef: null, branchName: null } };
+      provider: { kind: provider, ...(provider === "muse" ? { bridgeRevision: "muse-v1" } : {}) }, workspace: { access: "none", cwd: null, repoUrl: null, repoRef: null, branchName: null } };
     change?.(input);
-    const [updated] = await db.update(heartbeatRuns).set({ driverKind: provider === "grok_bot" ? "grok_bot_mcp" : "openai_dot_mcp",
+    const [updated] = await db.update(heartbeatRuns).set({ driverKind: provider === "muse" ? "muse_external" : provider === "grok_bot" ? "grok_bot_mcp" : "openai_dot_mcp",
       runnerProfileJson: { ...run.runnerProfileJson, nativeExecutionInput: input } }).where(eq(heartbeatRuns.id, f.runId)).returning();
     return updated;
   }
 
-  it.each(["grok_bot", "openai_dot"] as const)("does not invent file recovery for %s admitted without workspace access", async provider => {
+  it.each(["grok_bot", "openai_dot", "muse"] as const)("does not invent file recovery for %s admitted without workspace access", async provider => {
     const f = await seed(), run = await bindExternalInput(f, provider);
+    const [hold] = provider === "muse" ? await db.insert(externalAgentHolds).values({ companyId: f.companyId, agentId: f.agentId,
+      provider: "muse", assignmentId: randomUUID(), bindingId: randomUUID(), bindingGeneration: 1, runId: f.runId,
+      workerUnknown: true, nativeEffectsUnknown: true }).returning() : [];
     await preserveNativeFailedWorkspace(db, run);
     expect((await readRun(f.runId)).resultJson).not.toHaveProperty("workspaceRestoreFailure");
     expect(await readLease(f.lease.id)).toMatchObject({ status: "active", leasePolicy: "ephemeral" });
     expect(await actions(f.issueId)).toHaveLength(0);
+    if (hold) expect((await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.id, hold.id)))[0]).toEqual(hold);
   });
 
   it.each(["run", "company", "agent", "schema", "write_access"])("preserves file safeguards when no-workspace evidence has an invalid %s", async mismatch => {
@@ -107,6 +111,27 @@ const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTes
     await preserveNativeFailedWorkspace(db, run);
     expect((await readRun(f.runId)).resultJson).toHaveProperty("workspaceRestoreFailure", "restore_failed");
     expect(await readLease(f.lease.id)).toMatchObject({ leasePolicy: "retain_on_failure" });
+  });
+
+  it.each(["run", "company", "agent", "issue", "schema", "provider", "bridge", "missing_bridge", "driver", "write_access", "cwd"] as const)("retains file safeguards for a mismatched Muse %s contract", async mismatch => {
+    const f = await seed();
+    await bindExternalInput(f, "muse", input => {
+      if (mismatch === "run") input.binding.runId = randomUUID();
+      if (mismatch === "company") input.binding.companyId = randomUUID();
+      if (mismatch === "agent") input.binding.agentId = randomUUID();
+      if (mismatch === "issue") input.binding.issueId = randomUUID();
+      if (mismatch === "schema") input.schema = "paperclip.native-execution-input.v6";
+      if (mismatch === "provider") input.provider.kind = "grok_bot";
+      if (mismatch === "bridge") input.provider.bridgeRevision = "unknown";
+      if (mismatch === "missing_bridge") delete input.provider.bridgeRevision;
+      if (mismatch === "write_access") input.workspace.access = "read_write";
+      if (mismatch === "cwd") input.workspace.cwd = "/untrusted-task-workspace";
+    });
+    if (mismatch === "driver") await db.update(heartbeatRuns).set({ driverKind: "openai_dot_mcp" }).where(eq(heartbeatRuns.id, f.runId));
+    await preserveNativeFailedWorkspace(db, await readRun(f.runId));
+    expect((await readRun(f.runId)).resultJson).toHaveProperty("workspaceRestoreFailure", "restore_failed");
+    expect(await readLease(f.lease.id)).toMatchObject({ leasePolicy: "retain_on_failure" });
+    expect(await actions(f.issueId)).toHaveLength(1);
   });
 
   it.each(["grok_bot", "openai_dot"] as const)("keeps historical %s inspection holds with an available recovery path", async provider => {

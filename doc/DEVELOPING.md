@@ -2006,6 +2006,15 @@ The shared lease-release boundary rechecks the durable run status for recovery
 and ordinary teardown. Successful workspace copy-back alone must not keep a
 failed turn's sandbox running.
 
+Native workspace export also fences destructive lease cleanup. A failed heartbeat
+can still own unexported files, including when checkpoint copyback failed before
+its semantic result was accepted. The orphan and pending-cleanup sweeps preserve
+the exact lease bound by a prepared workspace-sync reference until export records
+it finalized. Direct release and destruction apply the same check. Explicit
+stop-only cleanup remains available; neither a retry deadline nor an exhausted
+retry budget authorizes deletion of the only workspace copy. This does not change
+successful warm-session retention or admit another provider turn.
+
 Run the credential-free real-process restart suite with:
 
 ```sh

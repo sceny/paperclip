@@ -1,5 +1,5 @@
 import { preserveWorkspaceRestoreRecoveryMetadataSql } from "../legacy-workspace-restore-recovery.js";
-import { pendingNativeWorkspaceFinalizationCondition } from "../native-runtime/native-workspace-finalization-state.js";
+import { nativeWorkspaceExportPendingForLease, pendingNativeWorkspaceFinalizationCondition } from "../native-runtime/native-workspace-finalization-state.js";
 import { CHAT_COMPLETION_WAKE_REASON } from "../chat-completion-delivery.js";
 import {
   hasStopOnlyCleanup,
@@ -1491,6 +1491,10 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
 
     let recovered = 0;
     for (const { lease } of rows) {
+      if (await nativeWorkspaceExportPendingForLease(db, lease)) {
+        await deferOrphanedActiveLease(lease.id);
+        continue;
+      }
       if (!(await allowLegacyShutdownWorkspaceCleanup(db, lease))) {
         await deferOrphanedActiveLease(lease.id);
         continue;
@@ -1613,6 +1617,10 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
     let capped = 0;
     for (const row of rows) {
       if (pendingCleanupAttemptsInFlight.has(row.id)) continue;
+      if (!hasStopOnlyCleanup(row) && await nativeWorkspaceExportPendingForLease(db, row)) {
+        await deferPendingCleanupLease(row.id);
+        continue;
+      }
       if (!(await allowLegacyShutdownWorkspaceCleanup(db, row))) {
         await deferPendingCleanupLease(row.id);
         continue;

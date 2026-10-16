@@ -88,6 +88,7 @@ function defaultExperimentalSettings(): InstanceExperimentalSettingsPayload {
     enablePublicMcp: false,
     enableOpenAiDot: false,
     enableGrokBot: false,
+    enableMuse: false,
     enableChatConnectors: false,
     enableGitHubReviewBots: false,
     enableMemoryConnectors: false,
