@@ -250,13 +250,23 @@ async function hasCommitsMissingUpstream(checkout: string, localTips: string[], 
   resolveGitAuth: GitRemoteAuthProvider, signal?: AbortSignal) {
   const store = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-git-checkout-proof-"));
   try {
-    const auth = await resolveGitAuth(repoUrl);
-    const env = { ...process.env, ...auth?.env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull };
-    const options = { timeout: 120_000, signal, maxBuffer: 16 * 1024 * 1024, env, cwd: os.tmpdir() };
+    const options = { timeout: 120_000, signal, maxBuffer: 16 * 1024 * 1024, cwd: os.tmpdir(),
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull } };
+    // Local setup stays outside the catch below: a local failure (a full
+    // disk, say) must not be reported as an upstream problem.
     await execFile("git", ["init", "--bare", "--quiet", store], options);
     await fs.writeFile(path.join(store, "objects", "info", "alternates"), `${path.join(await fs.realpath(checkout), ".git", "objects")}\n`);
-    await execFile("git", [...auth?.configArgs ?? [], "-C", store, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
-      "--", repoUrl, "+refs/heads/*:refs/upstream/heads/*", "+refs/tags/*:refs/upstream/tags/*"], options);
+    try {
+      const auth = await resolveGitAuth(repoUrl);
+      await execFile("git", [...auth?.configArgs ?? [], "-C", store, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
+        "--", repoUrl, "+refs/heads/*:refs/upstream/heads/*", "+refs/tags/*:refs/upstream/tags/*"],
+        { ...options, env: { ...options.env, ...auth?.env } });
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      // An unreachable upstream or refused credentials proves nothing, so the
+      // checkout is kept.
+      throw new Error("managed_checkout_upstream_unavailable");
+    }
     const missing = await execFile("git", ["-C", store, "rev-list", "--max-count=1", ...localTips, "--not", "--glob=refs/upstream/*"], options);
     return missing.stdout.trim() !== "";
   } finally {

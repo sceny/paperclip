@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   assertReproducibleGitFiles,
   assertReproducibleManagedCheckout,
@@ -155,6 +155,32 @@ describe("assertReproducibleGitFiles with Paperclip-managed files", () => {
     await commit(projectSeed, "later.txt", "later upstream work");
     await git(projectSeed, "push", "-q", "origin", "main");
     await expectAccepted();
+  });
+
+  it("keeps a checkout whose upstream cannot be reached or authenticated", async () => {
+    await managedCheckout();
+    prove = (checkout, _name, signal) => assertReproducibleManagedCheckout(checkout, {
+      repoUrl: path.join(root, "missing.git"), resolveGitAuth: async () => null, signal,
+    });
+    await expectRejected("managed_checkout_upstream_unavailable");
+    prove = (checkout, _name, signal) => assertReproducibleManagedCheckout(checkout, {
+      repoUrl: projectRemote, resolveGitAuth: async () => { throw new Error("credentials refused"); }, signal,
+    });
+    await expectRejected("managed_checkout_upstream_unavailable");
+  });
+
+  it("reports a local proof failure as local, not as an upstream problem", async () => {
+    await managedCheckout();
+    const writeFile = fs.writeFile.bind(fs);
+    const spy = vi.spyOn(fs, "writeFile").mockImplementation(async (file, ...rest) => {
+      if (String(file).endsWith(path.join("objects", "info", "alternates"))) throw new Error("ENOSPC: no space left on device");
+      return writeFile(file, ...(rest as [never]));
+    });
+    try {
+      await expectRejected("ENOSPC");
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("does not trust a stale remote-tracking ref", async () => {

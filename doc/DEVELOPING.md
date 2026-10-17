@@ -2619,7 +2619,9 @@ run contexts. Unshared paths still require every existing task, run, recovery,
 lease, service and filesystem check in the same lifecycle lock.
 
 Before deletion the worker fetches the exact commit into a fresh object store
-using the company's normal Git identity and commits a versioned restoration
+using the company's normal Git identity (anonymously when no identity resolves
+outside an agent run, which still proves public repositories; a private
+repository that cannot be verified keeps its workspace) and commits a versioned restoration
 recipe to workspace metadata. Current runs, previews, pending reopening,
 unresolved recovery, dirty/untracked files, unknown ignored files, unproven
 ownership, and unsupported or unique Git state prevent deletion. Ignored files

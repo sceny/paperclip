@@ -8,7 +8,7 @@ import { withIsolatedRepositorySourceLock, verifiedRecordedIsolatedRemoteSource 
 import { managedProjectCheckoutName } from "./managed-project-checkout-name.js";
 import type { GitRemoteAuthProvider } from "./git-credentials.js";
 import { assertReproducibleGitFiles, assertReproducibleBaseGitStorage, assertReproducibleManagedCheckout, inspectGitCacheRecipe, readGitCacheRestoration,
-  verifyRemoteGitCommit, type ManagedCheckoutProver, gitCacheCommand, readGitCacheExpiration, finishGitCacheTrash, type GitCacheExpiration, GIT_CACHE_RESTORATION_KEY, GIT_CACHE_EXPIRATION_REASON } from "./git-workspace-restoration.js";
+  verifyRemoteGitCommit, GitCacheRestorationFailure, type ManagedCheckoutProver, gitCacheCommand, readGitCacheExpiration, finishGitCacheTrash, type GitCacheExpiration, GIT_CACHE_RESTORATION_KEY, GIT_CACHE_EXPIRATION_REASON } from "./git-workspace-restoration.js";
 
 
 async function allocatedBytes(target: string, shouldContinue: () => boolean): Promise<number> {
@@ -19,8 +19,25 @@ async function allocatedBytes(target: string, shouldContinue: () => boolean): Pr
   if (entry.isDirectory()) for (const name of await fs.readdir(target)) bytes += await allocatedBytes(path.join(target, name), shouldContinue);
   return bytes;
 }
-function skipReason(error: unknown) {
+export function gitExpirationSkipReason(error: unknown) {
+  if (error instanceof GitCacheRestorationFailure) return "upstream_commit_unverified";
   return error instanceof Error && /^[a-z][a-z_]+$/.test(error.message) ? error.message : "inspection_failed";
+}
+const skipReason = gitExpirationSkipReason;
+
+/**
+ * Expiration runs outside any agent run, so a company's managed GitHub
+ * connection has no run identity to resolve, and its provider throws instead
+ * of returning credentials. Upstream proofs then fall back to anonymous
+ * access: a public repository still proves its commits, and a private one
+ * fails to verify, so its workspace is kept, as before.
+ */
+export function withAnonymousGitFallback(provider: GitRemoteAuthProvider): GitRemoteAuthProvider {
+  return async (remoteUrl) => provider(remoteUrl).catch(() => null);
+}
+
+function expirationGitAuth(db: Db, workspace: Workspace) {
+  return withAnonymousGitFallback(createGitRemoteAuthProvider(db, workspace.companyId, { issueId: workspace.sourceIssueId! }));
 }
 
 const EXPIRATION_KEY = "gitCacheExpiration";
@@ -118,7 +135,7 @@ async function inspectBase(db: Db, workspace: Workspace, signal?: AbortSignal, a
   const commits = new Set([...refs.map(ref => ref.split(" ")[0]!),
     ...(await gitCacheCommand(recipe.sourcePath, ["reflog", "show", "--all", "--format=%H"], signal)).trim().split("\n").filter(Boolean)]);
   if (commits.size > 50) throw new Error("base_ref_verification_budget");
-  const auth = createGitRemoteAuthProvider(db, workspace.companyId, { issueId: workspace.sourceIssueId! });
+  const auth = expirationGitAuth(db, workspace);
   for (const commit of commits) await verifyRemoteGitCommit(recipe.repoUrl, commit, auth, signal);
   // Unreachable objects may contain unique rewritten work not present in a reflog.
   const unreachable = await gitCacheCommand(recipe.sourcePath, ["fsck", "--no-reflogs", "--unreachable", "--no-progress"], signal);
@@ -165,7 +182,7 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
         // A restored active workspace starts a new expiration cycle and records its new HEAD.
         if (!hasPendingGitExpiration(workspace) && !["active", "idle", "in_review"].includes(workspace.status)) throw new Error("not_expirable");
         if (["active", "idle", "in_review"].includes(workspace.status)) state = null;
-        const auth = createGitRemoteAuthProvider(db, workspace.companyId, { issueId: workspace.sourceIssueId! });
+        const auth = expirationGitAuth(db, workspace);
         const proveManagedCheckout = managedCheckoutProver(db, workspace, auth);
         let recipe = state ? readGitCacheRestoration(workspace)! : await inspectGitCacheRecipe(workspace,
           auth, options.signal, { proveManagedCheckout });
