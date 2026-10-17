@@ -32,7 +32,7 @@ export type GitExpirationResult = { candidate: boolean; expired: boolean; reclai
   candidateBytes: number; baseExpired: boolean; skipReason: string | null };
 
 /** Re-read the whole tree and every runtime/recovery consumer immediately before deletion. */
-async function eligible(tx: Tx, workspace: Workspace, now: Date) {
+export async function isGitWorkspaceExpirationEligible(tx: Tx, workspace: Workspace, now: Date) {
   if (workspace.metadata?.reopenPendingConsumption === true) return false;
   const rows = await tx.execute<{ allowed: boolean }>(sql`
     WITH RECURSIVE tree AS (
@@ -50,7 +50,13 @@ async function eligible(tx: Tx, workspace: Workspace, now: Date) {
         OR r.id IN (SELECT unnest(ARRAY[checkout_run_id, execution_run_id]) FROM ${issues}
           WHERE company_id = ${workspace.companyId} AND execution_workspace_id = ${workspace.id})
       )
-    ) SELECT (
+    ) SELECT CASE WHEN
+      EXISTS (SELECT 1 FROM ${executionWorkspaces} other WHERE other.id <> ${workspace.id}
+        AND (other.cwd = ${workspace.cwd} OR other.provider_ref = ${workspace.cwd}
+          OR left(other.cwd, length(${workspace.cwd}) + 1) = ${workspace.cwd} || '/'))
+      OR EXISTS (SELECT 1 FROM ${projectWorkspaces} WHERE cwd = ${workspace.cwd}
+        OR left(cwd, length(${workspace.cwd}) + 1) = ${workspace.cwd} || '/')
+    THEN false ELSE (
       EXISTS (SELECT 1 FROM tree)
       AND NOT EXISTS (SELECT 1 FROM tree WHERE status NOT IN ('done', 'cancelled')
         OR coalesce(CASE WHEN status = 'done' THEN completed_at ELSE cancelled_at END, updated_at) > ${new Date(now.getTime() - DAY_MS).toISOString()}::timestamptz)
@@ -70,12 +76,8 @@ async function eligible(tx: Tx, workspace: Workspace, now: Date) {
       AND NOT EXISTS (SELECT 1 FROM ${workspaceRuntimeServices} WHERE company_id = ${workspace.companyId}
         AND (execution_workspace_id = ${workspace.id} OR cwd = ${workspace.cwd}
           OR left(cwd, length(${workspace.cwd}) + 1) = ${workspace.cwd} || '/') AND status <> 'stopped')
-      AND NOT EXISTS (SELECT 1 FROM ${executionWorkspaces} other WHERE other.id <> ${workspace.id}
-        AND (other.cwd = ${workspace.cwd} OR other.provider_ref = ${workspace.cwd}
-          OR left(other.cwd, length(${workspace.cwd}) + 1) = ${workspace.cwd} || '/'))
-      AND NOT EXISTS (SELECT 1 FROM ${projectWorkspaces} WHERE cwd = ${workspace.cwd}
-        OR left(cwd, length(${workspace.cwd}) + 1) = ${workspace.cwd} || '/')
-    ) AS allowed`);
+
+    ) END AS allowed`);
   return rows[0]?.allowed === true;
 }
 
@@ -158,7 +160,7 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
         if (!acquired[0]?.locked) throw new Error("lifecycle_busy");
         let workspace = (await db.select().from(executionWorkspaces).where(and(eq(executionWorkspaces.id, snapshot.id), eq(executionWorkspaces.companyId, snapshot.companyId))))[0];
         if (!workspace || workspace.updatedAt.getTime() !== snapshot.updatedAt.getTime()) throw new Error("workspace_changed");
-        if (!await eligible(tx, workspace, options.now)) throw new Error("live_or_unresolved_consumer");
+        if (!await isGitWorkspaceExpirationEligible(tx, workspace, options.now)) throw new Error("live_or_unresolved_consumer");
         let state = ["active", "idle", "in_review"].includes(workspace.status) ? null : readGitCacheExpiration(workspace);
         // A restored active workspace starts a new expiration cycle and records its new HEAD.
         if (!hasPendingGitExpiration(workspace) && !["active", "idle", "in_review"].includes(workspace.status)) throw new Error("not_expirable");
@@ -204,7 +206,7 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
             .where(eq(executionWorkspaces.id, snapshot.id)).returning();
         };
         await options.beforeDelete?.(workspace);
-        if (!await eligible(tx, workspace, options.now)) throw new Error("live_or_unresolved_consumer");
+        if (!await isGitWorkspaceExpirationEligible(tx, workspace, options.now)) throw new Error("live_or_unresolved_consumer");
         if (!state.workspaceRemoved && present) {
           const { acquireGitWorktreeCleanupLock } = await import("./workspace-runtime.js");
           const lock = await acquireGitWorktreeCleanupLock(recipe.worktreePath);
@@ -224,7 +226,7 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
           try {
             if ((!state.baseTrash || !await exists(state.baseTrash)) && await exists(recipe.sourcePath)) {
               const bytes = await inspectBase(db, workspace!, options.signal);
-              if (!await eligible(tx, workspace!, options.now)) throw new Error("live_or_unresolved_consumer");
+              if (!await isGitWorkspaceExpirationEligible(tx, workspace!, options.now)) throw new Error("live_or_unresolved_consumer");
               const trash = path.join(path.dirname(recipe.sourcePath), `.expired-git-base-${snapshot.id}-${state.generation}`);
               if (await exists(trash)) throw new Error("unknown_base_trash");
               state.baseTrash = trash;

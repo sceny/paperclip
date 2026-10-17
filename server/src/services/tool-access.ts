@@ -3065,6 +3065,14 @@ async function gitHubReadGrantAccess(db: Db, companyId: string, connectionId: st
   return { connection, allowed, legacyShared };
 }
 
+async function lockManagedAppPolicies(client: ToolAccessMutationDb, companyId: string, connectionId: string) {
+  await client.select({ id: toolPolicies.id }).from(toolPolicies).where(and(
+    eq(toolPolicies.companyId, companyId), eq(toolPolicies.policyType, "require_approval"),
+    sql`${toolPolicies.config}->>'source' = 'app_gallery_finish'`,
+    sql`${toolPolicies.config}->>'connectionId' = ${connectionId}`,
+  )).orderBy(toolPolicies.id).for("no key update");
+}
+
 export function toolAccessService(
   db: Db,
   options: ToolAccessServiceOptions = {},
@@ -5629,7 +5637,7 @@ export function toolAccessService(
     activeCatalogEntryIds: string[];
     restoreDraftDefaults?: boolean;
     actor?: ActorInfo;
-  }) {
+  }, dbClient: ToolAccessMutationDb = db) {
     // Catalog discovery also runs while the setup wizard is still a draft.
     // Access is not granted until the operator finishes that wizard, so a
     // draft refresh must never manufacture a profile or company-wide binding.
@@ -5640,7 +5648,7 @@ export function toolAccessService(
     if (input.connection.status !== "active" && !input.restoreDraftDefaults)
       return;
     const profileKey = `app:${input.connection.id}`;
-    let [profile] = await db
+    let [profile] = await dbClient
       .select()
       .from(toolProfiles)
       .where(
@@ -5649,11 +5657,12 @@ export function toolAccessService(
           eq(toolProfiles.profileKey, profileKey),
         ),
       )
-      .limit(1);
+      .limit(1).for("no key update");
+    await lockManagedAppPolicies(dbClient, input.connection.companyId, input.connection.id);
     const createdProfile = !profile;
     const resetToRecommendedDefaults = !profile || profile.status !== "active";
     if (!profile) {
-      const [sameName] = await db
+      const [sameName] = await dbClient
         .select({ id: toolProfiles.id })
         .from(toolProfiles)
         .where(
@@ -5666,7 +5675,7 @@ export function toolAccessService(
       const profileName = sameName
         ? `${input.connection.name} (${input.connection.id.replace(/-/g, "").slice(0, 8)})`
         : input.connection.name;
-      [profile] = await db
+      [profile] = await dbClient
         .insert(toolProfiles)
         .values({
           companyId: input.connection.companyId,
@@ -5681,7 +5690,7 @@ export function toolAccessService(
           },
         })
         .returning();
-      await db.insert(toolProfileBindings).values({
+      await dbClient.insert(toolProfileBindings).values({
         companyId: input.connection.companyId,
         profileId: profile.id,
         targetType: "company",
@@ -5702,7 +5711,7 @@ export function toolAccessService(
       // references it (for example, an MCP gateway). Reconnecting revives the
       // same connection id, so restore that retained profile as a fresh
       // all-agents assignment instead of leaving every read action Off.
-      [profile] = await db
+      [profile] = await dbClient
         .update(toolProfiles)
         .set({
           name: input.connection.name,
@@ -5717,7 +5726,7 @@ export function toolAccessService(
         })
         .where(eq(toolProfiles.id, profile.id))
         .returning();
-      await db
+      await dbClient
         .delete(toolProfileBindings)
         .where(
           and(
@@ -5725,7 +5734,7 @@ export function toolAccessService(
             eq(toolProfileBindings.profileId, profile.id),
           ),
         );
-      await db
+      await dbClient
         .delete(toolProfileEntries)
         .where(
           and(
@@ -5733,7 +5742,7 @@ export function toolAccessService(
             eq(toolProfileEntries.profileId, profile.id),
           ),
         );
-      await db.insert(toolProfileBindings).values({
+      await dbClient.insert(toolProfileBindings).values({
         companyId: input.connection.companyId,
         profileId: profile.id,
         targetType: "company",
@@ -5761,7 +5770,7 @@ export function toolAccessService(
         connection: input.connection,
         askFirstEntries: [],
         actor: input.actor,
-      });
+      }, dbClient);
     }
 
     // A new or revived connection starts with every discovered action enabled.
@@ -5775,7 +5784,7 @@ export function toolAccessService(
       ),
     ];
     if (candidateIds.length === 0) return;
-    const existingEntries = await db
+    const existingEntries = await dbClient
       .select({ catalogEntryId: toolProfileEntries.catalogEntryId })
       .from(toolProfileEntries)
       .where(
@@ -5792,7 +5801,7 @@ export function toolAccessService(
     );
     const entryIds = candidateIds.filter((id) => !configuredIds.has(id));
     if (entryIds.length === 0) return;
-    await db.insert(toolProfileEntries).values(
+    await dbClient.insert(toolProfileEntries).values(
       entryIds.map((catalogEntryId) => ({
         companyId: input.connection.companyId,
         profileId: profile.id,
@@ -6732,6 +6741,9 @@ export function toolAccessService(
       .returning({ id: connectionTokenIssuances.id });
 
     const archived = await db.transaction(async (tx) => {
+      await tx.select({ id: toolApplications.id }).from(toolApplications)
+        .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, connection.companyId)))
+        .for("update");
       const [updatedConnection] = await tx
         .update(toolConnections)
         .set({ status: "archived", enabled: false, updatedAt: now })
@@ -7755,6 +7767,16 @@ export function toolAccessService(
       }));
     }
 
+    const publish = <T>(write: (client: ToolAccessMutationDb) => Promise<T>): Promise<T> => db.transaction(async tx => {
+      await tx.select({ id: toolApplications.id }).from(toolApplications)
+        .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, connection.companyId)))
+        .for("update");
+      await tx.select({ id: toolConnections.id }).from(toolConnections)
+        .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, connection.companyId)))
+        .for("update");
+      return write(tx);
+    });
+    descriptors = [...new Map(descriptors.map(descriptor => [descriptor.name, descriptor])).values()];
     const existingRows = await db
       .select()
       .from(toolCatalogEntries)
@@ -7767,9 +7789,9 @@ export function toolAccessService(
       const discoveredNames = new Set(descriptors.map((descriptor) => descriptor.name));
       const removedStatus = nativeDaytona ? "removed" : "disabled";
       const removedIds = existingRows.filter((entry) => !discoveredNames.has(entry.toolName) && entry.status !== removedStatus).map((entry) => entry.id);
-      if (removedIds.length) await db.update(toolCatalogEntries)
+      if (removedIds.length) await publish(tx => tx.update(toolCatalogEntries)
         .set({ status: removedStatus, quarantineReason: nativeDaytona ? "provider_tool_removed" : "mcp_tool_removed", updatedAt: refreshedAt })
-        .where(and(eq(toolCatalogEntries.companyId, connection.companyId), eq(toolCatalogEntries.connectionId, connection.id), inArray(toolCatalogEntries.id, removedIds)));
+        .where(and(eq(toolCatalogEntries.companyId, connection.companyId), eq(toolCatalogEntries.connectionId, connection.id), inArray(toolCatalogEntries.id, removedIds))));
     }
     // Retired native actions are absent from discovery, but old catalog rows
     // still need to show as disabled. Gateway denial also applies before refresh.
@@ -7777,10 +7799,10 @@ export function toolAccessService(
       ? existingRows.filter((entry) => isRailwayToolBlocked(entry.toolName)).map((entry) => entry.id)
       : [];
     if (blockedRailwayEntryIds.length > 0) {
-      await db.update(toolCatalogEntries).set({ status: "disabled", updatedAt: refreshedAt })
-        .where(and(eq(toolCatalogEntries.connectionId, connection.id), inArray(toolCatalogEntries.id, blockedRailwayEntryIds)));
+      await publish(tx => tx.update(toolCatalogEntries).set({ status: "disabled", updatedAt: refreshedAt })
+        .where(and(eq(toolCatalogEntries.connectionId, connection.id), inArray(toolCatalogEntries.id, blockedRailwayEntryIds))));
     }
-    const updatedEntries: ToolCatalogEntry[] = [];
+    const catalogValues: Array<typeof toolCatalogEntries.$inferInsert> = [];
     let quarantinedCount = 0;
     const sourceTemplateKey =
       typeof asRecord(connection.config).sourceTemplateKey === "string"
@@ -7844,69 +7866,45 @@ export function toolAccessService(
               : "active";
       if (shouldQuarantine && !providerPermanentlyBlocked) quarantinedCount += 1;
 
-      if (existing) {
-        const [updated] = await db
-          .update(toolCatalogEntries)
-          .set({
-            title: descriptor.title ?? null,
-            description: descriptor.description ?? null,
-            inputSchema: descriptor.inputSchema ?? {},
-            annotations: descriptor.annotations ?? {},
-            riskLevel,
-            isReadOnly: riskLevel === "read",
-            isWrite: riskLevel === "write",
-            isDestructive: riskLevel === "destructive",
-            status,
-            versionHash: hash,
-            schemaHash,
-            lastSeenAt: refreshedAt,
-            quarantinedAt:
-              status === "quarantined"
-                ? shouldQuarantine
-                  ? refreshedAt
-                  : existing.quarantinedAt
-                : null,
-            quarantineReason:
-              status === "quarantined"
-                ? shouldQuarantine
-                  ? "pending_review"
-                  : existing.quarantineReason
-                : null,
-            updatedAt: refreshedAt,
-          })
-          .where(eq(toolCatalogEntries.id, existing.id))
-          .returning();
-        updatedEntries.push(toCatalogEntry(updated));
-      } else {
-        const [created] = await db
-          .insert(toolCatalogEntries)
-          .values({
-            companyId: connection.companyId,
-            applicationId: connection.applicationId,
-            connectionId: connection.id,
-            name: descriptor.name,
-            toolName: descriptor.name,
-            entryKind: "tool",
-            title: descriptor.title ?? null,
-            description: descriptor.description ?? null,
-            inputSchema: descriptor.inputSchema ?? {},
-            annotations: descriptor.annotations ?? {},
-            riskLevel,
-            isReadOnly: riskLevel === "read",
-            isWrite: riskLevel === "write",
-            isDestructive: riskLevel === "destructive",
-            status,
-            versionHash: hash,
-            schemaHash,
-            firstSeenAt: refreshedAt,
-            lastSeenAt: refreshedAt,
-            quarantinedAt: shouldQuarantine ? refreshedAt : null,
-            quarantineReason: shouldQuarantine ? "pending_review" : null,
-          })
-          .returning();
-        updatedEntries.push(toCatalogEntry(created));
-      }
+      catalogValues.push({
+        id: existing?.id, companyId: connection.companyId, applicationId: connection.applicationId,
+        connectionId: connection.id, name: existing?.name ?? descriptor.name, toolName: descriptor.name, entryKind: "tool",
+        title: descriptor.title ?? null, description: descriptor.description ?? null,
+        inputSchema: descriptor.inputSchema ?? {}, annotations: descriptor.annotations ?? {}, riskLevel,
+        isReadOnly: riskLevel === "read", isWrite: riskLevel === "write", isDestructive: riskLevel === "destructive",
+        status, versionHash: hash, schemaHash, firstSeenAt: existing?.firstSeenAt ?? refreshedAt, lastSeenAt: refreshedAt,
+        quarantinedAt: existing
+          ? status === "quarantined" ? shouldQuarantine ? refreshedAt : existing.quarantinedAt : null
+          : shouldQuarantine ? refreshedAt : null,
+        quarantineReason: existing
+          ? status === "quarantined" ? shouldQuarantine ? "pending_review" : existing.quarantineReason : null
+          : shouldQuarantine ? "pending_review" : null,
+        updatedAt: existing ? refreshedAt : new Date(),
+      });
     }
+    const catalogRows: Array<typeof toolCatalogEntries.$inferSelect> = [];
+    const newCatalogEntryIds = new Set<string>();
+    for (let index = 0; index < catalogValues.length; index += 500) {
+      const chunk = catalogValues.slice(index, index + 500);
+      catalogRows.push(...await publish(async tx => {
+        const current = await tx.select({ name: toolCatalogEntries.name, status: toolCatalogEntries.status })
+          .from(toolCatalogEntries).where(and(eq(toolCatalogEntries.connectionId, connection.id), inArray(toolCatalogEntries.name, chunk.map(entry => entry.name))));
+        const existingNonQuarantinedNames = new Set(current.filter(entry => entry.status !== "quarantined").map(entry => entry.name));
+        const rows = await tx.insert(toolCatalogEntries).values(chunk)
+          .onConflictDoUpdate({ target: [toolCatalogEntries.connectionId, toolCatalogEntries.name], set: {
+            title: sql`excluded.title`, description: sql`excluded.description`, inputSchema: sql`excluded.input_schema`,
+            annotations: sql`excluded.annotations`, riskLevel: sql`excluded.risk_level`, isReadOnly: sql`excluded.is_read_only`,
+            isWrite: sql`excluded.is_write`, isDestructive: sql`excluded.is_destructive`,
+            status: sql`CASE WHEN ${toolCatalogEntries.status} = 'disabled' AND ${toolCatalogEntries.quarantineReason} IS DISTINCT FROM 'mcp_tool_removed' THEN 'disabled' ELSE excluded.status END`,
+            versionHash: sql`excluded.version_hash`, schemaHash: sql`excluded.schema_hash`, lastSeenAt: sql`excluded.last_seen_at`,
+            quarantinedAt: sql`excluded.quarantined_at`, quarantineReason: sql`excluded.quarantine_reason`, updatedAt: sql`excluded.updated_at`,
+          } }).returning();
+        for (const row of rows) if (!existingNonQuarantinedNames.has(row.name)) newCatalogEntryIds.add(row.id);
+        return rows;
+      }));
+    }
+    const catalogByName = new Map(catalogRows.map(row => [row.toolName, row]));
+    const updatedEntries = descriptors.map(descriptor => toCatalogEntry(catalogByName.get(descriptor.name)!));
 
     const preserveQuarantine =
       isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret" || isDaytonaConnection(connection);
@@ -7957,20 +7955,17 @@ export function toolAccessService(
     const preserveMcpAccess = connection.config.mcpPreserveAccess === true
       && isRemoteMcpConnectorMethod(connection.config.sourceTemplateKey, connection.config.connectionMethodKey);
     if (!refreshOptions.skipDefaultProfileSync || preserveMcpAccess) {
-      await enableCatalogEntriesByDefault({
+      await publish(tx => enableCatalogEntriesByDefault({
         connection: updatedConnection,
         // Discovery must not re-enable actions the operator turned Off,
         // including curated MCP connections during API-key replacement.
         newCatalogEntryIds: activeEntries
-          .filter((entry) => {
-            const previous = existingByName.get(entry.toolName);
-            return !previous || previous.status === "quarantined";
-          })
+          .filter((entry) => newCatalogEntryIds.has(entry.id))
           .map((entry) => entry.id),
         activeCatalogEntryIds: activeEntries.map((entry) => entry.id),
         restoreDraftDefaults: refreshOptions.restoreDraftDefaults || preserveMcpAccess,
         actor,
-      });
+      }, tx));
     }
     await audit({
       companyId: connection.companyId,
@@ -13930,6 +13925,9 @@ export function toolAccessService(
       const config = { ...connection.config };
       delete config.mcpPreserveAccess;
       const updated = await db.transaction(async (tx) => {
+        await tx.select({ id: toolApplications.id }).from(toolApplications)
+          .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, companyId)))
+          .for("update");
         const [row] = await tx.update(toolConnections).set({ config, transportConfig: config, status: "active", enabled: true, ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}), updatedAt: new Date() })
           .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, companyId))).returning();
         await tx.update(toolApplications).set({ status: "active", updatedAt: new Date() }).where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, companyId)));
@@ -14021,6 +14019,9 @@ export function toolAccessService(
             metadata: { source: "app_gallery_finish" },
           }));
     const transactionResult = await db.transaction(async (tx) => {
+      await tx.select({ id: toolApplications.id }).from(toolApplications)
+        .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, companyId)))
+        .for("update");
       await tx
         .select({ id: toolConnections.id })
         .from(toolConnections)
@@ -14040,7 +14041,8 @@ export function toolAccessService(
             eq(toolProfiles.profileKey, profileKey),
           ),
         )
-        .limit(1);
+        .limit(1).for("no key update");
+      await lockManagedAppPolicies(tx, companyId, connection.id);
       // A renamed connection can leave its old profile name in use. Resolve
       // names against profiles too, including when finalizing an installed draft.
       const otherProfiles = await tx
@@ -15625,6 +15627,12 @@ export function toolAccessService(
           ),
         )
         .limit(1);
+      await tx.select({ id: toolApplications.id }).from(toolApplications)
+        .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, connection.companyId)))
+        .for("update");
+      await tx.select({ id: toolConnections.id }).from(toolConnections)
+        .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, connection.companyId)))
+        .for("update");
       const existingRefs =
         existingCredentialGrant?.credentialSecretRefs ??
         (personalCredential || agentCredential
@@ -16245,6 +16253,12 @@ export function toolAccessService(
             ),
           )
           .limit(1);
+        await tx.select({ id: toolApplications.id }).from(toolApplications)
+          .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, connection.companyId)))
+          .for("update");
+        await tx.select({ id: toolConnections.id }).from(toolConnections)
+          .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, connection.companyId)))
+          .for("update");
         const subjectCredentialSecretRefs =
           existingUserGrant?.credentialSecretRefs ?? [];
         const accessRef = await createOrRotateOAuthSecret(
@@ -16558,6 +16572,12 @@ export function toolAccessService(
           "Only a company owner, admin, or member with connection-manager permission can share credentials with the organization.",
         );
       }
+      await tx.select({ id: toolApplications.id }).from(toolApplications)
+        .where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, connection.companyId)))
+        .for("update");
+      await tx.select({ id: toolConnections.id }).from(toolConnections)
+        .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, connection.companyId)))
+        .for("update");
       const txSecrets = secretService(tx);
       const txSecretContext = { dbClient: tx, secretClient: txSecrets };
 

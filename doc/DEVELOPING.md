@@ -2596,6 +2596,11 @@ PR merge or delivery status. Enable it with
 reclaimed bytes, base removal, and skip reasons. The existing bounded lifecycle
 sweep supplies scheduling and shutdown cancellation.
 
+The eligibility query first rejects paths shared with another execution or
+project checkout. This prevents a known shared-path veto from scanning retained
+run contexts. Unshared paths still require every existing task, run, recovery,
+lease, service and filesystem check in the same lifecycle lock.
+
 Before deletion the worker fetches the exact commit into a fresh object store
 using the company's normal Git identity and commits a versioned restoration
 recipe to workspace metadata. Current runs, previews, pending reopening,
