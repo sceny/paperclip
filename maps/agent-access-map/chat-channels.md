@@ -138,6 +138,15 @@ the current bot token without resolving unrelated webhook credentials. See the
 and [batch failure controls](../../server/src/services/connectors/slack-endpoint-preparation.test.ts).
 These local controls do not establish live Slack latency or provider access.
 
+Catalog authorization projection (2026-10-17): tool discovery uses the same live
+service-owned task, company, agent, requester, endpoint and credential checks as
+full authority resolution. It omits the revision digest and search-action token,
+which catalog descriptors do not consume. Connector assignments and governed
+operations retain full revision resolution; invocation policy is still checked
+by the gateway. Registry replacement and missing-service controls are in
+[authority registration tests](../../server/src/services/connectors/slack-authority.test.ts).
+This is a source and local-database contract; hosted latency needs live evidence.
+
 New conversations resolve typed project/workspace defaults from their endpoint
 and destination under the task-creation transaction. Defaults do not authorize
 private sources: admission checks the linked user's authority and assigned agent.

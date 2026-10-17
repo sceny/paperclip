@@ -68,6 +68,13 @@ and confirm that the next preparation excludes it. The
 uses real PostgreSQL with one connection and controlled credential resolution;
 it does not prove live provider latency or an end-to-end response target.
 
+Catalog discovery rechecks live authority and current credentials without
+computing the unused compatibility fingerprint. Assignment snapshots and
+governed calls retain full revision resolution. The same regression verifies
+identical catalog membership, absence of digest SQL during discovery, and
+revocation on the next preparation. A faster component is not proof of a faster
+Slack reaction or final reply; measure those separately on the deployed revision.
+
 ### `endpoint-management`
 
 Automated: [channel integration](../../server/src/__tests__/chat-channels.integration.test.ts) covers shared endpoint/delivery behavior; live credential repair and provider ownership remain manual checks.

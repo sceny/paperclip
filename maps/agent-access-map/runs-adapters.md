@@ -105,6 +105,15 @@ serial. This changes no API or agent grant. The
 [real-shell controls](../../server/src/services/native-runtime/native-artifact-preparation.test.ts)
 do not qualify the whole validation capability or a live response-time target.
 
+Scoped backend-preparation source evidence: remote native Codex can prepare its
+managed GitHub transport during fresh assigned-MCP discovery. The session claim,
+wake binding, review assignment and complete gateway launch binding checks still
+precede that work. Provider startup waits for both results. Failures drain both
+operations before the existing run cleanup releases any created GitHub access.
+No grant, token, authority cache or provider dispatch bypass is added. The
+[executor controls](../../server/src/services/native-runtime/native-session-executor.test.ts)
+remain separate from live latency and permitted/denied agent acceptance.
+
 For a linked Codex subscription with server-resolved managed credential provenance,
 setup checks the resolved owner and stages a private probe copy before local or
 remote isolation. Without a selected API key, an unbound linked `CODEX_HOME` is
