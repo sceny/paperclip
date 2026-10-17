@@ -19,3 +19,7 @@
 
 # Time/load-sensitive: failed in the full run and in the script's re-run on 2026-10-16 (twice, builds 6e4680102 and 4d89b258d), but passes 22/22 when run alone through box-gate-runner.sh on plain upstream/master and on the failed build. Our branches do not touch Git workspace expiration. Added 2026-10-16 (upstream 9f4a956b9).
 |@paperclipai/server| src/__tests__/git-workspace-expiration.test.ts > reconstructable Git expiration > expires again after a reopened task consumes its fence and finishes
+
+# Load-sensitive: both tests failed in the full run and in the script's re-run on 2026-10-16 (builds 2414b5815, 9e399e9dd, 4fc0a1dc2; the last one already contains upstream 5555817c2), always with `unknown_base_git_files` instead of `unpushed_managed_checkout`. They pass 14/14 when run alone through box-gate-runner.sh on build 4fc0a1dc2 (2026-10-17, lower load). Our branches do not touch Git files. Added 2026-10-17 (upstream 5555817c2).
+|@paperclipai/server| src/__tests__/git-reproducible-managed-checkouts.test.ts > assertReproducibleGitFiles with Paperclip-managed files > rejects a detached HEAD commit after its reflog expires
+|@paperclipai/server| src/__tests__/git-reproducible-managed-checkouts.test.ts > assertReproducibleGitFiles with Paperclip-managed files > rejects commits kept by a branch, a tag, or only the reflog
