@@ -13,7 +13,12 @@ export function createAgentAvatarPool(concurrency = 2, maxQueue = 64) {
   function spawn() {
     const source = new URL(import.meta.url).pathname.endsWith(".ts");
     const url = new URL(source ? "./agent-avatar-worker.ts" : "./agent-avatar-worker.js", import.meta.url);
-    const worker = source
+    // The worker imports workspace packages as TypeScript source. A worker
+    // inherits the tsx loader only when the main thread was started with it;
+    // the production runtime bundle runs without a loader, so load the
+    // worker through tsx's API instead.
+    const loaderInherited = process.execArgv.some((arg) => arg.includes("tsx"));
+    const worker = source || !loaderInherited
       ? new Worker(`import(${JSON.stringify(import.meta.resolve('tsx/esm/api'))}).then(({tsImport}) => tsImport(${JSON.stringify(url.href)}, ${JSON.stringify(import.meta.url)}));`, { eval: true })
       : new Worker(url);
     workers.add(worker);

@@ -2,12 +2,39 @@ import { isPreDispatchReviewWait } from "./pre-dispatch-review-wait.js";
 import { and, desc, eq, gt, inArray, not, or, sql } from "drizzle-orm";
 import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
 import { z } from "zod";
-import { agentWakeupRequests, chatConversations, chatEndpoints, heartbeatRuns, issueComments, issues, issueRecoveryActions, toolConnections, type Db } from "@paperclipai/db";
+import { agentWakeupRequests, chatConversations, chatEndpoints, environmentLeases, heartbeatRuns, issueComments, issues, issueRecoveryActions, nativeRunFinalizations, toolConnections, type Db } from "@paperclipai/db";
 import { canContinueCancelledRun, readRunCancellation } from "./run-cancellation.js";
 import { canRetryStoppedRun } from "./cancelled-native-startup.js";
 import { queuedCommentIdsFromWakePayload } from "./issue-queued-comment-queue.js";
 import { EXECUTION_RECONCILIATION_CAUSES, type ExecutionBlocker } from "@paperclipai/shared";
 import { hasRequiredWorkspaceRecovery, LEGACY_WORKSPACE_RECOVERY_SCHEMA, nativeRunHasNoWorkspaceAccess } from "./workspace-restore-recovery-state.js";
+
+export async function hasPendingRunCleanup(db: Db, companyId: string, runId: string): Promise<boolean> {
+  const [state] = await db.execute<{ pending: boolean }>(sql`SELECT
+    ${heartbeatRuns.runnerProfileJson}->>'nativeWorkspaceFinalizationOwner' IS NOT NULL
+    OR EXISTS (SELECT 1 FROM ${environmentLeases}
+      WHERE ${environmentLeases.companyId} = ${companyId} AND ${environmentLeases.heartbeatRunId} = ${runId}
+        AND (( ${environmentLeases.releasedAt} IS NULL AND NOT COALESCE(
+            ${environmentLeases.status} = 'retained' AND ${environmentLeases.leasePolicy} = 'reuse_by_environment'
+              AND ${environmentLeases.cleanupStatus} = 'success', false))
+          OR ${environmentLeases.status} IN ('active', 'pending_cleanup') OR ${environmentLeases.cleanupStatus} = 'failed'
+          OR COALESCE(${environmentLeases.metadata}->>'pendingCleanupInFlight', 'false') <> 'false'
+          OR (${heartbeatRuns.runtimeMode} = 'native' AND NOT COALESCE(
+            (${environmentLeases.status} IN ('released', 'expired', 'failed')
+              AND ${environmentLeases.releasedAt} IS NOT NULL AND (${environmentLeases.cleanupStatus} = 'success'
+                OR (${environmentLeases.cleanupStatus} IS NULL AND (
+                  (${environmentLeases.provider} = 'local' AND ${environmentLeases.providerLeaseId} IS NULL)
+                  OR (${environmentLeases.provider} = 'ssh' AND ${environmentLeases.metadata}->>'driver' = 'ssh'
+                    AND ${environmentLeases.providerLeaseId} LIKE 'ssh://%')))))
+            OR (${environmentLeases.status} = 'retained' AND ${environmentLeases.leasePolicy} = 'reuse_by_environment'
+              AND ${environmentLeases.cleanupStatus} = 'success'), false))))
+    OR EXISTS (SELECT 1 FROM ${nativeRunFinalizations}
+      WHERE ${nativeRunFinalizations.companyId} = ${companyId} AND ${nativeRunFinalizations.runId} = ${runId}
+        AND (${nativeRunFinalizations.leaseOwner} IS NOT NULL
+          OR ${nativeRunFinalizations.phase} NOT IN ('committed', 'applied', 'terminal_failure'))) AS pending
+    FROM ${heartbeatRuns} WHERE ${heartbeatRuns.companyId} = ${companyId} AND ${heartbeatRuns.id} = ${runId} LIMIT 1`);
+  return state?.pending !== false;
+}
 
 /** Resolved recovery bookkeeping can still carry an effective no-replay hold. */
 export function executionBlockerPredicate() {

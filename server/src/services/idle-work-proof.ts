@@ -15,6 +15,37 @@ export function finishedIdleWake(alias: string): string {
         AND ${finishedIdleRun('wake_target')})))`;
 }
 
+export function completedAgentUnblockRequest(issue: string): string {
+  return `${issue}.blocked_transition_at IS NOT NULL
+    AND ${issue}.blocked_owner_notified_at >= ${issue}.blocked_transition_at
+    AND jsonb_typeof(${issue}.unblock_descriptor) = 'object'
+    AND ${issue}.unblock_descriptor = jsonb_build_object('owner', ${issue}.unblock_descriptor->'owner',
+      'action', ${issue}.unblock_descriptor->'action')
+    AND jsonb_typeof(${issue}.unblock_descriptor->'owner') = 'object'
+    AND ${issue}.unblock_descriptor->'owner' = jsonb_build_object('agentId', ${issue}.unblock_descriptor->'owner'->'agentId')
+    AND jsonb_typeof(${issue}.unblock_descriptor->'owner'->'agentId') = 'string'
+    AND jsonb_typeof(${issue}.unblock_descriptor->'action') = 'string'
+    AND length(trim(${issue}.unblock_descriptor->>'action')) > 0
+    AND EXISTS (SELECT 1 FROM agents unblock_owner
+      WHERE unblock_owner.company_id = ${issue}.company_id
+        AND unblock_owner.id::text = ${issue}.unblock_descriptor->'owner'->>'agentId')
+    AND EXISTS (SELECT 1 FROM agent_wakeup_requests unblock_wake
+      WHERE unblock_wake.company_id = ${issue}.company_id
+        AND unblock_wake.agent_id::text = ${issue}.unblock_descriptor->'owner'->>'agentId'
+        AND unblock_wake.idempotency_key = 'issue-unblock:' || ${issue}.id::text || ':'
+          || to_char(${issue}.blocked_transition_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+        AND unblock_wake.payload->>'issueId' = ${issue}.id::text
+        AND unblock_wake.payload->>'action' = ${issue}.unblock_descriptor->>'action'
+        AND unblock_wake.status IN ('completed', 'coalesced') AND unblock_wake.finished_at IS NOT NULL
+        AND EXISTS (SELECT 1 FROM heartbeat_runs unblock_target
+          WHERE unblock_target.id = unblock_wake.run_id AND unblock_target.company_id = ${issue}.company_id
+            AND unblock_target.agent_id = unblock_wake.agent_id
+            AND (unblock_target.context_snapshot->>'issueId' = ${issue}.id::text
+              OR unblock_target.native_issue_id = ${issue}.id)
+            AND (unblock_target.native_issue_id IS NULL OR unblock_target.native_issue_id = ${issue}.id)
+            AND ${finishedIdleRun('unblock_target')}))`;
+}
+
 export function connectionDeliveryWaitingForResponse(delivery: string): string {
   return `EXISTS (SELECT 1 FROM issue_thread_interactions waiting_delivery
     JOIN issues waiting_issue ON waiting_issue.id = waiting_delivery.issue_id

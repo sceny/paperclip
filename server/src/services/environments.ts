@@ -1653,6 +1653,11 @@ export function environmentService(db: Db) {
       },
     ) => {
       const now = new Date();
+      const releaseMetadata = options?.remoteExecutionTermination
+        ? sql`coalesce(${environmentLeases.metadata}, '{}'::jsonb) || ${JSON.stringify({ remoteExecutionTermination: options.remoteExecutionTermination })}::jsonb`
+        : sql`${environmentLeases.metadata} - 'remoteExecutionTermination'`;
+      const cleanupSettled = options?.expectedPendingCleanupAttemptId && options.cleanupStatus === "success"
+        && status !== "pending_cleanup";
       const row = await db
         .update(environmentLeases)
         .set({
@@ -1664,9 +1669,9 @@ export function environmentService(db: Db) {
           ...(options?.cleanupStatus !== undefined ? { cleanupStatus: options.cleanupStatus } : {}),
           // A later release without a receipt cannot reuse an earlier stop's
           // authority (for example after a same-run lease resume).
-          metadata: options?.remoteExecutionTermination
-            ? sql`coalesce(${environmentLeases.metadata}, '{}'::jsonb) || ${JSON.stringify({ remoteExecutionTermination: options.remoteExecutionTermination })}::jsonb`
-            : sql`${environmentLeases.metadata} - 'remoteExecutionTermination'`,
+          metadata: cleanupSettled
+            ? sql`coalesce(${releaseMetadata}, '{}'::jsonb) || '{"pendingCleanupInFlight":false,"pendingCleanupLeaseExpiresAtMs":0}'::jsonb`
+            : releaseMetadata,
         })
         .where(and(eq(environmentLeases.id, id), options?.expectedPendingCleanupAttemptId
           ? and(eq(environmentLeases.status, "pending_cleanup"),

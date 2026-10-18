@@ -985,6 +985,17 @@ pending, `acpPendingToolKinds` lists their ACP tool kinds as a sorted, comma-sep
 string drawn only from the closed ACP `ToolKind` enum plus `unknown`; the
 server drops the field if any other value appears.
 
+Claude ACP turns also run a stalled-tool watchdog. A pending tool call that gets
+no ACP update for 30 minutes (`stalledToolTimeoutSec`; kept at least 15 minutes
+above `MCP_TOOL_TIMEOUT` and `BASH_MAX_TIMEOUT_MS`) ends the turn through the
+same cancel and fail-fast deadline as a duplex channel loss. The run fails with
+`acpx_tool_stalled` instead of waiting for the wall-clock timeout, and records
+`acpStalledToolKind` (one closed `ToolKind` label or `unknown`) and
+`acpStalledToolSilentMs`. The stop-time fields above are measured when the
+watchdog fired. A live subagent's Task call keeps receiving heartbeats, so only
+a call that itself went silent trips the watchdog. Other ACP agents are watched
+only when `stalledToolTimeoutSec` is set.
+
 ACP and legacy OpenCode results retain the adapter's resolved wall-clock timeout as
 `adapterExecutionTimeout` in the instance run result. Finalization uses it for
 `effectiveTimeoutSec`, `timeoutSource`, and `timeoutConfigured`. Sources are

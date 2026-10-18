@@ -458,6 +458,21 @@ describe("run failure diagnostics", () => {
     });
   });
 
+  it("includes the stalled tool's closed kind label and silent time", () => {
+    const result = sanitizeRunFailureDiagnostics(collectRunFailureDiagnostics(run({ resultJson: {
+      acpStalledToolKind: "other", acpStalledToolSilentMs: 1_800_000, acpStalledToolTitle: "private lookup",
+    } }), {}));
+    expect(result.execution).toEqual({ acpStalledToolKind: "other", acpStalledToolSilentMs: 1_800_000 });
+    expect(JSON.stringify(result)).not.toContain("private");
+  });
+
+  it.each(["other,execute", "private lookup", "", "Other", ["other"], 1])(
+    "omits a stalled tool kind that is not one closed label (%j)", (value) => {
+      const result = collectRunFailureDiagnostics(run({ resultJson: { acpStalledToolKind: value } }), {});
+      expect(result.execution).toEqual({});
+    },
+  );
+
   it.each(["execute,private command", "", "execute,", "Execute", ["execute"], 1])(
     "omits pending tool kinds that are not closed labels (%j)", (value) => {
       const result = collectRunFailureDiagnostics(run({ resultJson: { acpPendingToolKinds: value } }), {});
@@ -470,6 +485,7 @@ describe("run failure diagnostics", () => {
       const result = collectRunFailureDiagnostics(run({ resultJson: {
         acpLastEventAgeMs: value, acpObservedEventCount: value, acpPendingToolCount: value,
         acpToolInventoryComplete: value, acpLastEventAgeAtStopMs: value, acpOldestPendingToolAgeAtStopMs: value,
+        acpStalledToolSilentMs: value,
       } }), {});
       expect(result.execution).toEqual({});
     },
