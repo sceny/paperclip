@@ -217,8 +217,10 @@ fi
 
 # ---- 5. gates --------------------------------------------------------------
 log "pnpm install"
-pnpm_run "$BUILD_DIR" install --frozen-lockfile >"$RUN_LOG/install.log" 2>&1 \
-  || pnpm_run "$BUILD_DIR" install --no-frozen-lockfile >"$RUN_LOG/install.log" 2>&1 \
+# CI=1: when the base changes, pnpm asks "reinstall the modules from scratch?"; without a terminal it skips the install and
+# leaves node_modules from the previous build. CI=1 makes it answer yes.
+CI=1 pnpm_run "$BUILD_DIR" install --frozen-lockfile >"$RUN_LOG/install.log" 2>&1 \
+  || CI=1 pnpm_run "$BUILD_DIR" install --no-frozen-lockfile >"$RUN_LOG/install.log" 2>&1 \
   || die "pnpm install failed (see $RUN_LOG/install.log)"
 b checkout -q -- pnpm-lock.yaml 2>/dev/null || true
 
