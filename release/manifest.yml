@@ -15,7 +15,10 @@ branches:
     kind: upstream-request
     parent: PAP-22
     pr:
-  - branch: feat/manual-project-pause
+  # Beta port: feat/manual-project-pause is rebased on newer upstream/master and conflicts with the beta
+  # (one import line in server/src/services/projects.ts). The port is the same 3 commits on top of the beta.
+  # The pull request stays on feat/manual-project-pause. Drop the port when `base` moves past the conflict.
+  - branch: beta-port/feat/manual-project-pause
     kind: upstream-request
     parent: PAP-9
     pr:

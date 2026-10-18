@@ -173,16 +173,30 @@ print_summary() {
 MERGED=()
 for i in "${!BRANCHES[@]}"; do
   br="${BRANCHES[$i]}"; ref="${REFS[$i]}"
-  log "merge $br"
-  if ! b merge --no-ff -q -m "Merge $br into prod build" -m "Co-Authored-By: Paperclip <noreply@paperclip.ing>" "$ref" >"$RUN_LOG/merge-$i.log" 2>&1; then
+  # A branch is rebased on upstream/master (that is how its pull request stays current). When the base is older
+  # than that (a beta), merging the branch would pull in every newer upstream commit and silently change the base.
+  # Then take only the branch's own commits: those not in upstream/master.
+  OWN_ALL="$(g rev-list --count "upstream/master..$ref")"
+  AHEAD="$(g rev-list --count "$BASE_SHA..$ref")"
+  if [ "$AHEAD" -gt "$OWN_ALL" ]; then
+    mapfile -t OWN < <(g rev-list --reverse --no-merges "upstream/master..$ref")
+    [ ${#OWN[@]} -gt 0 ] || die "$br has no commits of its own on top of upstream/master"
+    log "pick $br (${#OWN[@]} own commit(s); the branch is based on newer upstream than $BASE_LABEL)"
+    ACTION=(cherry-pick "${OWN[@]}")
+  else
+    log "merge $br"
+    ACTION=(merge --no-ff -q -m "Merge $br into prod build" -m "Co-Authored-By: Paperclip <noreply@paperclip.ing>" "$ref")
+  fi
+  if ! b "${ACTION[@]}" >"$RUN_LOG/merge-$i.log" 2>&1; then
     FILES="$(b diff --name-only --diff-filter=U)"
     OTHERS=()
     for j in "${!MERGED[@]}"; do
       prior="${MERGED[$j]}"; prior_ref="${REFS[$j]}"
-      touched="$(g diff --name-only "$(g merge-base "$BASE_SHA" "$prior_ref")" "$prior_ref")"
+      touched="$(g diff --name-only "$(g merge-base upstream/master "$prior_ref")" "$prior_ref")"
       if [ -n "$(comm -12 <(sort <<<"$FILES") <(sort <<<"$touched"))" ]; then OTHERS+=("$prior"); fi
     done
     b merge --abort 2>/dev/null || true
+    b cherry-pick --abort 2>/dev/null || true
     echo "CONFLICT while merging $br" >&2
     if [ ${#OTHERS[@]} -gt 0 ]; then echo "  $br conflicts with: ${OTHERS[*]}" >&2
     else echo "  $br conflicts with the base $BASE_LABEL (rebase it on the base)" >&2; fi

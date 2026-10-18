@@ -18,6 +18,17 @@ The commit must be part of `upstream/master`. If `base` is also a git ref, both 
 The base is printed in the build output, in the summary, and in the `deploy card:` line of a real run.
 To move to a newer beta or stable release, change `base`/`baseCommit` and rebuild.
 
+### Branches newer than the base
+
+Request branches are rebased on `upstream/master` (that keeps their pull requests current). When the base is an older
+release, merging such a branch would pull in every newer upstream commit and change the base. So when a branch has commits
+beyond the base that are not its own, the script takes only the branch's own commits (`git cherry-pick`, log line
+`pick <branch>`). A branch directly on top of the base is still merged (`merge <branch>`).
+
+If the own commits conflict with the older base, make a **beta port**: a branch `beta-port/<name>` with the same commits
+on top of the base, conflicts resolved, pushed to the fork, and listed in the manifest instead of the request branch.
+The pull request stays on the request branch. Drop the port when `base` moves past the conflict.
+
 ## Add or remove a branch
 
 Edit `release/manifest.yml` and commit to `fork-tools`. One entry per branch, in merge order:
