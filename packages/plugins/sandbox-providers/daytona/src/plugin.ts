@@ -2800,7 +2800,9 @@ const plugin = definePlugin({
       await withLivenessTimeout("sandbox.setAutoDeleteInterval", deadline, () => sandbox.setAutoDeleteInterval(-1));
       await withLivenessTimeout("sandbox.refreshData", deadline, () => sandbox.refreshData());
       if (sandbox.autoDeleteInterval !== -1) throw new Error("Daytona retention policy was not confirmed");
-      if (sandbox.state !== "stopped") {
+      // An archive already has no live process and retains its filesystem.
+      // Daytona rejects Stop in this state; leave the confirmed archive cold.
+      if (sandbox.state !== "stopped" && sandbox.state !== "archived") {
         await terminateAtProvider(scope, "sandbox.stop", () => sandbox.stop(Math.min(toTimeoutSeconds(config.timeoutMs), 30)));
       }
       sandboxHandleSessionStore.clear(scope);

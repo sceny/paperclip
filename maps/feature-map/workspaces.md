@@ -28,6 +28,7 @@ Later cancelled runs require their own confirmed stop and board file repair.
 Their evidence is preserved with the reconstruction and rechecked before dispatch.
 Stop retains unfinished native files; startup also repairs missing historical
 retention without replaying the cancelled turn.
+Daytona stop-only cleanup confirms retention and accepts an already archived source.
 Cancelled native file recovery can record a verified no-action outcome. Its
 confirmation stays optional and resets when the source changes.
 Retained sandboxes keep their existing export recovery path. Automated coverage:

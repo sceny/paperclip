@@ -414,6 +414,9 @@ stop-and-retain receipts and must not have a competing allocation owner.
 Active warm allocations keep the same retention retry path. Only historical
 stopping or stopped sources require the ephemeral policy, because a reusable
 released allocation may already have a new owner.
+Daytona stop-only cleanup also accepts a freshly verified archived allocation.
+It first confirms that provider auto-delete is disabled. It leaves the archive
+cold, with its files preserved, and records the process as stopped.
 For a cancelled native run, the file-recovery form also offers an optional
 confirmation that no external actions were performed. Leave it unchecked unless
 the run history verifies that fact. The default records files without certifying
