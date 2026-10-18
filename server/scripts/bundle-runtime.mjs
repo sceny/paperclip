@@ -74,7 +74,7 @@ function externalizeThirdParty(isBundled, runtimeDir) {
 export async function bundleRuntime({ entry, outdir, isBundled = (specifier) => specifier.startsWith("@paperclipai/") }) {
   await rm(outdir, { recursive: true, force: true });
   const result = await build({
-    entryPoints: { index: "paperclip-runtime-entry" },
+    entryPoints: { index: "paperclip-runtime-entry", server: entry },
     outdir,
     outExtension: { ".js": ".mjs" },
     chunkNames: "chunk-[hash]",
@@ -92,7 +92,12 @@ export async function bundleRuntime({ entry, outdir, isBundled = (specifier) => 
     plugins: [runtimeEntry(entry), keepModuleLocations, externalizeThirdParty(isBundled, dirname(entry))],
   });
   const outputs = Object.keys(result.metafile.outputs).filter((file) => file.endsWith(".mjs"));
-  return { outfile: join(outdir, "index.mjs"), inputs: Object.keys(result.metafile.inputs).length, chunks: outputs.length };
+  return {
+    outfile: join(outdir, "index.mjs"),
+    serverModule: join(outdir, "server.mjs"),
+    inputs: Object.keys(result.metafile.inputs).length,
+    chunks: outputs.length,
+  };
 }
 
 async function main() {

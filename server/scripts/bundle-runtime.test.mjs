@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -82,6 +83,18 @@ describe("bundleRuntime", () => {
     expect(output.asset).toBe("asset beside its source");
     expect(output.location).toBe(path.join(root, "packages", "fixture", "src"));
     expect(output.entryDir).toBe(path.join(root, "server", "dist"));
+  });
+
+  it("emits a server module that loads without starting the server", async () => {
+    const outdir = path.join(root, "server", "dist-runtime");
+    const summary = await bundleRuntime({ entry: path.join(root, "server", "dist", "index.js"), outdir });
+    expect(summary.serverModule).toBe(path.join(outdir, "server.mjs"));
+    const probe = path.join(root, "server", "probe.mjs");
+    write(probe, `await import(${JSON.stringify(pathToFileURL(summary.serverModule).href)});\nconsole.log("loaded");\n`);
+    const loaded = await execFileAsync(process.execPath, [probe], { cwd: path.join(root, "server"), timeout: 30_000 });
+    expect(loaded.stdout.trim()).toBe("loaded");
+    const started = await execFileAsync(process.execPath, [summary.outfile], { cwd: path.join(root, "server"), timeout: 30_000 });
+    expect(JSON.parse(started.stdout).late).toBe(43);
   });
 
   it("leaves the server's own dependencies to runtime resolution", async () => {
