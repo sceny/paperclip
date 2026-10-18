@@ -36,6 +36,16 @@ signed bootstrap writes. Only the task-drain read skips request tracking.
 Its authentication finishes under a separate work token before entering the
 report, so it counts concurrent writes without blocking on its own scan.
 
+A matched static UI file served by the admitted, handler-tracked application finishes its request
+tracking when its response ends or closes, including a match found after the
+client has already disconnected. Unfinished middleware promises remain tracked.
+Routers share this application scope. A mounted Express application has hidden
+handler promises, so it keeps the existing conservative hold after an aborted
+download until the application itself completes the response. An application
+without installed handler tracking keeps the same conservative hold. Missing files
+continue through the normal fallback and error handlers; they do not exempt
+other GET requests or callback-only application work.
+
 ## Scheduled routine wake protocol
 
 Historical failed ephemeral leases and terminal custom-image setup sessions can

@@ -8,6 +8,7 @@ import { DELIVERY_QUEUES } from "./services/delivery-work-notifications.js";
 import { createLifecycleDriver } from "./services/agent-lifecycle-driver.js";
 import { startAgentLifecycle } from "./services/agent-lifecycle.js";
 import { idleAdmissionMiddleware, trackIdleRequestHandlers } from "./middleware/idle-admission.js";
+import { staticUiFiles } from "./middleware/static-ui.js";
 import { isIdleTaskDrainActive, trackIdleWork } from "./services/task-admission.js";
 import { customerSuccessRoutes } from "./routes/customer-success.js";
 import { cloudWarmStandbyMiddleware } from "./middleware/cloud-warm-standby.js";
@@ -1113,7 +1114,7 @@ export async function createApp(
       // never change once built, so they can be cached aggressively.
       staticUi.use(
         "/assets",
-        express.static(path.join(uiDist, "assets"), {
+        staticUiFiles(path.join(uiDist, "assets"), {
           maxAge: "1y",
           immutable: true,
         }),
@@ -1127,7 +1128,7 @@ export async function createApp(
       // reasonably fast, with must-revalidate overrides for index.html and
       // sw.js (see staticUiCacheControl for why those two).
       staticUi.use(
-        express.static(uiDist, {
+        staticUiFiles(uiDist, {
           maxAge: "1h",
           setHeaders(res, filePath) {
             const override = staticUiCacheControl(filePath);
@@ -1235,7 +1236,7 @@ export async function createApp(
     const renderViteHtml = viteHtmlRenderer;
 
     if (fs.existsSync(publicUiRoot)) {
-      staticUi.use(express.static(publicUiRoot, { index: false }));
+      staticUi.use(staticUiFiles(publicUiRoot, { index: false }));
     }
     staticUi.get(/.*/, async (req, res, next) => {
       if (!shouldServeViteDevHtml(req)) {

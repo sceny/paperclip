@@ -732,6 +732,7 @@ type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 type ReadAuthorizationSnapshot = {
   issues: Map<string, IssueAuthorizationRow & IssuePrivacyRow & { readable: boolean }>;
   projects: Map<string, ProjectAuthorizationRow & ProjectPrivacyRow & { readable: boolean }>;
+  runs: Map<string, { companyId: string; agentId: string; contextSnapshot: Record<string, unknown> } | null>;
   memo: Map<string, Promise<unknown>>;
 };
 
@@ -756,8 +757,21 @@ function createAuthorizationService(db: Db | DbTransaction, readSnapshot?: ReadA
   async function decideReadsForActors(actors: AuthorizationActor[], resources: ReadAuthorizationResource[]): Promise<AuthorizationDecision[][]> {
     if (!actors.length) return [];
     const memo = new Map<string, Promise<unknown>>();
-    const snapshots: ReadAuthorizationSnapshot[] = actors.map(() => ({ issues: new Map(), projects: new Map(), memo }));
+    const runs: ReadAuthorizationSnapshot["runs"] = new Map();
+    const snapshots: ReadAuthorizationSnapshot[] = actors.map(() => ({ issues: new Map(), projects: new Map(), runs, memo }));
     const batchActors: ResponsibleUserActorWithMemo[] = actors.map(actor => ({ ...actor, __responsibleUserSnapshotMemo: undefined }));
+    // Only canonical IDs take this fast path. Other inputs keep the ordinary
+    // lookup behavior, including PostgreSQL's handling of invalid UUIDs.
+    const runIds = resources.length ? [...new Set(batchActors.flatMap(actor => actor.type === "agent" && actor.runId
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(actor.runId) ? [actor.runId] : []))] : [];
+    for (let offset = 0; offset < runIds.length; offset += 500) {
+      const ids = runIds.slice(offset, offset + 500);
+      for (const id of ids) runs.set(id, null);
+      const rows = await db.select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId,
+        contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object('executionPolicy', ${heartbeatRuns.contextSnapshot}->'executionPolicy')`,
+      }).from(heartbeatRuns).where(inArray(heartbeatRuns.id, ids));
+      for (const row of rows) runs.set(row.id, row);
+    }
     const privacyKey = (actor: AuthorizationActor) => JSON.stringify([actor.type, actor.agentId, actor.userId, actor.onBehalfOfUserId]);
     const privacyActors = [...new Map(batchActors.map(actor => [privacyKey(actor), actor])).values()];
     const privacyIndexes = batchActors.map(actor => privacyActors.findIndex(peer => privacyKey(peer) === privacyKey(actor)));
@@ -1048,7 +1062,7 @@ function createAuthorizationService(db: Db | DbTransaction, readSnapshot?: ReadA
   async function loadRunPolicy(runId: string | null | undefined, companyId: string, agentId: string) {
     return batchRead(`run:${companyId}:${agentId}:${runId}`, async () => {
       if (!runId) return null;
-      const row = await db
+      const row = readSnapshot?.runs.has(runId) ? readSnapshot.runs.get(runId) : await db
         .select({
           id: heartbeatRuns.id,
           companyId: heartbeatRuns.companyId,
