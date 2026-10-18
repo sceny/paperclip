@@ -22,6 +22,8 @@ For a historical failed export whose exact sandbox was destroyed, the task recov
 notice offers **Continue from saved sources** to an authorized board operator.
 Select surviving task attachments, record lost work and external action outcomes,
 then rebuild through fresh-session admission. The old failed run remains failed.
+Bounded bootstrap retries retain this decision and recheck their system wake,
+predecessors, saved files and current execution gates before provider startup.
 Retained sandboxes keep their existing export recovery path. Automated coverage:
 [reconstruction](../../server/src/services/native-runtime/native-workspace-reconstruction.test.ts).
 Live staging acceptance remains separate from these regression tests.

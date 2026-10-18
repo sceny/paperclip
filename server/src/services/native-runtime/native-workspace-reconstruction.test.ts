@@ -178,6 +178,102 @@ describe("reconstruction after confirmed native workspace loss", () => {
     expect(dispatch).toHaveBeenCalledTimes(kind === "unchanged" ? 1 : 0);
     if (!outcome.dispatched) expect(outcome.cancellation).toMatchObject({ outcome: "cancelled" });
   });
+  it.each(["unchanged", "attachment", "blocked", "paused", "forged_wake", "foreign_parent", "unrelated_run", "uncertain_parent", "new_recovery"] as const)("keeps bounded reconstruction retries under current authority: %s", async kind => {
+    const f = await seed();
+    await db.update(heartbeatRuns).set({ scheduledRetryAttempt: 0 }).where(eq(heartbeatRuns.id, f.runId));
+    await reconstructNativeWorkspace(f);
+    await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, status: "running" });
+    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, f.actionId));
+    const firstId = String(action.evidence.continuationRunId);
+    await db.update(heartbeatRuns).set({ status: "failed", finishedAt: new Date(), errorCode: "adapter_failed",
+      resultJson: { errorFamily: "transient_upstream", executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } }).where(eq(heartbeatRuns.id, firstId));
+    await db.update(issues).set({ status: "in_progress", executionRunId: firstId }).where(eq(issues.id, f.issueId));
+    const retry = await heartbeat.scheduleBoundedRetry(firstId, { now: new Date(), random: () => 0, delayMs: 0 });
+    expect(retry.outcome, JSON.stringify(retry)).toBe("scheduled");
+    if (retry.outcome !== "scheduled" || !retry.run) throw new Error("Expected a bounded bootstrap retry");
+    await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, retry.run.id));
+    await db.update(issues).set({ executionRunId: retry.run.id }).where(eq(issues.id, f.issueId));
+    if (kind === "attachment") await db.delete(issueAttachments).where(eq(issueAttachments.id, f.attachmentId));
+    if (kind === "blocked") await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    if (kind === "paused") await db.update(agents).set({ status: "paused" }).where(eq(agents.id, f.agentId));
+    if (kind === "forged_wake") await db.update(agentWakeupRequests).set({ requestedByActorType: "agent" }).where(eq(agentWakeupRequests.id, retry.run.wakeupRequestId!));
+    if (kind === "foreign_parent") {
+      const [other] = await db.insert(agents).values({ companyId: f.companyId, name: "Other", adapterType: "paperclip_runner" }).returning();
+      await db.update(heartbeatRuns).set({ agentId: other.id }).where(eq(heartbeatRuns.id, firstId));
+    }
+    if (kind === "unrelated_run") await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId,
+      scopeKind: "issue", issueId: f.issueId, contextSnapshot: { issueId: f.issueId }, status: "succeeded" });
+    if (kind === "uncertain_parent") await db.update(heartbeatRuns).set({ resultJson: {} }).where(eq(heartbeatRuns.id, firstId));
+    if (kind === "new_recovery") await db.insert(issueRecoveryActions).values({ companyId: f.companyId, sourceIssueId: f.issueId,
+      kind: "active_run_watchdog", ownerType: "board", returnOwnerAgentId: f.agentId, cause: "native_continuation_requires_reconciliation",
+      fingerprint: randomUUID(), evidence: { runId: firstId }, nextAction: "Reconcile the new execution", status: "active" });
+    const dispatch = vi.fn(async () => "provider entered");
+    const outcome = await createRunDispatch(db).dispatchResolvedInteractionIfCurrent({ companyId: f.companyId,
+      runId: retry.run.id, expectedStatus: "running", dispatch });
+    expect(outcome.dispatched).toBe(kind === "unchanged");
+    expect(dispatch).toHaveBeenCalledTimes(kind === "unchanged" ? 1 : 0);
+    if (kind === "unchanged") {
+      expect(retry.run.scheduledRetryAttempt).toBe(1);
+      await db.update(heartbeatRuns).set({ status: "failed", finishedAt: new Date(), errorCode: "adapter_failed",
+        resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } }).where(eq(heartbeatRuns.id, retry.run.id));
+      const second = await heartbeat.scheduleBoundedRetry(retry.run.id, { now: new Date(), random: () => 0, delayMs: 0 });
+      expect(second.outcome).toBe("scheduled");
+      if (second.outcome !== "scheduled" || !second.run) throw new Error("Expected the second bounded retry");
+      expect(second.run.scheduledRetryAttempt).toBe(2);
+      await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, second.run.id));
+      await db.update(issues).set({ executionRunId: second.run.id }).where(eq(issues.id, f.issueId));
+      expect(await createRunDispatch(db).dispatchResolvedInteractionIfCurrent({ companyId: f.companyId,
+        runId: second.run.id, expectedStatus: "running", dispatch })).toMatchObject({ dispatched: true });
+      await db.update(heartbeatRuns).set({ status: "failed", finishedAt: new Date(),
+        resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } }).where(eq(heartbeatRuns.id, second.run.id));
+      expect(await heartbeat.scheduleBoundedRetry(second.run.id)).toMatchObject({ outcome: "retry_exhausted" });
+    }
+  });
+  it.each([false, true])("dispatches the assembled bootstrap retry without overwriting a later block: %s", async blockAfterClaim => {
+    const f = await seed();
+    await db.update(agents).set({ adapterType: "codex_local" }).where(eq(agents.id, f.agentId));
+    await db.update(heartbeatRuns).set({ scheduledRetryAttempt: 0 }).where(eq(heartbeatRuns.id, f.runId));
+    await reconstructNativeWorkspace(f);
+    const [busy] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, status: "running" }).returning();
+    const heartbeat = runningHeartbeat = heartbeatService(db, { runtimeEnv: { PAPERCLIP_IN_WORKTREE: "false" } });
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, f.actionId));
+    const firstId = String(action.evidence.continuationRunId);
+    await db.update(heartbeatRuns).set({ status: "failed", finishedAt: new Date(), errorCode: "adapter_failed",
+      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } }).where(eq(heartbeatRuns.id, firstId));
+    await db.update(issues).set({ status: "in_progress", executionRunId: firstId }).where(eq(issues.id, f.issueId));
+    const retry = await heartbeat.scheduleBoundedRetry(firstId, { now: new Date(), random: () => 0, delayMs: 0 });
+    if (retry.outcome !== "scheduled" || !retry.run) throw new Error(`Expected a bounded retry: ${JSON.stringify(retry)}`);
+    expect(await createRunDispatch(db).promoteScheduledRetry({ companyId: f.companyId, runId: retry.run.id }))
+      .toMatchObject({ outcome: "promoted" });
+    if (blockAfterClaim) await db.execute(sql.raw(`
+      create function block_retry_after_claim() returns trigger language plpgsql as $$ begin
+        if new.id = '${retry.run.id}' and old.status = 'queued' and new.status = 'running' then
+          update issues set status = 'blocked' where id = '${f.issueId}';
+        end if; return new; end $$;
+      create trigger block_retry_after_claim after update on heartbeat_runs
+      for each row execute function block_retry_after_claim();
+    `));
+    try {
+      await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, busy.id));
+      await heartbeat.resumeQueuedRuns();
+      const deadline = Date.now() + 15000;
+      let current;
+      do {
+        [current] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, retry.run.id));
+        if (["succeeded", "failed", "cancelled"].includes(current.status)) break;
+        await new Promise(resolve => setTimeout(resolve, 25));
+      } while (Date.now() < deadline);
+      expect(providerExecute).toHaveBeenCalledTimes(blockAfterClaim ? 0 : 1);
+      expect(current).toMatchObject({ status: blockAfterClaim ? "cancelled" : "succeeded" });
+      if (blockAfterClaim) expect((await db.select().from(issues).where(eq(issues.id, f.issueId)))[0].status).toBe("blocked");
+    } finally {
+      if (blockAfterClaim) await db.execute(sql`drop trigger block_retry_after_claim on heartbeat_runs; drop function block_retry_after_claim()`);
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, f.issueId));
+    }
+  }, 30_000);
   it.each([false, true])("runs the assembled heartbeat without overwriting a block after claim: %s", async blockAfterClaim => {
     const f = await seed();
     await db.update(agents).set({ adapterType: "codex_local" }).where(eq(agents.id, f.agentId));

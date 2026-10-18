@@ -383,3 +383,7 @@ The agent must verify the selected attachments before rebuilding files.
 Queued successors recheck their exact reconstruction receipt, sources and current
 execution gates when claimed and immediately before provider handoff. A later
 human block cannot be overwritten by automatic checkout.
+Bounded retries keep the same reconstruction authority. Dispatch verifies the
+system wake and predecessor chain back to the approved first run. It rechecks
+the saved sources, remaining retry limits and current recovery obligations.
+Unrelated executions and uncertain predecessor outcomes still stop dispatch.

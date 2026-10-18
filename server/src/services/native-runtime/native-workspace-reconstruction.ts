@@ -1,11 +1,12 @@
-import { and, eq, gt, inArray, ne, or, sql } from "drizzle-orm";
-import { assets, environmentLeases, heartbeatRuns, issueAttachments, issueRecoveryActions, issues, nativeRunFinalizations, nativeRunResults, type Db } from "@paperclipai/db";
+import { and, eq, gt, inArray, ne, notInArray, or, sql } from "drizzle-orm";
+import { agentWakeupRequests, assets, environmentLeases, heartbeatRuns, issueAttachments, issueRecoveryActions, issues, nativeRunFinalizations, nativeRunResults, type Db } from "@paperclipai/db";
 import { reconstructWorkspaceSchema, type ExecutionReconciliation } from "@paperclipai/shared";
 import type { z } from "zod";
 import { conflict } from "../../errors.js";
 import { persistActivity, publishActivity } from "../activity-log.js";
 import { markExecutionReconciliation } from "../execution-recovery-resolution.js";
 import { hasRemoteTerminationReceipt } from "../remote-execution-termination.js";
+import { legacyExecutionNeedsReconciliationWithEvidence } from "../legacy-execution-recovery.js";
 import { readNativeWorkspaceSyncReference } from "./native-workspace-sync.js";
 import { nativeSha256 } from "./canonical.js";
 
@@ -36,6 +37,8 @@ export function unreconciledNativeExportPredicate() {
 export async function validateNativeWorkspaceReconstruction(db: Db, input: {
   companyId: string; issueId: string; runId: string; actionId: string;
   successorRunId?: string;
+  continuationRootRunId?: string;
+  predecessorRunIds?: string[];
 }) {
   const [issue] = await db.select().from(issues).where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.issueId))).for("update");
   const [coordinator] = await db.select().from(nativeRunFinalizations).where(and(eq(nativeRunFinalizations.companyId, input.companyId), eq(nativeRunFinalizations.runId, input.runId))).for("update");
@@ -68,7 +71,7 @@ export async function validateNativeWorkspaceReconstruction(db: Db, input: {
   )).limit(1);
   const [newer] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
     eq(heartbeatRuns.companyId, input.companyId), ne(heartbeatRuns.id, run.id),
-    input.successorRunId ? ne(heartbeatRuns.id, input.successorRunId) : undefined,
+    input.successorRunId ? notInArray(heartbeatRuns.id, [input.successorRunId, ...(input.predecessorRunIds ?? [])]) : undefined,
     or(eq(heartbeatRuns.nativeIssueId, issue.id), sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`),
     or(gt(heartbeatRuns.createdAt, run.createdAt), inArray(heartbeatRuns.status, ["queued", "running"])),
   )).limit(1);
@@ -86,7 +89,7 @@ export async function validateNativeWorkspaceReconstruction(db: Db, input: {
   if (decision?.workspaceReconstruction) {
     const reconstruction = decision.workspaceReconstruction;
     if ((!input.successorRunId && issue.status !== "todo") || decision.runId !== run.id || reconstruction.schema !== "paperclip.workspace-reconstruction.v1"
-      || (input.successorRunId && (action.evidence.continuationRunId !== input.successorRunId || action.evidence.continuationDelivery !== "delivered"))
+      || (input.successorRunId && (action.evidence.continuationRunId !== (input.continuationRootRunId ?? input.successorRunId) || action.evidence.continuationDelivery !== "delivered"))
       || reconstruction.leaseId !== lease.id || reconstruction.resultId !== result.id
       || reconstruction.descriptorSha256 !== reference.descriptorSha256 || !reconstruction.sources?.length) throw changed();
     const files = await db.select({ attachmentId: issueAttachments.id, sha256: assets.sha256 }).from(issueAttachments)
@@ -103,10 +106,32 @@ export async function validateReconstructedWorkspaceDispatch(db: Db, run: typeof
   if (typeof context.workspaceReconstructionActionId !== "string") return;
   const actionId = context.workspaceReconstructionActionId;
   if (typeof context.issueId !== "string" || typeof context.previousRunId !== "string"
-    || context.source !== "execution.reconciled" || context.recoveryActionId !== actionId || context.forceFreshSession !== true
-    || run.retryOfRunId !== context.previousRunId) throw changed();
+    || context.source !== "execution.reconciled" || context.recoveryActionId !== actionId || context.forceFreshSession !== true) throw changed();
+  const predecessorRunIds: string[] = [];
+  let root = run;
+  while (root.retryOfRunId !== context.previousRunId) {
+    if (!root.retryOfRunId || predecessorRunIds.length >= 64 || predecessorRunIds.includes(root.retryOfRunId)
+      || root.invocationSource !== "automation" || root.triggerDetail !== "system" || !root.scheduledRetryReason
+      || object(root.contextSnapshot).retryOfRunId !== root.retryOfRunId) throw changed();
+    const [wake] = await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, run.companyId),
+      eq(agentWakeupRequests.agentId, run.agentId), eq(agentWakeupRequests.id, root.wakeupRequestId ?? "00000000-0000-0000-0000-000000000000"))).for("share");
+    if (!wake || wake.runId !== root.id || wake.source !== "automation" || wake.triggerDetail !== "system"
+      || wake.requestedByActorType !== "system" || wake.payload?.retryOfRunId !== root.retryOfRunId
+      || wake.payload?.retryReason !== root.scheduledRetryReason || wake.payload?.scheduledRetryAttempt !== root.scheduledRetryAttempt) throw changed();
+    const [parent] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, run.companyId),
+      eq(heartbeatRuns.agentId, run.agentId), eq(heartbeatRuns.id, root.retryOfRunId))).for("update");
+    const parentContext = object(parent?.contextSnapshot);
+    if (!parent || !["succeeded", "failed", "timed_out", "cancelled", "interrupted"].includes(parent.status)
+      || parent.scopeKind !== "issue" || parent.issueId !== context.issueId || parent.createdAt > root.createdAt
+      || parentContext.issueId !== context.issueId || parentContext.previousRunId !== context.previousRunId
+      || parentContext.workspaceReconstructionActionId !== actionId || parentContext.recoveryActionId !== actionId
+      || parentContext.source !== "execution.reconciled" || parentContext.forceFreshSession !== true) throw changed();
+    if (await legacyExecutionNeedsReconciliationWithEvidence(db, parent)) throw changed();
+    predecessorRunIds.push(parent.id);
+    root = parent;
+  }
   const source = await validateNativeWorkspaceReconstruction(db, { companyId: run.companyId, issueId: context.issueId,
-    runId: context.previousRunId, actionId, successorRunId: run.id });
+    runId: context.previousRunId, actionId, successorRunId: run.id, continuationRootRunId: root.id, predecessorRunIds });
   if (source.run.agentId !== run.agentId || !object(source.action.evidence.executionReconciliation).workspaceReconstruction) throw changed();
 }
 
