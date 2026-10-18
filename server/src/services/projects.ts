@@ -30,7 +30,7 @@ import {
   type PluginManagedProjectDeclaration,
   type PluginManagedProjectResolution,
 } from "@paperclipai/shared";
-import { unprocessable } from "../errors.js";
+import { conflict, unprocessable } from "../errors.js";
 import { listCurrentRuntimeServicesForProjectWorkspaces } from "./workspace-runtime-read-model.js";
 import { parseProjectExecutionWorkspacePolicy } from "./execution-workspace-policy.js";
 import { mergeProjectWorkspaceRuntimeConfig, readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
