@@ -2626,9 +2626,10 @@ recipe to workspace metadata. Current runs, previews, pending reopening,
 unresolved recovery, dirty/untracked files, unknown ignored files, unproven
 ownership, and unsupported or unique Git state prevent deletion. Ignored files
 can be discarded only when they are repository-ignored regenerable output,
-Paperclip's `.claude/settings.local.json` (rewritten on every Claude run), or a
-managed project checkout under `.paperclip-repositories/<repo>-<hash>` that the
-next run re-clones. A checkout qualifies only when its name maps back to one of
+ignored `.claude/settings.local.json` saved as an encrypted snapshot of at most
+64 KiB, or a managed project checkout under `.paperclip-repositories/<repo>-<hash>`
+whose exact commit, branch, and source identity are saved in the restoration recipe.
+Tracked settings, oversized settings, symbolic links, and unknown files remain protected. A checkout qualifies only when its name maps back to one of
 the project's repositories and it passes the same checks as the worktree
 (clean tree, no hidden index flags, allowed local config, no in-progress
 state), stock Git storage (no custom hooks), no linked worktrees, no
@@ -2637,7 +2638,10 @@ reachable from a current upstream branch or tag, read fresh from the project
 repository's URL with the company's Git identity. Task repositories
 (`task-repo-*`) always prevent deletion. Inspection runs Git with
 `core.fsmonitor` disabled, so a repository's local config cannot make it run a
-command.
+command. Standard linked-worktree `FETCH_HEAD` records are retained unless every
+referenced commit is an ancestor of the saved HEAD or passes a fresh upstream fetch.
+Malformed records, symbolic links, and more than 32 distinct fetched commits prevent
+expiration.
 Deletion first renames the worktree to recorded trash; restart and reopening
 finish that cleanup under the same source/lifecycle locks.
 
@@ -2645,7 +2649,17 @@ finish that cleanup under the same source/lifecycle locks.
 owned isolated remote-source base after all consumers expire and all remaining
 refs and files are verified reproducible. Shared project clones remain intact.
 Normal authorized reopening recreates a missing source and checks out the saved
-commit, even after upstream advances. Inaccessible upstream produces an explicit
+commit, including nested project repositories, even after upstream advances.
+Settings bytes and permissions restore before provisioning; their encrypted payloads
+are bound to the company, workspace, and relative path and require the instance
+secrets master key. The worker rechecks the complete saved contents before deletion.
+A changed workspace is retained and made usable instead of deleting newer work.
+Interrupted settings publication and partial nested restoration are retryable.
+Normal preparation retains the saved nested repository selection when project
+ref or path settings change. A durable contents checkpoint lets provisioning
+retry without overwriting files it changed. Expiration records ownership before
+publishing native Git locks; restart recovery removes only those owned locks.
+Inaccessible upstream produces an explicit
 retryable restoration failure. It never substitutes the default branch.
 Reopening failures reject the consuming request with HTTP 409 before saving a
 comment or changing its task. The response preserves the restoration message, so

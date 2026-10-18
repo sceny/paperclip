@@ -359,3 +359,27 @@ A retained source receipt records control-plane evidence; it does not prove the
 provider still holds the original bytes or that copy-back succeeded. Operators
 must verify and recover the exact source separately. Later successful runs and
 completed tasks do not certify recovery of earlier workspace files.
+
+### Continue after confirmed source destruction
+
+When an old export failed and its exact sandbox has a confirmed destruction
+receipt, the task can continue from surviving attachments. This is reconstruction,
+not recovery of the missing edits. The task's recovery notice exposes **Continue
+from saved sources** to board operators with `runtime:manage`. Select the surviving
+attachments, describe the missing work, and record the observed external action
+outcomes. A retained or unverified sandbox must use the existing export or file
+recovery path instead.
+
+`POST /api/issues/{id}/recovery-actions/reconstruct-workspace` records this choice.
+It validates the source run, accepted result, prepared descriptor, exact destroyed
+lease, current task owner and status version. It rejects active copyback owners,
+competing recovery, newer executions, and attachments from another task or company.
+The transaction records attachment hashes and a durable fresh-session delivery
+intent. The old run, result, descriptor and failed finalization remain intact.
+Repeated submissions adopt the original intent. Normal admission rechecks source
+identity, attachments, authority, budgets, holds and task eligibility. It preserves
+the retry count and does not grant a new work window or replay completed actions.
+The agent must verify the selected attachments before rebuilding files.
+Queued successors recheck their exact reconstruction receipt, sources and current
+execution gates when claimed and immediately before provider handoff. A later
+human block cannot be overwritten by automatic checkout.

@@ -4127,13 +4127,27 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
     // turn: the closed ACP kind of the silent tool call and how long it went
     // without an update. The watchdog cancels the turn and arms the same
     // fail-fast deadline as a duplex loss.
-    let stalledTool: { kind: string; silentMs: number } | null = null;
+    // `permissionRequested` says whether the agent's permission request for
+    // that call reached the host. It records receipt only, not that the reply
+    // reached the agent, so it separates a call stalled before its request
+    // arrived from one stalled on the return trip or after the decision;
+    // `pendingPermissionRequested` counts the pending calls whose request did.
+    let stalledTool: {
+      kind: string;
+      silentMs: number;
+      permissionRequested: boolean;
+      pendingPermissionRequested: number;
+    } | null = null;
     let stalledToolTimer: ReturnType<typeof setInterval> | undefined;
     let forcedStop = false;
     let runtimeStopConfirmed = false;
     let safeInterruptedSession = false;
     let preserveInterruptedSession = false;
     const interruptionTools = new Map<string, { kind?: string; status?: string; firstSeenAt?: number; lastUpdateAt?: number }>();
+    // Tool call ids whose permission request reached the host. The request can
+    // arrive before the relay sees the call's `tool_call` event, so it is kept
+    // apart from `interruptionTools`.
+    const permissionRequestedToolCallIds = new Set<string>();
     let incompleteToolInventory = false;
     try {
       await ctx.onCancellationReady?.();
@@ -4425,6 +4439,13 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
           // must not merge the Paperclip server's ambient environment back in
           // when it spawns the provider child.
           inheritProcessEnv: false,
+          // Observe permission requests without deciding them: returning
+          // undefined leaves the decision to ACPX's permission-mode resolver.
+          onPermissionRequest: async (request) => {
+            const toolCallId = request.raw?.toolCall?.toolCallId;
+            if (typeof toolCallId === "string" && toolCallId) permissionRequestedToolCallIds.add(toolCallId);
+            return undefined;
+          },
           onAgentStderr: prepared.childStderrLogPath
             ? (chunk) => routeChildStderr(childStderrState, chunk)
             : undefined,
@@ -5021,12 +5042,15 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             if (stalledTool !== null || turnStopRequestedAt !== null) return;
             const checkedAt = now();
             if (lastToolSettledAt !== null && checkedAt - lastToolSettledAt < stalledToolTimeoutMs) return;
-            let oldest: { kind?: string; silentMs: number } | null = null;
-            for (const tool of interruptionTools.values()) {
-              if (!isPendingAcpTool(tool) || tool.lastUpdateAt === undefined) continue;
+            let oldest: { toolCallId: string; kind?: string; silentMs: number } | null = null;
+            let pendingPermissionRequested = 0;
+            for (const [toolCallId, tool] of interruptionTools) {
+              if (!isPendingAcpTool(tool)) continue;
+              if (permissionRequestedToolCallIds.has(toolCallId)) pendingPermissionRequested += 1;
+              if (tool.lastUpdateAt === undefined) continue;
               const silentMs = checkedAt - tool.lastUpdateAt;
               if (silentMs >= stalledToolTimeoutMs && (!oldest || silentMs > oldest.silentMs)) {
-                oldest = { kind: tool.kind, silentMs };
+                oldest = { toolCallId, kind: tool.kind, silentMs };
               }
             }
             if (!oldest) return;
@@ -5035,12 +5059,14 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             stalledTool = {
               kind: oldest.kind && knownKinds.includes(oldest.kind) ? oldest.kind : "unknown",
               silentMs: oldest.silentMs,
+              permissionRequested: permissionRequestedToolCallIds.has(oldest.toolCallId),
+              pendingPermissionRequested,
             };
             turnStopRequestedAt = checkedAt;
             pendingToolsAtStop = [...interruptionTools.values()].filter(isPendingAcpTool);
             void ctx.onLog(
               "stderr",
-              `[paperclip] A pending tool call (kind ${stalledTool.kind}) had no update for ${Math.round(stalledTool.silentMs / 1000)}s; ending the turn.\n`,
+              `[paperclip] A pending tool call (kind ${stalledTool.kind}) had no update for ${Math.round(stalledTool.silentMs / 1000)}s; ending the turn. Its permission request ${stalledTool.permissionRequested ? "reached" : "did not reach"} Paperclip.\n`,
             ).catch(() => {});
             void turn.cancel({ reason: "paperclip stalled tool watchdog" }).catch(() => {});
             armCancelDeadline();
@@ -5321,7 +5347,12 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             status: channelLost || toolStalled ? "failed" : terminal.status,
             ...activityDiagnostics,
             ...(toolStalled && stalledTool
-              ? { acpStalledToolKind: stalledTool.kind, acpStalledToolSilentMs: stalledTool.silentMs }
+              ? {
+                  acpStalledToolKind: stalledTool.kind,
+                  acpStalledToolSilentMs: stalledTool.silentMs,
+                  acpStalledToolPermissionRequested: stalledTool.permissionRequested,
+                  acpPendingToolPermissionRequestedCount: stalledTool.pendingPermissionRequested,
+                }
               : {}),
             ...(failureDiagnostic ? { terminalSessionFailure: failureDiagnostic } : {}),
             ...(classifiedFailure?.errorFamily ? { errorFamily: classifiedFailure.errorFamily } : {}),

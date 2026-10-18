@@ -7,7 +7,7 @@ import { activityLog, agentWakeupRequests, agents, approvals, authUsers, compani
 } from "@paperclipai/db";
 import { createPostgresRunDispatchAdapter } from "../modules/run-dispatch/adapters/postgres.js";
 import { connectionIntentDeliveryService } from "../services/connection-intent-delivery.js";
-import { findSatisfiedToolConnection, satisfiedConnectionIntentService } from "../services/satisfied-connection-intents.js";
+import { connectionContinuationPendingResponse, findSatisfiedToolConnection, satisfiedConnectionIntentService } from "../services/satisfied-connection-intents.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { materializeNativeInteractionResponses } from "../services/native-runtime/native-interaction-bridge.js";
 import { DELIVERY_QUEUES, subscribeDeliveryWork } from "../services/delivery-work-notifications.js";
@@ -62,6 +62,28 @@ describePostgres("already available connection requests", () => {
     const f = await seed(); const run = await retry(f);
     expect(await createPostgresRunDispatchAdapter(db).evaluateScheduledRetryGate({ companyId: f.companyId, runId: run.id, now: new Date() })).toMatchObject({ allowed: true });
     expect((await db.select().from(issueThreadInteractions))[0].status).toBe("pending");
+  });
+
+  it.each(["ready", "revoked", "question", "approval"] as const)("checks retired connection cards while a continuation is todo: %s", async state => {
+    const f = await seed();
+    const run = await retry(f);
+    await satisfiedConnectionIntentService(db).sweepPending();
+    expect((await db.select().from(issueThreadInteractions))[0].status).toBe("expired");
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, f.issueId));
+    if (state === "revoked") await db.update(connectionGrants).set({ status: "revoked" }).where(eq(connectionGrants.id, f.grant.id));
+    if (state === "question") await db.insert(issueThreadInteractions).values({ companyId: f.companyId, issueId: f.issueId,
+      kind: "ask_user_questions", status: "pending", addresseeUserId: "connection-owner", payload: { version: 1, questions: [] } });
+    if (state === "approval") {
+      const [approval] = await db.insert(approvals).values({ companyId: f.companyId, type: "tool_action", status: "pending", payload: {} }).returning();
+      await db.insert(issueApprovals).values({ companyId: f.companyId, issueId: f.issueId, approvalId: approval.id });
+    }
+    const [task] = await db.select().from(issues).where(eq(issues.id, f.issueId));
+    expect(await findSatisfiedToolConnection(db, task, f.intent, run.id)).toBeNull();
+    expect(await connectionContinuationPendingResponse(db, task, "connection-owner", run.id))
+      .toBe(state === "ready" ? null : state === "approval" ? "approval" : "interaction");
+    expect(await createPostgresRunDispatchAdapter(db).evaluateScheduledRetryGate({ companyId: f.companyId,
+      runId: run.id, retryReasonOverride: "native_safe_replacement", now: new Date() }))
+      .toMatchObject({ allowed: state === "ready" });
   });
 
   it("keeps a retry under another user's identity waiting for its response", async () => {

@@ -81,9 +81,9 @@ describe("assertReproducibleGitFiles with Paperclip-managed files", () => {
   const expectAccepted = () => expect(check()).resolves.toBeDefined();
   const expectRejected = (reason: string | RegExp) => expect(check()).rejects.toThrow(reason);
 
-  it("accepts Paperclip's Claude settings file", async () => {
+  it("preserves Claude settings without a restoration capture", async () => {
     await write(path.join(work, ".claude", "settings.local.json"), "{}\n");
-    await expectAccepted();
+    await expectRejected("unique_ignored_files");
   });
 
   it("accepts a clean managed checkout, including its regenerable directories", async () => {

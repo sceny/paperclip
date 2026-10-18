@@ -314,6 +314,7 @@ export function collectRunFailureDiagnostics(run: Run, options: RunFailureReport
   for (const field of [
     "acpLastEventAgeMs", "acpObservedEventCount", "acpPendingToolCount",
     "acpLastEventAgeAtStopMs", "acpOldestPendingToolAgeAtStopMs", "acpStalledToolSilentMs",
+    "acpPendingToolPermissionRequestedCount",
   ]) {
     const value = read(result, field);
     if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) execution[field] = value;
@@ -324,6 +325,10 @@ export function collectRunFailureDiagnostics(run: Run, options: RunFailureReport
   if (pendingToolKinds) execution.acpPendingToolKinds = pendingToolKinds;
   const stalledToolKind = readAcpToolKind(read(result, "acpStalledToolKind"));
   if (stalledToolKind) execution.acpStalledToolKind = stalledToolKind;
+  const stalledToolPermissionRequested = read(result, "acpStalledToolPermissionRequested");
+  if (typeof stalledToolPermissionRequested === "boolean") {
+    execution.acpStalledToolPermissionRequested = stalledToolPermissionRequested;
+  }
   const toolInventoryComplete = read(result, "acpToolInventoryComplete");
   if (typeof toolInventoryComplete === "boolean") execution.acpToolInventoryComplete = toolInventoryComplete;
   const restoreFailure = read(result, "workspaceRestoreFailure");

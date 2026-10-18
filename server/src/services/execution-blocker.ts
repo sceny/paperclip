@@ -8,6 +8,9 @@ import { canRetryStoppedRun } from "./cancelled-native-startup.js";
 import { queuedCommentIdsFromWakePayload } from "./issue-queued-comment-queue.js";
 import { EXECUTION_RECONCILIATION_CAUSES, type ExecutionBlocker } from "@paperclipai/shared";
 import { hasRequiredWorkspaceRecovery, LEGACY_WORKSPACE_RECOVERY_SCHEMA, nativeRunHasNoWorkspaceAccess } from "./workspace-restore-recovery-state.js";
+import { unreconciledNativeExportPredicate } from "./native-runtime/native-workspace-reconstruction.js";
+import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
+import { readNativeWorkspaceSyncReference } from "./native-runtime/native-workspace-sync.js";
 
 export async function hasPendingRunCleanup(db: Db, companyId: string, runId: string): Promise<boolean> {
   const [state] = await db.execute<{ pending: boolean }>(sql`SELECT
@@ -40,16 +43,18 @@ export async function hasPendingRunCleanup(db: Db, companyId: string, runId: str
 export function executionBlockerPredicate() {
   return and(
     not(conversationRecoveryActionPredicate()!),
-    inArray(issueRecoveryActions.cause, [...EXECUTION_RECONCILIATION_CAUSES]),
-    or(inArray(issueRecoveryActions.status, ["active", "escalated"]),
-      sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`),
+    or(unreconciledNativeExportPredicate(), and(
+      inArray(issueRecoveryActions.cause, [...EXECUTION_RECONCILIATION_CAUSES]),
+      or(inArray(issueRecoveryActions.status, ["active", "escalated"]),
+        sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`),
+    )),
   );
 }
 
 export async function getExecutionBlocker(db: Db, companyId: string, issueId: string, options?: { conversationResetCommentId?: string | null }): Promise<ExecutionBlocker | null> {
   const [conversation] = await db.select({ agentId: issues.conversationAgentId,
     boundaryId: issues.conversationBoundaryCommentId, status: issues.status,
-    assigneeAgentId: issues.assigneeAgentId }).from(issues).where(and(
+    assigneeAgentId: issues.assigneeAgentId, statusVersion: issues.statusVersion }).from(issues).where(and(
     eq(issues.companyId, companyId), eq(issues.id, issueId),
   )).limit(1);
   // Resetting model context cannot repair or recover a workspace. This hold
@@ -59,6 +64,7 @@ export async function getExecutionBlocker(db: Db, companyId: string, issueId: st
     eq(issueRecoveryActions.sourceIssueId, issueId),
     executionBlockerPredicate(),
     or(
+      unreconciledNativeExportPredicate(),
       sql`${issueRecoveryActions.evidence}->>'workspaceRestoreFailure' = 'restore_unsafe_archive'`,
       sql`${issueRecoveryActions.evidence}->'workspaceRestoreRecovery'->>'schema' = ${LEGACY_WORKSPACE_RECOVERY_SCHEMA}`,
     ),
@@ -94,6 +100,17 @@ export async function getExecutionBlocker(db: Db, companyId: string, issueId: st
   )).limit(1) : [];
   const withoutWorkspace = Boolean(run?.driverKind === "grok_bot_mcp" && nativeRunHasNoWorkspaceAccess(run));
   const workspaceRepairRequired = Boolean(restoreHold && !withoutWorkspace);
+  const reconstructableExport = ["native_workspace_sync_out_unrecoverable", "native_workspace_sync_out_retry_exhausted"].includes(action.cause);
+  const exportSource = reconstructableExport ? readNativeWorkspaceSyncReference(run?.runnerProfileJson?.nativeWorkspaceSync) : null;
+  const [exportLease] = exportSource ? await db.select().from(environmentLeases).where(and(
+    eq(environmentLeases.companyId, companyId), eq(environmentLeases.heartbeatRunId, run!.id), eq(environmentLeases.id, exportSource.leaseId),
+    eq(environmentLeases.providerLeaseId, exportSource.providerLeaseId),
+  )).limit(1) : [];
+  const canReconstructWorkspace = Boolean(exportLease && hasRemoteTerminationReceipt(exportLease)
+    && (exportLease.metadata?.remoteExecutionTermination as { state?: string } | undefined)?.state === "destroyed"
+    && !action.evidence.executionReconciliation && conversation?.status === "blocked" && conversation.assigneeAgentId === run?.agentId);
+  const reconstructionPending = Boolean((action.evidence.executionReconciliation as { workspaceReconstruction?: unknown } | undefined)?.workspaceReconstruction
+    && action.evidence.continuationDelivery === "pending");
   const queue = await db.select({ payload: agentWakeupRequests.payload }).from(agentWakeupRequests).where(and(
     eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.status, "deferred_issue_execution"),
     sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`,
@@ -163,12 +180,14 @@ export async function getExecutionBlocker(db: Db, companyId: string, issueId: st
     // A stopped reviewer can differ from the task owner who receives the work back.
     agentId: run?.agentId ?? null,
     cause: action.cause,
-    nextAction,
+    nextAction: reconstructionPending ? "Continuation from saved sources is queued and waiting for execution checks." : nextAction,
     runStatus: run?.status ?? null,
     runError: runError?.slice(0, 1024) ?? null,
     canContinue: eligibleContinuation && !chatBinding,
     canRetry: canRetry && !chatBinding,
     ...(restoreHold ? { workspaceRepairRequired, canRecordWorkspaceRepair: workspaceRepairRequired && hasRequiredWorkspaceRecovery(action.evidence) } : {}),
     savedMessageCount: saved.length,
+    ...(canReconstructWorkspace ? { canReconstructWorkspace, workspaceRecoveryStatusVersion: conversation!.statusVersion } : {}),
+    ...(reconstructionPending ? { workspaceReconstructionPending: true } : {}),
   };
 }

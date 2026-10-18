@@ -3521,16 +3521,23 @@ describe("ACP activity diagnostics", () => {
     const turnCancelled = new Promise<void>((resolve) => { releaseTurn = resolve; });
     const cancelReasons: Array<string | undefined> = [];
     const logs: string[] = [];
+    const permissionDecisions: unknown[] = [];
     const execute = createAcpxEngineExecutor({
       now: () => currentNow,
       stalledToolTimeoutMs: 5000,
       stalledToolCheckIntervalMs: 5,
-      createRuntime: () => ({
+      createRuntime: (options) => ({
         ...buildRuntime(),
         startTurn: () => ({
           events: (async function* () {
             // A live subagent keeps its Task call fresh, but one of its tool
-            // calls never gets another update.
+            // calls never gets another update. Only the Task call's permission
+            // request reaches the host.
+            permissionDecisions.push(await options.onPermissionRequest?.({
+              sessionId: "session-1",
+              raw: { sessionId: "session-1", toolCall: { toolCallId: "private-task" }, options: [] },
+              inferredKind: "think",
+            } as never, { signal: new AbortController().signal }));
             yield { type: "tool_call", toolCallId: "private-task", title: "private task", kind: "think", status: "in_progress" };
             yield { type: "tool_call", toolCallId: "private-call", title: "private lookup", kind: "other", status: "pending" };
             currentNow = 7000;
@@ -3563,8 +3570,14 @@ describe("ACP activity diagnostics", () => {
       acpLastEventAgeAtStopMs: 0,
       acpOldestPendingToolAgeAtStopMs: 6000,
       acpPendingToolKinds: "other,think",
+      acpStalledToolPermissionRequested: false,
+      acpPendingToolPermissionRequestedCount: 1,
     });
-    expect(logs.join("")).toContain("[paperclip] A pending tool call (kind other) had no update for 6s");
+    // The host only observes the request; ACPX's permission mode decides it.
+    expect(permissionDecisions).toEqual([undefined]);
+    expect(logs.join("")).toContain(
+      "[paperclip] A pending tool call (kind other) had no update for 6s; ending the turn. Its permission request did not reach Paperclip.",
+    );
     const diagnostics = Object.fromEntries(Object.entries(result.resultJson ?? {}).filter(([key]) => key.startsWith("acp")));
     expect(JSON.stringify(diagnostics)).not.toContain("private");
     expect(result.errorMessage).not.toContain("private");
@@ -3613,6 +3626,51 @@ describe("ACP activity diagnostics", () => {
       stopReason: "paperclip_stalled_tool_deadline",
       acpStalledToolKind: "other",
     });
+  }, 15_000);
+
+  it("records that a stalled tool call's permission request reached the host", async () => {
+    const root = await makeTempRoot();
+    const cwd = path.join(root, "worktree");
+    await fs.mkdir(cwd, { recursive: true });
+    let currentNow = 1000;
+    let releaseTurn: (() => void) | null = null;
+    const turnCancelled = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    const logs: string[] = [];
+    const execute = createAcpxEngineExecutor({
+      now: () => currentNow,
+      stalledToolTimeoutMs: 5000,
+      stalledToolCheckIntervalMs: 5,
+      createRuntime: (options) => ({
+        ...buildRuntime(),
+        startTurn: () => ({
+          events: (async function* () {
+            yield { type: "tool_call", toolCallId: "call-1", kind: "other", status: "pending" };
+            // The request can reach the host after the relay saw the call.
+            await options.onPermissionRequest?.({
+              sessionId: "session-1",
+              raw: { sessionId: "session-1", toolCall: { toolCallId: "call-1" }, options: [] },
+              inferredKind: "other",
+            } as never, { signal: new AbortController().signal });
+            currentNow = 7000;
+            await turnCancelled;
+          })(),
+          result: turnCancelled.then(() => ({ status: "cancelled", stopReason: "cancelled" })),
+          cancel: async () => { releaseTurn?.(); },
+        }),
+      }) as never,
+    });
+    const result = await execute({
+      runId: "stalled-tool-after-permission", agent: { id: "agent-1", companyId: "company-1" }, runtime: {},
+      config: { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir: path.join(root, "state"), cwd },
+      context: {}, onMeta: async () => {}, onLog: async (_stream: string, text: string) => { logs.push(text); },
+    } as never);
+    expect(result.errorCode).toBe("acpx_tool_stalled");
+    expect(result.resultJson).toMatchObject({
+      acpStalledToolKind: "other",
+      acpStalledToolPermissionRequested: true,
+      acpPendingToolPermissionRequestedCount: 1,
+    });
+    expect(logs.join("")).toContain("Its permission request reached Paperclip.");
   }, 15_000);
 
   it("leaves a turn alone while its long-running tool keeps receiving updates", async () => {
