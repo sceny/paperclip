@@ -1,9 +1,22 @@
 # Release tooling
 
-`prod` is a **built** branch: `upstream/master` plus every branch in `manifest.yml`, merged in order.
+`prod` is a **built** branch: the manifest `base` (default `upstream/master`) plus every branch in `manifest.yml`, merged in order.
 Never commit to `prod` by hand. This branch (`fork-tools`) never goes upstream and never merges into `prod`.
 
 Use a worktree for this branch: `git worktree add ../paperclip-wt-fork-tools fork-tools`.
+
+## Choose the base
+
+`manifest.yml` has an optional top-level `base:`. The rebuild starts from it. Missing means `upstream/master`.
+
+```yaml
+base: v2026.1012.1-beta.0          # a git ref, or a release name
+baseCommit: 1b4c803816e82b0265c8422e1a804327a7ed8c54   # needed when `base` is not a git ref (a beta has no git tag)
+```
+
+The commit must be part of `upstream/master`. If `base` is also a git ref, both must name the same commit, or the script stops.
+The base is printed in the build output, in the summary, and in the `deploy card:` line of a real run.
+To move to a newer beta or stable release, change `base`/`baseCommit` and rebuild.
 
 ## Add or remove a branch
 
@@ -25,10 +38,11 @@ Remove the entry when upstream has merged the change or the change is dropped.
 ```sh
 release/rebuild-prod.sh                       # build, test, then move prod
 release/rebuild-prod.sh --dry-run             # everything except moving prod
+release/rebuild-prod.sh --merge-only          # resolve the base and merge the branches only; no install, no gates, no move
 release/rebuild-prod.sh --with fix/new-thing  # trial: manifest + one extra branch (always a dry run)
 ```
 
-Steps: fetch `upstream` and `origin`; start `rebuild/prod-<stamp>` from `upstream/master` in a separate
+Steps: fetch `upstream` and `origin`; start `rebuild/prod-<stamp>` from the base in a separate
 worktree (`paperclip-rebuild-prod` next to the clone, or `$REBUILD_DIR`); merge each branch in order;
 install; `pnpm -r typecheck`; `pnpm test:run`; `pnpm build`. `pnpm` is used if installed, otherwise
 `npx pnpm@9.15.4`.

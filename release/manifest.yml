@@ -1,5 +1,10 @@
-# The branches that make up `prod`, in merge order. prod = upstream/master + these.
-# Every entry:
+# The branches that make up `prod`, in merge order. prod = base + these.
+#   base        upstream point prod is built on: a git ref, or a release name. Missing = upstream/master.
+#   baseCommit  upstream commit of `base`. Needed when `base` is not a git ref (the beta has no git tag).
+#               Must be part of upstream/master. If `base` is also a ref, both must point to the same commit.
+base: v2026.1012.1-beta.0
+baseCommit: 1b4c803816e82b0265c8422e1a804327a7ed8c54
+# Every branch entry:
 #   branch    branch name on origin (the fork)
 #   kind      upstream-request | fork-patch
 #   parent    Paperclip parent task identifier (no internal ids in commits or PRs; this file stays on fork-tools)

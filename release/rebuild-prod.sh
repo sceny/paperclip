@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Rebuild `prod` = upstream/master + every branch listed in release/manifest.yml.
-# Usage: release/rebuild-prod.sh [--dry-run] [--with <branch>]... [--manifest <file>]
+# Rebuild `prod` = the manifest `base` (default upstream/master) + every branch listed in release/manifest.yml.
+# Usage: release/rebuild-prod.sh [--dry-run] [--merge-only] [--with <branch>]... [--manifest <file>]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,6 +10,7 @@ if [ -f "$SCRIPT_DIR/box-env.sh" ]; then . "$SCRIPT_DIR/box-env.sh"; fi
 TOOLS_REPO="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 MANIFEST="$SCRIPT_DIR/manifest.yml"
 DRY_RUN=0
+MERGE_ONLY=0
 EXTRAS=()
 PNPM_VERSION="9.15.4"
 BUILD_DIR="${REBUILD_DIR:-$(dirname "$TOOLS_REPO")/paperclip-rebuild-prod}"
@@ -24,6 +25,7 @@ TMP_BRANCH="rebuild/prod-$STAMP"
 usage() {
   sed -n '2,3p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   echo "  --dry-run         do everything except moving prod"
+  echo "  --merge-only      resolve the base and merge the branches, skip install and gates (implies --dry-run)"
   echo "  --with <branch>   add one extra branch to the build (implies --dry-run); repeatable"
   echo "  --manifest <file> use another manifest"
 }
@@ -34,6 +36,7 @@ log() { echo "[$(date +%H:%M:%S)] $*"; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
+    --merge-only) MERGE_ONLY=1; DRY_RUN=1 ;;
     --with) [ $# -ge 2 ] || die "--with needs a branch name"; EXTRAS+=("$2"); DRY_RUN=1; shift ;;
     --manifest) [ $# -ge 2 ] || die "--manifest needs a file"; MANIFEST="$2"; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -91,6 +94,18 @@ for i, r in enumerate(rows, 1):
 PY
 )" || die "manifest is not valid"
 
+# `base` is the upstream point prod is built on. `baseCommit` pins it when `base` is a name that is not a git ref
+# (a beta npm release has no git tag). Missing `base` means upstream/master.
+BASE_FIELDS="$(python3 - "$MANIFEST" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1])) or {}
+print(str(doc.get("base") or "").strip() + "\t" + str(doc.get("baseCommit") or "").strip())
+PY
+)" || die "manifest is not valid"
+IFS=$'\t' read -r BASE_NAME BASE_COMMIT <<<"$BASE_FIELDS"
+[ -n "$BASE_NAME" ] || [ -z "$BASE_COMMIT" ] || die "baseCommit needs base"
+[ -n "$BASE_NAME" ] || BASE_NAME="upstream/master"
+
 BRANCHES=(); REFS=()
 while IFS=$'\t' read -r br kind parent pr dep; do
   [ -n "$br" ] || continue
@@ -105,7 +120,18 @@ done
 log "fetch upstream and origin"
 g fetch upstream --quiet
 g fetch origin --tags --quiet
-BASE_SHA="$(g rev-parse --verify -q upstream/master)" || die "upstream/master not found"
+if [ -n "$BASE_COMMIT" ]; then
+  BASE_SHA="$(g rev-parse --verify -q "$BASE_COMMIT^{commit}")" || die "baseCommit $BASE_COMMIT not found (fetch upstream)"
+  NAMED_SHA="$(g rev-parse --verify -q "$BASE_NAME^{commit}" || true)"
+  [ -z "$NAMED_SHA" ] || [ "$NAMED_SHA" = "$BASE_SHA" ] \
+    || die "base $BASE_NAME is ${NAMED_SHA:0:9} but baseCommit is ${BASE_SHA:0:9}; fix the manifest"
+else
+  BASE_SHA="$(g rev-parse --verify -q "$BASE_NAME^{commit}")" || die "base $BASE_NAME not found"
+fi
+g merge-base --is-ancestor "$BASE_SHA" upstream/master \
+  || die "base $BASE_NAME (${BASE_SHA:0:9}) is not part of upstream/master"
+BASE_LABEL="$BASE_NAME ${BASE_SHA:0:9}"
+log "base: $BASE_LABEL"
 
 for br in "${BRANCHES[@]+"${BRANCHES[@]}"}"; do
   if g rev-parse --verify -q "refs/remotes/origin/$br" >/dev/null; then REFS+=("refs/remotes/origin/$br")
@@ -113,7 +139,7 @@ for br in "${BRANCHES[@]+"${BRANCHES[@]}"}"; do
     log "WARNING: $br is not on origin; using the local branch (trial build only)"; REFS+=("refs/heads/$br")
   else die "branch $br is not on origin. Push it first."; fi
   if g merge-base --is-ancestor "${REFS[${#REFS[@]}-1]}" "$BASE_SHA"; then
-    log "WARNING: $br is already part of upstream/master. Remove it from the manifest."
+    log "WARNING: $br is already part of the base ($BASE_LABEL). Remove it from the manifest."
   fi
 done
 
@@ -129,10 +155,19 @@ else
   g worktree add -q -B "$TMP_BRANCH" "$BUILD_DIR" "$BASE_SHA"
 fi
 g for-each-ref --format='%(refname:short)' refs/heads/rebuild/ | grep -vxF "$TMP_BRANCH" | xargs -r git -C "$TOOLS_REPO" branch -D -q || true
-log "build dir: $BUILD_DIR (branch $TMP_BRANCH from upstream/master ${BASE_SHA:0:9})"
+log "build dir: $BUILD_DIR (branch $TMP_BRANCH from $BASE_LABEL)"
 
 RUN_LOG="$LOG_ROOT/$STAMP"; mkdir -p "$RUN_LOG"
 SUMMARY=()
+
+print_summary() {
+  echo "---- rebuild summary ($STAMP) ----"
+  echo "base:   $BASE_LABEL"
+  echo "merged: ${MERGED[*]:-none}"
+  local built="${BUILD_SHA:-none}"; echo "build:  ${built:0:9}"
+  printf 'gate:   %s\n' "${SUMMARY[@]+"${SUMMARY[@]}"}"
+  echo "logs:   $RUN_LOG"
+}
 
 # ---- 4. merge in order, stop on the first conflict --------------------------
 MERGED=()
@@ -150,7 +185,7 @@ for i in "${!BRANCHES[@]}"; do
     b merge --abort 2>/dev/null || true
     echo "CONFLICT while merging $br" >&2
     if [ ${#OTHERS[@]} -gt 0 ]; then echo "  $br conflicts with: ${OTHERS[*]}" >&2
-    else echo "  $br conflicts with upstream/master ${BASE_SHA:0:9} (rebase it on upstream/master)" >&2; fi
+    else echo "  $br conflicts with the base $BASE_LABEL (rebase it on the base)" >&2; fi
     echo "  files:" >&2; sed 's/^/    /' <<<"$FILES" >&2
     echo "prod was NOT moved." >&2
     exit 2
@@ -159,6 +194,12 @@ for i in "${!BRANCHES[@]}"; do
 done
 BUILD_SHA="$(b rev-parse HEAD)"
 log "merged ${#MERGED[@]} branch(es); build commit ${BUILD_SHA:0:9}"
+
+if [ "$MERGE_ONLY" = 1 ]; then
+  print_summary
+  echo "merge only: no gates run, prod NOT moved."
+  exit 0
+fi
 
 # ---- 5. gates --------------------------------------------------------------
 log "pnpm install"
@@ -212,14 +253,6 @@ tolerated_failures_only() {
   return 0
 }
 
-print_summary() {
-  echo "---- rebuild summary ($STAMP) ----"
-  echo "base:   upstream/master ${BASE_SHA:0:9}"
-  echo "merged: ${MERGED[*]:-none}"
-  echo "build:  ${BUILD_SHA:0:9}"
-  printf 'gate:   %s\n' "${SUMMARY[@]+"${SUMMARY[@]}"}"
-  echo "logs:   $RUN_LOG"
-}
 
 run_gate typecheck -r typecheck
 run_gate test test:run
@@ -254,4 +287,5 @@ g branch -D "$TMP_BRANCH" -q 2>/dev/null || true
 
 print_summary
 echo "prod moved: ${OLD_SHA:-none} -> $BUILD_SHA"
+echo "deploy card: base $BASE_LABEL; branches ${MERGED[*]:-none}; new prod ${BUILD_SHA:0:9}; previous prod ${OLD_SHA:0:9}"
 echo "rollback:   git push origin refs/tags/${TAG}:refs/heads/prod --force-with-lease=refs/heads/prod:$BUILD_SHA   (then reinstall)"
