@@ -1369,6 +1369,8 @@ export async function createApp(
     lifecycle,
     async (pluginId) =>
       (await pluginRegistry.getById(pluginId))?.packagePath ?? null,
+    undefined,
+    { unwatchedRoots: [bundledCatalogRoot] },
   );
   // Auto-provision bundled plugins so their providers are registered for
   // agent runs. Bundles are excluded from the pnpm

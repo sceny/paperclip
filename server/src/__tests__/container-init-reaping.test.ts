@@ -74,8 +74,6 @@ describe("server image init", () => {
     const lines = entrypoints(dockerfile);
     expect(lines.length, "Dockerfile must declare an ENTRYPOINT").toBeGreaterThan(0);
     for (const line of lines) {
-      // `-s` registers tini as a child subreaper, so it still reaps orphans
-      // when a platform runs its own init as PID 1.
       expect(
         line,
         "node must not inherit PID 1: wrap the entrypoint in tini (as a subreaper) so adopted orphans are reaped",

@@ -10,7 +10,6 @@ import type { GitRemoteAuthProvider } from "./git-credentials.js";
 import { assertReproducibleGitFiles, assertReproducibleBaseGitStorage, assertReproducibleManagedCheckout, inspectGitCacheRecipe, readGitCacheRestoration,
   verifyRemoteGitCommit, GitCacheRestorationFailure, type ManagedCheckoutProver, gitCacheCommand, readGitCacheExpiration, finishGitCacheTrash, type GitCacheExpiration, GIT_CACHE_RESTORATION_KEY, GIT_CACHE_EXPIRATION_REASON } from "./git-workspace-restoration.js";
 
-
 async function allocatedBytes(target: string, shouldContinue: () => boolean): Promise<number> {
   if (!shouldContinue()) throw new Error("scan_stopped");
   const entry = await fs.lstat(target);
@@ -25,13 +24,6 @@ export function gitExpirationSkipReason(error: unknown) {
 }
 const skipReason = gitExpirationSkipReason;
 
-/**
- * Expiration runs outside any agent run, so a company's managed GitHub
- * connection has no run identity to resolve, and its provider throws instead
- * of returning credentials. Upstream proofs then fall back to anonymous
- * access: a public repository still proves its commits, and a private one
- * fails to verify, so its workspace is kept, as before.
- */
 export function withAnonymousGitFallback(provider: GitRemoteAuthProvider): GitRemoteAuthProvider {
   return async (remoteUrl) => provider(remoteUrl).catch(() => null);
 }
@@ -143,12 +135,6 @@ async function inspectBase(db: Db, workspace: Workspace, signal?: AbortSignal, a
   return allocatedBytes(recipe.sourcePath, () => { signal?.throwIfAborted(); return true; });
 }
 
-/**
- * Accepts a managed project checkout only when its name maps back to one of
- * the workspace's project repositories (workspace preparation re-clones it
- * from that row on the next run) and the checkout is proven reproducible
- * against that row's repository URL.
- */
 function managedCheckoutProver(db: Db, workspace: Workspace, auth: GitRemoteAuthProvider): ManagedCheckoutProver {
   let rows: Promise<Array<{ id: string; repoUrl: string | null; repoRef: string | null; cwd: string | null }>> | undefined;
   return async (checkoutPath, name, signal) => {

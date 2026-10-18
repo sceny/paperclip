@@ -177,6 +177,41 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     return id;
   }
 
+  it.each(["assignee", "mentioned"])("preserves a paused recipient's accepted message until resume (%s)", async kind => {
+    const companyId = await seedCompany();
+    const ownerId = await seedAgent({ companyId });
+    const recipientId = kind === "assignee" ? ownerId : await seedAgent({ companyId });
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, recipientId));
+    const issueId = await seedIssue({ companyId, status: "blocked", assigneeAgentId: ownerId });
+    const runId = await seedRun({ companyId, agentId: ownerId, status: "succeeded", contextSnapshot: { issueId } });
+    await db.update(heartbeatRuns).set({ finishedAt: new Date() }).where(eq(heartbeatRuns.id, runId));
+    const [comment] = await db.insert(issueComments).values({ companyId, issueId, authorType: "user",
+      authorUserId: "responsible-user", body: "Accepted input must survive an agent pause" }).returning();
+    const wakeId = await seedDeferredWake({ companyId, agentId: recipientId, issueId, requestedByActorId: "responsible-user",
+      payload: { _paperclipWakeContext: { issueId, wakeReason: kind === "mentioned" ? "issue_comment_mentioned" : "issue_commented",
+        wakeCommentIds: [comment.id] } },
+    });
+    const [accepted] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+    const release = createReleaseIssueExecution({ issueLock: createPostgresWakeQueueAdapter(db, stubDeps),
+      recovery: { escalateStrandedAssignedIssue: async () => undefined, escalateStrandedRecoveryIssueInPlace: async () => undefined },
+    });
+    const input = { companyId, runId, now: new Date(), suppressImmediateRecovery: true, resumeStrandedQueue: true };
+    for (let pass = 0; pass < 2; pass++) {
+      expect((await release(input)).outcome.kind).toBe("released");
+      expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId)))[0]).toEqual(accepted);
+      expect(await db.select().from(heartbeatRuns)).toHaveLength(1);
+    }
+    await db.update(agents).set({ status: "active" }).where(eq(agents.id, recipientId));
+    expect((await release(input)).outcome.kind).toBe("promoted");
+    const [delivered] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+    expect(delivered).toMatchObject({ status: "queued", runId: expect.any(String), payload: accepted.payload });
+    const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, delivered.runId!));
+    expect(successor).toMatchObject({ agentId: recipientId, contextSnapshot: { wakeCommentIds: [comment.id] } });
+    await release(input);
+    expect(await db.select().from(heartbeatRuns)).toHaveLength(2);
+    expect((await db.select().from(issueComments).where(eq(issueComments.id, comment.id)))[0].body).toBe(comment.body);
+  });
+
   it.each(["queued", "running", "scheduled_retry", "cancelled"])("preserves a stranded queue when another agent has a newer %s turn", async status => {
     const companyId = await seedCompany();
     const agentId = await seedAgent({ companyId });

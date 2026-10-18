@@ -213,7 +213,8 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
         .then((rows) => rows[0] ?? null);
       if (!agent) return null;
       const invokability = await evaluateAgentInvokabilityFromDb(tx, agent);
-      return { id: agent.id, companyId: agent.companyId, name: agent.name, invokable: invokability.invokable };
+      return { id: agent.id, companyId: agent.companyId, name: agent.name, invokable: invokability.invokable,
+        paused: !invokability.invokable && invokability.reason === "paused" };
     },
 
     async findNextDeferredWake({ companyId, issueId, excludedWakeIds }) {

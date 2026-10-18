@@ -144,9 +144,6 @@ RUN pnpm --filter @paperclipai/plugin-sdk build
 ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
-# Bundle the server with its workspace packages compiled in, so production
-# starts with plain node instead of transpiling ~1,200 TypeScript sources
-# through the tsx loader on every boot (server/scripts/bundle-runtime.mjs).
 RUN pnpm --filter @paperclipai/server build:runtime \
   && test -f server/dist-runtime/index.mjs || (echo "ERROR: server runtime bundle missing" && exit 1)
 RUN rm -rf packages/paperclip-runner/runner/target
@@ -235,11 +232,7 @@ EXPOSE 3100
 # cgroup pid limit is exhausted and *every* fork() in the container fails.
 # tini reaps adopted orphans and forwards signals, so the exec chain below and
 # graceful shutdown are unchanged. Mirrors docker/agent-runtime/Dockerfile.base.
-# `-s` registers tini as a child subreaper, so it still reaps orphans when a
-# platform runs its own init as PID 1 (tini then warns and reaps nothing).
 ENTRYPOINT ["/usr/bin/tini", "-s", "--", "docker-entrypoint.sh"]
-# The runtime bundle needs no loader. tsx stays installed for the few
-# development-only paths that load workspace TypeScript on demand.
 CMD ["node", "server/dist-runtime/index.mjs"]
 
 # Cloud image variant (build with `--target cloud`): the production image

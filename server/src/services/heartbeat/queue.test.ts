@@ -6,6 +6,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { createRunDispatch } from "../../modules/run-dispatch/index.js";
 import type { createWakeQueue } from "../../modules/wake-queue/index.js";
+import { createPostgresWakeQueueAdapter } from "../../modules/wake-queue/adapters/postgres.js";
+import { createReleaseIssueExecution } from "../../modules/wake-queue/application/use-cases.js";
 import { createHeartbeatRunState } from "./run-state.js";
 import { createHeartbeatRunPreparation } from "./run-preparation.js";
 import { createHeartbeatQueue, type HeartbeatQueueDependencies } from "./queue.js";
@@ -51,7 +53,7 @@ function callbacks(db: Db) {
     canStartNewExternalBotWork: vi.fn(async () => true),
     executeRun: vi.fn(async () => undefined),
     applyWakeQueuePostCommitEffects: vi.fn(async () => undefined),
-    releaseIssueExecutionAndPromote: vi.fn(async () => undefined),
+    releaseIssueExecutionAndPromote: vi.fn<HeartbeatQueueDependencies["releaseIssueExecutionAndPromote"]>(async () => undefined),
     publishRunLifecyclePluginEvent: vi.fn(),
     cancelRunInternal: vi.fn(async () => undefined),
     cancelActiveForAgentInternal: vi.fn(async () => undefined),
@@ -164,6 +166,29 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     }).returning();
     return { ...seeded, recipient, pending };
   }
+
+  it.each(["legacy", "native"])("periodic recovery preserves a paused recipient through the real %s release adapter", async runtimeMode => {
+    const { company, issue, recipient, pending } = await strandedMention(runtimeMode);
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, recipient.id));
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, issue.id));
+    const deps = callbacks(db);
+    const release = createReleaseIssueExecution({ issueLock: createPostgresWakeQueueAdapter(db, {
+      resolveResponsibleUserId: async () => "responsible-user",
+      getRoutineEnv: async () => ({ routineId: null, env: null, responsibleUserId: null }),
+      resolveSessionBeforeForWakeup: async () => null,
+    }), recovery: { escalateStrandedAssignedIssue: async () => undefined, escalateStrandedRecoveryIssueInPlace: async () => undefined } });
+    deps.releaseIssueExecutionAndPromote.mockImplementation(async (run, options) => {
+      await release({ companyId: run.companyId, runId: run.id, now: new Date(), ...options });
+    });
+    for (let pass = 0; pass < 2; pass++) {
+      await createHeartbeatQueue(db, deps).resumeQueuedRuns();
+      expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, pending.id)))[0])
+        .toMatchObject({ status: "deferred_issue_execution", runId: null, finishedAt: null, error: null, payload: pending.payload });
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, company.id))).toHaveLength(1);
+    }
+    expect(deps.releaseIssueExecutionAndPromote).toHaveBeenCalledTimes(2);
+    expect(deps.executeRun).not.toHaveBeenCalled();
+  });
 
   it.each(["legacy", "native"])("resumes an accepted non-assignee queue through its %s owner", async runtimeMode => {
     const { run, pending } = await strandedMention(runtimeMode);
