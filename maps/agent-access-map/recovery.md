@@ -189,6 +189,9 @@ Reconstruction also requires board runtime management. It verifies exact source
 destruction and same-task attachment hashes, records lost work and external action
 outcomes, and admits one fresh continuation through normal execution gates. The
 old failed export remains failed. A retained or uncertain source cannot use it.
+An intervening native run-only cancellation requires its own acknowledged Stop,
+confirmed stopped leases, board file repair and `not_performed` action outcome.
+The reconstruction records and rechecks that exact proof; other later runs stay denied.
 Retained legacy file-only repair requires the board, exact stopped-source receipts,
 and recovered-file evidence. It can record repair for a successful legacy turn
 without changing its result or authorizing replay. Queued and running sources

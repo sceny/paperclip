@@ -1,4 +1,5 @@
 import { preserveWorkspaceRestoreRecoveryMetadataSql } from "../legacy-workspace-restore-recovery.js";
+import { preserveCancelledNativeWorkspaces } from "../native-runtime/native-failed-workspace-recovery.js";
 import { nativeWorkspaceExportPendingForLease, pendingNativeWorkspaceFinalizationCondition } from "../native-runtime/native-workspace-finalization-state.js";
 import { CHAT_COMPLETION_WAKE_REASON } from "../chat-completion-delivery.js";
 import {
@@ -914,6 +915,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
       environmentRuntime,
       onWorkspaceSettled: settleRecoveredNativeWorkspace,
     });
+    await preserveCancelledNativeWorkspaces(db);
     scheduleRetainedNativeSessionCleanup();
     const intent = await readHotRestartIntent().catch((error) => {
       logger.warn(
@@ -1921,6 +1923,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
   }
 
   async function reapOrphanedRuns(opts?: { staleThresholdMs?: number }) {
+    await preserveCancelledNativeWorkspaces(db);
     const staleThresholdMs = opts?.staleThresholdMs ?? 0;
     const now = new Date();
     // Recovery never launches a provider or infers stopped ownership from

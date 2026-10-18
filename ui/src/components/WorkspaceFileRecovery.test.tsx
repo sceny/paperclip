@@ -38,6 +38,40 @@ describe.each(["legacy_execution_requires_reconciliation", "native_continuation_
     await act(async () => Array.from(container.querySelectorAll("button")).find(b => b.textContent === "Record file recovery")!.click());
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
   }
+  it("records an optional verified no-action outcome only for the selected cancelled native run", async () => {
+    await mount({ blocker: { ...blocker, runStatus: "cancelled" } });
+    await enterEvidence(); await confirm();
+    const label = Array.from(container.querySelectorAll("label"))
+      .find(node => node.textContent === "I verified that this run performed no external actions.");
+    if (cause === "native_continuation_requires_reconciliation") {
+      expect(label).toBeDefined();
+      const input = document.getElementById(label!.htmlFor)!;
+      await act(async () => input.click());
+    } else expect(label).toBeUndefined();
+    await submit();
+    expect(resolve).toHaveBeenCalledWith("task", expect.objectContaining({ executionReconciliation: expect.objectContaining({
+      actionOutcome: cause === "native_continuation_requires_reconciliation" ? "not_performed" : "mixed",
+    }) }));
+  });
+  it("leaves external action outcomes uncertified by default for cancelled runs", async () => {
+    await mount({ blocker: { ...blocker, runStatus: "cancelled" } });
+    await enterEvidence(); await confirm(); await submit();
+    expect(resolve).toHaveBeenCalledWith("task", expect.objectContaining({ executionReconciliation: expect.objectContaining({
+      actionOutcome: "mixed", outcomeEvidence: expect.stringContaining("does not replay the source run or certify its external action outcomes"),
+    }) }));
+  });
+  it.each(["runId", "recoveryActionId"] as const)("clears source evidence and confirmations when %s changes", async field => {
+    await mount({ blocker: { ...blocker, runStatus: "cancelled" } });
+    await enterEvidence(); await confirm();
+    const label = Array.from(container.querySelectorAll("label"))
+      .find(node => node.textContent === "I verified that this run performed no external actions.");
+    if (label) await act(async () => document.getElementById(label.htmlFor)!.click());
+    await mount({ blocker: { ...blocker, runStatus: "cancelled", [field]: "another-source" } });
+    expect(container.querySelector("textarea")?.value).toBe("");
+    expect(Array.from(container.querySelectorAll('[role="checkbox"]')).every(node => node.getAttribute("aria-checked") === "false")).toBe(true);
+    expect(Array.from(container.querySelectorAll("button")).find(node => node.textContent === "Record file recovery")?.disabled).toBe(true);
+    expect(resolve).not.toHaveBeenCalled();
+  });
   it.each(["blocked", "in_progress", "in_review", "done", "cancelled"] as Issue["status"][])("records verified source files without changing the %s task", async issueStatus => {
     await mount({ issueStatus });
     const button = Array.from(container.querySelectorAll("button")).find(b => b.textContent === "Record file recovery")!;

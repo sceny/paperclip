@@ -9,10 +9,12 @@ import { errorHandler } from "../../middleware/index.js";
 import { issueRoutes } from "../../routes/issues.js";
 import { getExecutionBlocker } from "../execution-blocker.js";
 import { admitExplicitNativeContinuation } from "../explicit-native-continuation.js";
-import { deliverReconciledExecutions } from "../execution-recovery-resolution.js";
+import { deliverReconciledExecutions, markExecutionReconciliation, validateExecutionReconciliation } from "../execution-recovery-resolution.js";
 import { heartbeatService } from "../heartbeat.js";
 import { remoteTerminationReceipt } from "../remote-execution-termination.js";
 import { reconstructNativeWorkspace } from "./native-workspace-reconstruction.js";
+import { preserveNativeFailedWorkspace } from "./native-failed-workspace-recovery.js";
+import { settleStopOnlyCleanup } from "../sandbox-stop-and-retain.js";
 import { createRunDispatch } from "../../modules/run-dispatch/index.js";
 import { drainHeartbeatRunsToQuiescence } from "../../__tests__/helpers/drain-heartbeat-runs.js";
 const providerExecute = vi.hoisted(() => vi.fn(async () => ({ exitCode: 0, signal: null, timedOut: false,
@@ -70,6 +72,119 @@ describe("reconstruction after confirmed native workspace loss", () => {
     app.use((req, _res, next) => { (req as unknown as { actor: unknown }).actor = actor; next(); });
     app.use("/api", issueRoutes(db, {} as never)); app.use(errorHandler); return app;
   }
+  async function interveningCancelledRun(f: Awaited<ReturnType<typeof seed>>, repairFiles = true) {
+    const runId = randomUUID(), leaseId = randomUUID(), providerLeaseId = randomUUID();
+    const [run] = await db.insert(heartbeatRuns).values({ id: runId, companyId: f.companyId, agentId: f.agentId,
+      issueId: f.issueId, nativeIssueId: f.issueId, scopeKind: "issue", runtimeMode: "native", status: "cancelled",
+      nativePhase: "observed", createdAt: new Date("2026-05-02T00:00:00Z"), finishedAt: new Date("2026-05-02T00:01:00Z"),
+      contextSnapshot: { issueId: f.issueId }, resultJson: { cancelledByActorType: "user", cancelledByUserId: f.actorId,
+        nativeCancellation: { schema: "paperclip.native-cancellation.v1", runId, companyId: f.companyId, issueId: f.issueId,
+          scope: "run", reasonCode: "cancellation_run_only", dispatchState: "acknowledged", dispatched: true,
+          intentAuditId: randomUUID(), acknowledgementAuditId: randomUUID() } },
+      runnerProfileJson: { nativeWorkspaceSync: { schema: "paperclip.native-workspace-sync/v3", state: "prepared",
+        descriptorSha256: "d".repeat(64), baselineSha256: "b".repeat(64), finalHostSha256: null,
+        workspaceId: randomUUID(), leaseId, providerLeaseId, remoteCwd: "/work", resourceDisposition: "destroy" } },
+    }).returning();
+    await db.insert(nativeRunFinalizations).values({ runId, companyId: f.companyId, issueId: f.issueId,
+      phase: "terminal_failure", failureCode: "native_retry_cancelled" });
+    await db.insert(environmentLeases).values({ id: leaseId, companyId: f.companyId, issueId: f.issueId,
+      heartbeatRunId: runId, provider: "daytona", providerLeaseId, status: "active", leasePolicy: "ephemeral",
+      metadata: { driver: "sandbox", pluginId: randomUUID(), sandboxProviderPlugin: true, remoteCwd: "/work" } });
+    if (!repairFiles) return { runId, leaseId, actionId: null };
+    await preserveNativeFailedWorkspace(db, run, { allowPreterminal: true });
+    const [lease] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, leaseId));
+    await settleStopOnlyCleanup(db, lease, { attemptId: String(lease.metadata?.pendingCleanupAttemptId),
+      receipt: { providerLeaseId, state: "stopped" } });
+    const repair = (await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId)))
+      .find(action => action.evidence.runId === runId)!;
+    const decision = { runId, providerStopped: true as const, actionOutcome: "not_performed" as const,
+      outcomeEvidence: "Acknowledged interruption before any recorded tool or external action.",
+      workspaceRepairEvidence: "The exact stopped allocation was inspected; no source edits were made and the host baseline is unchanged." };
+    await validateExecutionReconciliation({ db, companyId: f.companyId, issueId: f.issueId, agentId: f.agentId,
+      sourceRunId: runId, decision, workspaceRepairOnly: true });
+    await markExecutionReconciliation(db, repair, decision, f.actorId, undefined, { workspaceRepairOnly: true });
+    await db.update(issueRecoveryActions).set({ status: "resolved", outcome: "restored" }).where(eq(issueRecoveryActions.id, repair.id));
+    return { runId, leaseId, actionId: repair.id };
+  }
+  it.each(["blocked", "in_progress"] as const)("reconstructs an inactive %s task after an intervening cancelled run was stopped and its files reconciled", async status => {
+    const f = await seed();
+    const [current] = await db.update(issues).set({ status }).where(eq(issues.id, f.issueId)).returning();
+    f.request.expectedStatusVersion = current.statusVersion;
+    const later = await interveningCancelledRun(f);
+    const visible = await request(app()).get(`/api/issues/${f.issueId}`).expect(200);
+    expect(visible.body.executionBlocker).toMatchObject({
+      runId: f.runId, canReconstructWorkspace: true, workspaceRecoveryStatusVersion: current.statusVersion,
+    });
+    await request(app()).post(`/api/issues/${f.issueId}/recovery-actions/reconstruct-workspace`).send(f.body).expect(202);
+    const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, f.actionId));
+    expect(action.evidence.executionReconciliation).toMatchObject({ workspaceReconstruction: {
+      interveningExecutions: [{ runId: later.runId, recoveryActionId: later.actionId, evidenceSha256: expect.stringMatching(/^[a-f0-9]{64}$/) }],
+    } });
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, later.runId)))[0].status).toBe("cancelled");
+  });
+  it("pins a historical cancelled workspace through public heartbeat startup without replaying its turn", async () => {
+    const f = await seed();
+    const later = await interveningCancelledRun(f, false);
+    const heartbeat = runningHeartbeat = heartbeatService(db, { runtimeEnv: { PAPERCLIP_IN_WORKTREE: "false" } });
+    await heartbeat.recoverNativeRunsAfterRestart();
+    expect((await db.select().from(environmentLeases).where(eq(environmentLeases.id, later.leaseId)))[0])
+      .toMatchObject({ status: "pending_cleanup", leasePolicy: "retain_on_failure",
+        metadata: { sandboxStopAndRetain: { runId: later.runId } } });
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, later.runId)))[0].status).toBe("cancelled");
+    expect((await db.select().from(issues).where(eq(issues.id, f.issueId)))[0].status).toBe("blocked");
+    expect(providerExecute).not.toHaveBeenCalled();
+  });
+  it.each(["unrepaired", "unconfirmed", "foreign_agent", "missing_ack", "performed_action", "rebound"] as const)
+    ("refuses an intervening cancellation without its complete proof: %s", async kind => {
+    const f = await seed();
+    const later = await interveningCancelledRun(f, kind !== "unrepaired");
+    if (kind === "unconfirmed") await db.update(environmentLeases).set({ metadata: {} }).where(eq(environmentLeases.id, later.leaseId));
+    if (kind === "foreign_agent") {
+      const [agent] = await db.insert(agents).values({ companyId: f.companyId, name: "Different owner", adapterType: "paperclip_runner" }).returning();
+      await db.update(heartbeatRuns).set({ agentId: agent.id }).where(eq(heartbeatRuns.id, later.runId));
+    }
+    if (kind === "missing_ack") await db.update(heartbeatRuns).set({ resultJson: {} }).where(eq(heartbeatRuns.id, later.runId));
+    if (kind === "performed_action") {
+      const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, later.actionId!));
+      await db.update(issueRecoveryActions).set({ evidence: { ...action.evidence, executionReconciliation: {
+        ...(action.evidence.executionReconciliation as object), actionOutcome: "mixed",
+      } } }).where(eq(issueRecoveryActions.id, action.id));
+    }
+    if (kind === "rebound") {
+      const [lease] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, later.leaseId));
+      await db.insert(environmentLeases).values({ companyId: f.companyId, heartbeatRunId: f.runId, issueId: f.issueId,
+        provider: lease.provider, providerLeaseId: lease.providerLeaseId, status: "active" });
+    }
+    await expect(reconstructNativeWorkspace(f)).rejects.toThrow();
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, f.actionId)))[0].evidence)
+      .not.toHaveProperty("executionReconciliation");
+  });
+  it.each(["unchanged", "changed_evidence", "extra_reconciled"] as const)
+    ("rechecks the recorded intervening executions at final provider handoff: %s", async kind => {
+    const f = await seed();
+    const later = await interveningCancelledRun(f);
+    await reconstructNativeWorkspace(f);
+    await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, status: "running" });
+    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    const [source] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, f.actionId));
+    const successorId = String(source.evidence.continuationRunId);
+    expect(successorId).not.toBe("undefined");
+    await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, successorId));
+    await db.update(issues).set({ status: "in_progress", executionRunId: successorId }).where(eq(issues.id, f.issueId));
+    if (kind === "changed_evidence") {
+      const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, later.actionId!));
+      await db.update(issueRecoveryActions).set({ evidence: { ...action.evidence, executionReconciliation: {
+        ...(action.evidence.executionReconciliation as object), workspaceRepairEvidence: "A different later statement cannot replace the frozen original file proof.",
+      } } }).where(eq(issueRecoveryActions.id, action.id));
+    }
+    if (kind === "extra_reconciled") await interveningCancelledRun(f);
+    const dispatch = vi.fn(async () => "provider entered");
+    const result = await createRunDispatch(db).dispatchResolvedInteractionIfCurrent({ companyId: f.companyId,
+      runId: successorId, expectedStatus: "running", dispatch });
+    expect(result.dispatched).toBe(kind === "unchanged");
+    expect(dispatch).toHaveBeenCalledTimes(kind === "unchanged" ? 1 : 0);
+  });
   it("keeps a falsely resolved export visible and prevents conversation reset from hiding it", async () => {
     const f = await seed();
     expect(await getExecutionBlocker(db, f.companyId, f.issueId)).toMatchObject({ runId: f.runId, workspaceRepairRequired: true, canReconstructWorkspace: true });
@@ -98,7 +213,7 @@ describe("reconstruction after confirmed native workspace loss", () => {
     expect((await db.select().from(companies).where(eq(companies.id, f.companyId)))[0].budgetMonthlyCents).toBe(10000);
     expect((await db.select().from(agents).where(eq(agents.id, f.agentId)))[0].budgetMonthlyCents).toBe(5000);
   });
-  it.each(["retained", "receipt", "lease", "owner", "coordinator", "copyback", "newer", "status", "version", "attachment", "result"] as const)("rejects stale or unsafe reconstruction: %s", async kind => {
+  it.each(["retained", "receipt", "lease", "owner", "coordinator", "copyback", "newer", "status", "version", "attachment", "result", "execution", "checkout"] as const)("rejects stale or unsafe reconstruction: %s", async kind => {
     const f = await seed();
     const [lease] = await db.select().from(environmentLeases).where(eq(environmentLeases.id, f.leaseId));
     if (kind === "retained") await db.update(environmentLeases).set({ metadata: { remoteExecutionTermination: remoteTerminationReceipt(lease, { providerLeaseId: f.providerLeaseId, state: "stopped" }) } }).where(eq(environmentLeases.id, f.leaseId));
@@ -109,9 +224,12 @@ describe("reconstruction after confirmed native workspace loss", () => {
     if (kind === "copyback") await db.update(heartbeatRuns).set({ runnerProfileJson: { nativeWorkspaceFinalizationOwner: { token: "other-worker" } } }).where(eq(heartbeatRuns.id, f.runId));
     if (kind === "newer") await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, contextSnapshot: { issueId: f.issueId }, status: "succeeded" });
     if (kind === "status") await db.update(issues).set({ status: "done" }).where(eq(issues.id, f.issueId));
+    if (kind === "execution") await db.update(issues).set({ executionRunId: f.runId }).where(eq(issues.id, f.issueId));
+    if (kind === "checkout") await db.update(issues).set({ checkoutRunId: f.runId }).where(eq(issues.id, f.issueId));
     if (kind === "version") f.request.expectedStatusVersion += 1;
     if (kind === "attachment") f.request.attachmentIds = [(await seed()).attachmentId];
     if (kind === "result") await db.update(nativeRunResults).set({ schemaStatus: "rejected" }).where(eq(nativeRunResults.id, f.resultId));
+    if (kind === "execution" || kind === "checkout") expect((await getExecutionBlocker(db, f.companyId, f.issueId))?.canReconstructWorkspace).not.toBe(true);
     await expect(reconstructNativeWorkspace(f)).rejects.toThrow();
     expect(await db.select().from(activityLog).where(eq(activityLog.entityId, f.issueId))).toHaveLength(0);
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, f.actionId)))[0].evidence).not.toHaveProperty("executionReconciliation");

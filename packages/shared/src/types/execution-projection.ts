@@ -87,5 +87,6 @@ export interface ExecutionReconciliation {
     descriptorSha256: string;
     missingWork: string;
     sources: Array<{ attachmentId: string; sha256: string; byteSize: number; filename: string | null }>;
+    interveningExecutions?: Array<{ runId: string; recoveryActionId: string; evidenceSha256: string }>;
   };
 }

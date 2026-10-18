@@ -7,32 +7,45 @@ import { Checkbox } from "./ui/checkbox";
 import { Label } from "./ui/label";
 import { Textarea } from "./ui/textarea";
 
-export function WorkspaceFileRecovery({ issueId, issueStatus, blocker, canManage, onRecorded }: {
+type WorkspaceFileRecoveryProps = {
   issueId: string;
   issueStatus: Issue["status"];
   blocker: ExecutionBlocker;
   canManage: boolean;
   onRecorded: () => void;
-}) {
+};
+
+export function WorkspaceFileRecovery(props: WorkspaceFileRecoveryProps) {
+  const { blocker } = props;
+  if (!blocker.workspaceRepairRequired || !blocker.canRecordWorkspaceRepair ||
+    !["legacy_execution_requires_reconciliation", "native_continuation_requires_reconciliation"].includes(blocker.cause)
+    || !blocker.recoveryActionId || !blocker.runId) return null;
+  return <WorkspaceFileRecoveryForm key={`${props.issueId}:${blocker.recoveryActionId}:${blocker.runId}`} {...props} />;
+}
+
+function WorkspaceFileRecoveryForm({ issueId, issueStatus, blocker, canManage, onRecorded }: WorkspaceFileRecoveryProps) {
   const noteId = useId();
   const confirmationId = useId();
+  const noActionsId = useId();
   const [evidence, setEvidence] = useState("");
   const [confirmed, setConfirmed] = useState(false);
+  const [noActions, setNoActions] = useState(false);
+  const canConfirmNoActions = blocker.cause === "native_continuation_requires_reconciliation" && blocker.runStatus === "cancelled";
+  const noActionsConfirmed = canConfirmNoActions && noActions;
   const record = useMutation({
     mutationFn: () => issuesApi.resolveRecoveryAction(issueId, {
       actionId: blocker.recoveryActionId!, outcome: "restored", sourceIssueStatus: issueStatus,
       resolutionNote: evidence.trim(),
       executionReconciliation: {
-        runId: blocker.runId!, providerStopped: true, actionOutcome: "mixed",
-        outcomeEvidence: "This request records recovered workspace files only. It does not replay the source run or certify its external action outcomes.",
+        runId: blocker.runId!, providerStopped: true, actionOutcome: noActionsConfirmed ? "not_performed" : "mixed",
+        outcomeEvidence: noActionsConfirmed
+          ? "The board operator verified that this run performed no external actions. This request records recovered workspace files and does not replay the source run."
+          : "This request records recovered workspace files only. It does not replay the source run or certify its external action outcomes.",
         workspaceRepairEvidence: evidence.trim(),
       },
     }),
     onSuccess: onRecorded,
   });
-  if (!blocker.workspaceRepairRequired || !blocker.canRecordWorkspaceRepair ||
-    !["legacy_execution_requires_reconciliation", "native_continuation_requires_reconciliation"].includes(blocker.cause)
-    || !blocker.recoveryActionId || !blocker.runId) return null;
   return <section aria-label="Record workspace file recovery" className="flex w-full flex-col gap-2">
     {record.isSuccess ? <p role="status">File recovery recorded. The task status is unchanged. Continue the task when it is ready.</p>
       : canManage ? <>
@@ -44,6 +57,10 @@ export function WorkspaceFileRecovery({ issueId, issueStatus, blocker, canManage
           <Checkbox id={confirmationId} checked={confirmed} onCheckedChange={value => setConfirmed(value === true)} disabled={record.isPending} />
           <Label htmlFor={confirmationId}>I recovered and verified the original workspace files.</Label>
         </div>
+        {canConfirmNoActions && <div className="flex items-center gap-2">
+          <Checkbox id={noActionsId} checked={noActions} onCheckedChange={value => setNoActions(value === true)} disabled={record.isPending} />
+          <Label htmlFor={noActionsId}>I verified that this run performed no external actions.</Label>
+        </div>}
         <p className="text-muted-foreground">This records file recovery. It keeps the current task status and does not start a run. Paperclip verifies that the original execution stopped.</p>
         <div className="flex justify-end">
           <Button disabled={record.isPending || !confirmed || evidence.trim().length < 20} onClick={() => record.mutate()}>

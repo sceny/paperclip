@@ -369,11 +369,15 @@ from saved sources** to board operators with `runtime:manage`. Select the surviv
 attachments, describe the missing work, and record the observed external action
 outcomes. A retained or unverified sandbox must use the existing export or file
 recovery path instead.
+The source task may still display `in_progress` after an older controller's
+run-only Stop. Reconstruction accepts that inactive state only with no execution
+or checkout owner and the same source, recovery and status-version checks; an
+operator does not need to manufacture a separate blocker merely to record recovery.
 
 `POST /api/issues/{id}/recovery-actions/reconstruct-workspace` records this choice.
 It validates the source run, accepted result, prepared descriptor, exact destroyed
 lease, current task owner and status version. It rejects active copyback owners,
-competing recovery, newer executions, and attachments from another task or company.
+competing recovery, unreconciled newer executions, and attachments from another task or company.
 The transaction records attachment hashes and a durable fresh-session delivery
 intent. The old run, result, descriptor and failed finalization remain intact.
 Repeated submissions adopt the original intent. Normal admission rechecks source
@@ -387,3 +391,30 @@ Bounded retries keep the same reconstruction authority. Dispatch verifies the
 system wake and predecessor chain back to the approved first run. It rechecks
 the saved sources, remaining retry limits and current recovery obligations.
 Unrelated executions and uncertain predecessor outcomes still stop dispatch.
+
+A later native run-only cancellation may coexist with the older loss decision
+only after its exact Stop acknowledgement, stopped lease receipts, and board
+file-only repair have been recorded. Its external-action outcome must be
+`not_performed`; an unknown or performed action stays held. Reconstruction saves
+the identities and hashes of those repair decisions. Queue claim and dispatch
+recheck the same evidence, so a changed receipt or another later run requires a
+fresh decision. The cancelled run stays cancelled and is never replayed.
+
+Stop also preserves a native workspace prepared before `paperclip_finish`.
+The executor pins its files before releasing the environment. Startup and periodic
+recovery process a bounded batch of historical acknowledged cancellations that
+missed this step. The existing stop-only cleanup worker retains their exact
+sandboxes and records provider receipts; this does not reopen a task or start
+another turn. The normal file-only repair control remains required before an
+older lost-work reconstruction can proceed.
+If file retention loses the task lock, teardown keeps the source active for a
+later pass. Historical sources already stopping or stopped remain eligible under
+the existing exact-source checks. A stopped source requires the independent
+stop-and-retain receipts and must not have a competing allocation owner.
+Active warm allocations keep the same retention retry path. Only historical
+stopping or stopped sources require the ephemeral policy, because a reusable
+released allocation may already have a new owner.
+For a cancelled native run, the file-recovery form also offers an optional
+confirmation that no external actions were performed. Leave it unchecked unless
+the run history verifies that fact. The default records files without certifying
+action outcomes. Changing the selected source clears the evidence and confirmations.

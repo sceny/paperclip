@@ -54,7 +54,8 @@ export function executionBlockerPredicate() {
 export async function getExecutionBlocker(db: Db, companyId: string, issueId: string, options?: { conversationResetCommentId?: string | null }): Promise<ExecutionBlocker | null> {
   const [conversation] = await db.select({ agentId: issues.conversationAgentId,
     boundaryId: issues.conversationBoundaryCommentId, status: issues.status,
-    assigneeAgentId: issues.assigneeAgentId, statusVersion: issues.statusVersion }).from(issues).where(and(
+    assigneeAgentId: issues.assigneeAgentId, statusVersion: issues.statusVersion,
+    executionRunId: issues.executionRunId, checkoutRunId: issues.checkoutRunId }).from(issues).where(and(
     eq(issues.companyId, companyId), eq(issues.id, issueId),
   )).limit(1);
   // Resetting model context cannot repair or recover a workspace. This hold
@@ -108,7 +109,8 @@ export async function getExecutionBlocker(db: Db, companyId: string, issueId: st
   )).limit(1) : [];
   const canReconstructWorkspace = Boolean(exportLease && hasRemoteTerminationReceipt(exportLease)
     && (exportLease.metadata?.remoteExecutionTermination as { state?: string } | undefined)?.state === "destroyed"
-    && !action.evidence.executionReconciliation && conversation?.status === "blocked" && conversation.assigneeAgentId === run?.agentId);
+    && !action.evidence.executionReconciliation && conversation && ["blocked", "in_progress"].includes(conversation.status)
+    && !conversation.executionRunId && !conversation.checkoutRunId && conversation.assigneeAgentId === run?.agentId);
   const reconstructionPending = Boolean((action.evidence.executionReconciliation as { workspaceReconstruction?: unknown } | undefined)?.workspaceReconstruction
     && action.evidence.continuationDelivery === "pending");
   const queue = await db.select({ payload: agentWakeupRequests.payload }).from(agentWakeupRequests).where(and(
