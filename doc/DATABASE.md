@@ -1021,6 +1021,14 @@ uses ordered `FOR NO KEY UPDATE` locks, which remain compatible with foreign-key
 references while excluding runtime readers' `FOR SHARE` locks. Connector feature
 switches use the same journal; process-start overlays receive a delivery baseline.
 
+Migration 0355 extends connector invalidation to tool definitions and
+configuration. Statement triggers cover applications, connections, catalogs,
+profiles and entries, bindings, policies, and MCP gateways. They ignore health
+bookkeeping and trust-rule usage counters. Profile creation alone does not change
+an agent's runtime; its assignment does. Entry changes resolve standing profile
+bindings; policies resolve old and new agent selectors. Both retain scoped
+recipients. Credential-only fields remain outside this migration's coverage.
+
 ## Retired Pipelines storage
 
 The Pipelines experiment has been removed from the application, API, CLI, and
