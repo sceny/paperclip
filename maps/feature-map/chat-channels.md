@@ -75,6 +75,19 @@ identical catalog membership, absence of digest SQL during discovery, and
 revocation on the next preparation. A faster component is not proof of a faster
 Slack reaction or final reply; measure those separately on the deployed revision.
 
+For GitHub and Slack tool continuity, start a task from the channel, then admit
+a later monitor or retry run for the same task. Check that the later run can
+discover and call its channel tools without a new inbound message. For GitHub,
+also continue from a board message by the same accepted requester and complete
+the review in the original conversation, including when the original source is
+recorded only in legacy wake metadata. Revoke the linked identity and check
+that the next call fails. Repeat the boundary checks with another task, agent,
+company, and requester. The channel and provenance fixtures above cover these
+contracts with synthetic providers; record a live journey separately.
+For a long-lived task, repeat more than 100 continuations and check that tool
+access remains available. Fail a later GitHub run after a final answer and
+check that the earlier answer remains intact.
+
 ### `endpoint-management`
 
 Automated: [channel integration](../../server/src/__tests__/chat-channels.integration.test.ts) covers shared endpoint/delivery behavior; live credential repair and provider ownership remain manual checks.

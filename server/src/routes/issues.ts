@@ -4134,8 +4134,11 @@ export function issueRoutes(
     if (!scheduledRetryRunId) return null;
 
     try {
-      const cancelled = await heartbeat.cancelRun(scheduledRetryRunId);
-      const cancelledRunId = cancelled?.id ?? scheduledRetryRunId;
+      const cancelled = await heartbeat.cancelRun(scheduledRetryRunId, undefined, {
+        expectedStatus: "scheduled_retry",
+      });
+      if (cancelled?.status !== "cancelled") return null;
+      const cancelledRunId = cancelled.id;
       await logActivity(db, {
         companyId: input.issue.companyId,
         actorType: input.actor.actorType,
@@ -13791,8 +13794,8 @@ export function issueRoutes(
         })
           ? await svc.getCurrentScheduledRetry(existing.id)
           : null;
-      const shouldResumeInProgressScheduledRetry =
-        !!scheduledRetryForHumanComment &&
+      let shouldResumeInProgressScheduledRetry =
+        scheduledRetryForHumanComment?.status === "scheduled_retry" &&
         scheduledRetryForHumanComment.agentId === requestedAssigneeAgentId;
       const assigneeSelfCommentOnTerminal =
         isAssigneeSelfCommentOnTerminalIssue({
@@ -13945,6 +13948,12 @@ export function issueRoutes(
             issue: existing,
             actor,
           });
+        if (!cancelledScheduledRetryRunId) {
+          shouldResumeInProgressScheduledRetry = false;
+          if (!explicitMoveToTodoRequested && req.body.status === undefined) {
+            delete updateFields.status;
+          }
+        }
       }
       if (req.body.executionPolicy !== undefined) {
         updateFields.executionPolicy = applyActorMonitorScheduledBy(
@@ -18265,8 +18274,8 @@ export function issueRoutes(
         })
           ? await svc.getCurrentScheduledRetry(issue.id)
           : null;
-      const shouldResumeInProgressScheduledRetry =
-        !!scheduledRetryForHumanComment &&
+      let shouldResumeInProgressScheduledRetry =
+        scheduledRetryForHumanComment?.status === "scheduled_retry" &&
         scheduledRetryForHumanComment.agentId === issue.assigneeAgentId;
       const assigneeSelfCommentOnTerminal =
         isAssigneeSelfCommentOnTerminalIssue({
@@ -18366,6 +18375,14 @@ export function issueRoutes(
 
       let scheduledRetrySupersededByComment = false;
       let cancelledScheduledRetryRunId: string | null = null;
+      if (effectiveMoveToTodoRequested && shouldResumeInProgressScheduledRetry) {
+        cancelledScheduledRetryRunId = await cancelScheduledRetrySupersededByComment({
+          scheduledRetryRunId: scheduledRetryForHumanComment?.runId,
+          issue,
+          actor,
+        });
+        shouldResumeInProgressScheduledRetry = cancelledScheduledRetryRunId !== null;
+      }
       if (
         effectiveMoveToTodoRequested &&
         (isClosed ||
@@ -18375,13 +18392,6 @@ export function issueRoutes(
         scheduledRetrySupersededByComment =
           shouldResumeInProgressScheduledRetry &&
           issue.status === "in_progress";
-        cancelledScheduledRetryRunId = scheduledRetrySupersededByComment
-          ? await cancelScheduledRetrySupersededByComment({
-              scheduledRetryRunId: scheduledRetryForHumanComment?.runId,
-              issue,
-              actor,
-            })
-          : null;
         const reopenedIssue = await svc.update(id, { status: "todo" });
         if (!reopenedIssue) {
           res.status(404).json({ error: "Issue not found" });
