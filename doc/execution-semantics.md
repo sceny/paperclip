@@ -445,6 +445,14 @@ An external wait counts as a live or waiting path only when the next move surviv
 
 A one-shot issue monitor consumes its persisted `nextCheckAt` when it dispatches the assignee wake. If that monitor-consuming run is lost before it records a new disposition or future monitor, Paperclip restores exactly one bounded continuation using the existing process-loss retry limit; if that continuation is also lost, the normal recovery-action escalation owns the next step instead of creating another monitor loop.
 
+A due monitor remains scheduled when queue admission defers it. Execution recovery
+holds still prevent provider work until the existing reconciliation path clears
+those holds. `issue.monitor_deferred` activity records that decision and a safe
+blocker cause when available. Unexpected admission failures retain the schedule
+and record `issue.monitor_dispatch_failed`, with no raw provider error. Repeated
+identical diagnostics for one schedule are limited to one per five minutes.
+Diagnostics never authorize execution or consume a monitor attempt.
+
 Native `set_task_monitor` arguments put scheduling fields inside `monitor`:
 `{ "idempotencyKey": "check-ci", "monitor": { "nextCheckAt": "<future UTC timestamp>", "notes": "Check pending CI." } }`.
 Use `monitor: null` to clear a schedule. A runner schema rejection executes no
@@ -452,6 +460,12 @@ Paperclip mutation. It returns bounded schema locations and repair guidance,
 without submitted values. Correct the arguments and retry; the rejection is not
 evidence that the scheduling service is unavailable. Confirm the persisted
 receipt before reporting a scheduled wait.
+
+Native `call_api` text windows use `responseText.limitBytes` from 4 through
+24576 bytes, with a default of 24576. Follow `nextOffsetBytes` until it is null.
+Rejected API fallback arguments return the same bounded schema locations as
+monitor calls, with no submitted values. Correct the arguments before retrying;
+validation does not dispatch an HTTP request or relax route permissions.
 
 A native provider may omit `continuation` (or send `null`) when it reports
 `yielded` after saving a monitor. The controller reads current authorized task

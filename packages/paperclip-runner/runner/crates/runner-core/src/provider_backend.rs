@@ -6539,3 +6539,7 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "tests/provider_api_validation.rs"]
+mod api_validation_tests;
