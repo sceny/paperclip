@@ -81,6 +81,15 @@ Automated: [channel integration](../../server/src/__tests__/chat-channels.integr
 
 Manual: Inspect the bound agent and identity, recent activity, and delivery failure details. Repair a disposable credential, retry a safe message when offered, and verify exactly one external reply. Disable the endpoint and confirm new traffic is not silently processed.
 
+For publication failures, reject one operation with a provider 403 and verify
+that its failure remains visible while unrelated tools and publications continue.
+Repeat with an authentication failure: the endpoint must require attention and
+stop provider traffic, while the connection's enabled setting remains unchanged.
+Reconcile persistent receivers and restart the service; authentication failures
+must remain stopped while transient disconnections can still recover.
+The PostgreSQL suite uses controlled provider failures for these cases; live
+provider credential repair remains a separate acceptance check.
+
 For GitHub, submit a disposable PR and verify the summary heading uses the bot's
 display name and the check remains **Paperclip Review**. For two separate bots on one PR, verify
 their App-scoped checks and comments remain independent.

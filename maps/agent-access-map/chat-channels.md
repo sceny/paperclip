@@ -87,6 +87,15 @@ remaining operations before qualifying the whole capability.
 Gaps: Normal agent replies work through server delivery. Explicit endpoint publication
 APIs are board management paths.
 
+Publication, provider-reply, and form-open 403/permission errors fail the rejected
+operation without removing unrelated assigned channel tools. Confirmed
+authentication failures still put the endpoint in attention, which blocks tool
+admission and provider sends; connection enabled intent is retained. Known
+resource denials and explicit revocation keep their narrower or installation-wide
+stops. PostgreSQL provider fixtures verify discovery after 403 and rejection after
+401, including signed installation removal after a 401; they do not establish
+live GitHub credential recovery.
+
 GitHub publication recovery (2026-10-14): assigned-agent `submit_review`, `comment`,
 and `update_comment` calls reuse their run-, task-, endpoint-, and argument-bound
 publication on an exact retry. Fresh gateway policy and provider authority remain
