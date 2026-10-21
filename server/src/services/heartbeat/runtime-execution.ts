@@ -1,3 +1,5 @@
+import { DELIVERY_QUEUES } from "../delivery-work-notifications.js";
+import { writeExecutionControl } from "../execution-control-notifications.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { measureRunPhase } from "../execution-preparation-timing.js";
 import { parseNativeSessionGoalControl } from "./scheduling.js";
@@ -933,7 +935,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
             })); });
         }
         await ownership?.assertHeld();
-        await db
+        await writeExecutionControl(db, DELIVERY_QUEUES.executionFinalization, tx => tx
           .update(heartbeatRuns)
           .set({ executionControlDeadlineAt: new Date(Date.now() + 60_000) })
           .where(
@@ -941,7 +943,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
               eq(heartbeatRuns.id, run.id),
               eq(heartbeatRuns.status, "running"),
             ),
-          );
+          ));
         const workspaceFinalizeStatus = hasWorkspaceRestoreFailure(adapterResult.resultJson) ? "failed" : "succeeded";
         await recordWorkspaceFinalize(workspaceFinalizeStatus);
         if (adapterResult.nativeFinalization) {
@@ -1009,7 +1011,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       && !(nativeExecution && "access" in nativeExecution.workspace && nativeExecution.workspace.access === "none")) {
       input.effects.onProviderResourceDisposition("stop_and_retain");
     }
-    await db
+    await writeExecutionControl(db, DELIVERY_QUEUES.executionFinalization, tx => tx
       .update(heartbeatRuns)
       .set({ executionControlDeadlineAt: new Date(Date.now() + 60_000) })
       .where(
@@ -1017,7 +1019,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
           eq(heartbeatRuns.id, run.id),
           eq(heartbeatRuns.status, "running"),
         ),
-      );
+      ));
     if (
       issueRef &&
       context.resumeSessionGoalHeartbeat === true &&
