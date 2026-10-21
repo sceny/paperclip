@@ -57,6 +57,13 @@
       "localAsset": "/brands/apps/box.svg"
     },
     {
+      "slug": "braintrust",
+      "provider": "Braintrust",
+      "catalogVisible": true,
+      "localAsset": "/brands/apps/braintrust.png",
+      "darkAsset": "/brands/apps/braintrust-dark.png"
+    },
+    {
       "slug": "brex",
       "provider": "Brex",
       "catalogVisible": false,

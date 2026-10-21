@@ -284,7 +284,7 @@ describe("AppDefinition catalog", () => {
         "google-workspace-search",
       ]),
     );
-    expect(SELF_SERVE_MCP_CANDIDATES).toHaveLength(64);
+    expect(SELF_SERVE_MCP_CANDIDATES).toHaveLength(65);
     expect(BLOCKED_MCP_PROVIDERS.map((entry) => entry.slug)).toEqual([
       "g2",
       "vercel",
@@ -450,15 +450,15 @@ describe("AppDefinition catalog", () => {
     expect(channel("slack")?.guidanceMd).toContain("reactions");
     expect(channel("slack")?.guidanceMd).toContain("direct messages");
   });
-  it("keeps a complete, unique, dated evidence ledger for all 68 researched MCP providers", () => {
+  it("keeps a complete, unique, dated evidence ledger for all 69 researched MCP providers", () => {
     // Ledger-wide date reflects the last full re-verification (2026-08-26);
     // later provider additions carry their own research evidence, but
     // bumping the shared date would overstate freshness for the other providers.
     expect(SELF_SERVE_MCP_RESEARCH.verifiedAt).toBe("2026-08-26");
-    expect(SELF_SERVE_MCP_RESEARCH.entries).toHaveLength(68);
+    expect(SELF_SERVE_MCP_RESEARCH.entries).toHaveLength(69);
     expect(
       new Set(SELF_SERVE_MCP_RESEARCH.entries.map((entry) => entry.slug)),
-    ).toHaveProperty("size", 68);
+    ).toHaveProperty("size", 69);
     for (const entry of SELF_SERVE_MCP_RESEARCH.entries) {
       expect(new URL(entry.docsUrl).protocol).toBe("https:");
       expect(new URL(entry.serverUrl).protocol).toBe("https:");
@@ -886,7 +886,7 @@ describe("AppDefinition catalog", () => {
       "ticktick",
       "xero",
     ]);
-    expect(APP_STORE_DEFINITIONS).toHaveLength(84);
+    expect(APP_STORE_DEFINITIONS).toHaveLength(85);
     const connectableSlugs = new Set(
       CONNECTABLE_APP_DEFINITIONS.map((entry) => entry.slug),
     );
@@ -1095,6 +1095,71 @@ describe("AppDefinition catalog", () => {
       expect(method.requiredResourceFilters).toBeUndefined();
       expect(method.guidanceMd).toContain("optional advanced controls");
     }
+  });
+  it("connects Braintrust US and EU with discovered OAuth or a vaulted bearer key", () => {
+    const braintrust = getConnectableAppDefinition("braintrust")!;
+    expect(getAppStoreDefinition("braintrust")).toBe(braintrust);
+    expect(braintrust).toMatchObject({
+      name: "Braintrust",
+      categories: ["developer", "data"],
+      urlPatterns: ["https://api.braintrust.dev/*", "https://api-eu.braintrust.dev/*"],
+      docsUrl: "https://www.braintrust.dev/docs/integrations/developer-tools/mcp",
+      redirectConstraints: "https-or-loopback-http",
+      branding: {
+        logoUrl: "/brands/apps/braintrust.png",
+        darkLogoUrl: "/brands/apps/braintrust-dark.png",
+      },
+    });
+    expect(braintrust.methods.map((method) => method.key)).toEqual([
+      "mcp-oauth", "mcp-api-key", "mcp-eu-oauth", "mcp-eu-api-key",
+    ]);
+    expect(getAvailableConnectionMethod(braintrust)?.key).toBe("mcp-oauth");
+    for (const method of braintrust.methods) {
+      const region = method.key.startsWith("mcp-eu-") ? "EU" : "US";
+      const host = region === "EU" ? "api-eu.braintrust.dev" : "api.braintrust.dev";
+      const serverUrl = `https://${host}/mcp`;
+      expect(getAvailableConnectionMethod(braintrust, method.key)).toBe(method);
+      expect(resolveConnectionMethodServerUrl(method, {})).toBe(serverUrl);
+      expect(getAppDefinitionForUrl(serverUrl)?.slug).toBe("braintrust");
+      expect(method).toMatchObject({
+        transport: "mcp_remote", riskTier: "S4",
+        capabilityProfile: { key: "write", label: "Read and write" },
+        defaults: { serverUrl },
+      });
+      expect(method.label).toContain(region);
+      expect(method.tenantFields).toBeUndefined();
+      expect(method.requiredResourceFilters).toBeUndefined();
+      expect(method.grantKinds).toBeUndefined();
+      expect(method.credentialSources).toBeUndefined();
+      expect(recommendedDefaultsForApp(braintrust, method.key)).toEqual({
+        access: "all_agents", askFirstRiskLevels: [],
+      });
+      expect(method.warnings?.join(" ")).toContain("permanently delete");
+      expect(method.warnings?.join(" ")).toContain("credits");
+      if (method.auth === "oauth") {
+        expect(method.ownershipModes).toEqual(["dcr"]);
+        expect(method.defaults).toEqual({
+          serverUrl,
+          discoveryUrl: `https://${host}/.well-known/oauth-protected-resource/mcp`,
+          scopesHint: ["mcp"],
+        });
+        expect(method.credentialFields).toBeUndefined();
+      } else {
+        expect(method.auth).toBe("api_key");
+        expect(method.ownershipModes).toEqual(["customer"]);
+        expect(method.defaults).toEqual({ serverUrl });
+        expect(method.keyPlacement).toEqual({
+          location: "header", name: "Authorization", prefix: "Bearer ",
+        });
+        expect(method.credentialFields).toEqual([
+          expect.objectContaining({
+            key: "authorization", type: "password", required: true, secret: true,
+            helperMd: expect.stringContaining("reads and writes"),
+          }),
+        ]);
+      }
+    }
+    expect(getAppDefinitionForUrl("https://api.braintrust.dev.example.com/mcp")).toBeNull();
   });
   it("connects Neon's hosted server with optional project pinning and read-only mode", () => {
     const neon = APP_DEFINITIONS.find((app) => app.slug === "neon")!;

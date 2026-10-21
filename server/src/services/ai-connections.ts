@@ -1,3 +1,4 @@
+import { notifyLoginSessionChanged } from "./login-cleanup-notifications.js";
 import { WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE } from "@paperclipai/adapter-utils/workspace-restore-merge";
 import { withAccountHomeSecretMutationLock } from "@paperclipai/adapter-codex-local/server";
 import { syncConnectionCredentialBindings } from "./connection-credential-bindings.js";
@@ -886,6 +887,7 @@ export function aiConnectionService(db: Db) {
               })),
             );
       }
+      if (loginSession) await notifyLoginSessionChanged(tx);
       if (loginSession)
         await tx
           .update(adapterAuthSessions)

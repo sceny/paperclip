@@ -22,6 +22,7 @@ import { fetchCompanyQuotaWindows } from "../services/quota-windows.js";
 import { quotaCredentialRecoveryPath, quotaCredentialRecovery, quotaCredentialHash } from "../services/quota-credential-recovery.js";
 import { readAiConnectionConfigurationFailure } from "../services/ai-connection-configuration-failure.js";
 import { aiConnectionService } from "../services/ai-connections.js";
+import { DELIVERY_QUEUES, subscribeDeliveryWork } from "../services/delivery-work-notifications.js";
 import { syncConnectionCredentialBindings } from "../services/connection-credential-bindings.js";
 import * as codexAdapter from "@paperclipai/adapter-codex-local/server";
 import { WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE } from "@paperclipai/adapter-utils/workspace-restore-merge";
@@ -1685,7 +1686,15 @@ console.log(JSON.stringify({ type: "result", subtype: "success", result: "hello"
       publicSessionId: randomUUID(), status: "promoting", aiConnection: { ...intent, agentIds: [] },
       expiresAt: new Date(Date.now() + 60_000),
     }).returning();
-    const complete = vi.fn(async () => {});
+    const adapterWake = vi.fn(), setupWake = vi.fn();
+    const unsubscribe = [
+      subscribeDeliveryWork(db, DELIVERY_QUEUES.adapterLoginCleanup, adapterWake),
+      subscribeDeliveryWork(db, DELIVERY_QUEUES.setupTokenCleanup, setupWake),
+    ];
+    const complete = vi.fn(async () => {
+      expect(adapterWake).not.toHaveBeenCalled();
+      expect(setupWake).not.toHaveBeenCalled();
+    });
     try {
       await expect(service.save(companyId, owner, { ...intent, agentIds: [] }, "fixture", { id: session.publicSessionId, complete })).rejects.toThrow("ownership mismatch");
       await expect(service.save(companyId, "bob", { ...intent, agentIds: [] }, "fixture", { id: session.id, complete })).rejects.toThrow("ownership mismatch");
@@ -1697,7 +1706,12 @@ console.log(JSON.stringify({ type: "result", subtype: "success", result: "hello"
       });
       expect(await service.save(companyId, owner, { ...intent, agentIds: [] }, "replacement", { id: session.id, complete })).toEqual(saved);
       expect(complete).toHaveBeenCalledTimes(1);
-    } finally { await db.delete(adapterAuthSessions).where(eq(adapterAuthSessions.id, session.id)); }
+      expect(adapterWake).toHaveBeenCalledTimes(1);
+      expect(setupWake).toHaveBeenCalledTimes(1);
+    } finally {
+      unsubscribe.forEach(stop => stop());
+      await db.delete(adapterAuthSessions).where(eq(adapterAuthSessions.id, session.id));
+    }
   });
   it("rolls back credential and connection writes if setup-token completion loses its claim", async () => {
     const owner = "lost-setup-token-claim";

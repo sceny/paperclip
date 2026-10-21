@@ -2,6 +2,7 @@ import { getAppDefinitionForApplicationKey, isConnectorFeatureEnabled } from "@p
 import { stableHash, descriptorHash } from "./tool-catalog-hash.js";
 import { assertProfileEntryInputs } from "./tool-profile-entry-validation.js";
 import { DAYTONA_TOOLS, daytonaClient, daytonaRisk, isDaytonaConnection, isDaytonaToolName } from "./daytona.js";
+import { connectorToolPolicy } from "./connectors/tool-policy.js";
 import { chatCredentialMutationLease } from "./chat-credential-mutation-lease.js";
 import { notifyChatEndpointWork } from "./chat-work-notifications.js";
 import { removeSlackRegistration } from "./chat-slack-registration-cleanup.js";
@@ -249,7 +250,7 @@ import { connectionCredentialConfigPath as credentialRefConfigPath, connectionGr
 import { agentmailApi } from "./agentmail-api.js";
 import type { ConfigureRailwaySsh, RailwaySshSetup } from "@paperclipai/shared";
 import { generateRailwaySshKey, RAILWAY_SSH_SECRET_PATH, validateRailwayKnownHosts } from "./railway-ssh.js";
-import { createRailwayClient, discoverRailwayWorkspace, isRailwayConnection, isRailwayEndpoint, isRailwayToolBlocked, normalizeRailwayToolName, RAILWAY_TOOLS, RAILWAY_TOOL_PREFIX, railwayRisk, RailwayError } from "./railway.js";
+import { createRailwayClient, discoverRailwayWorkspace, isRailwayConnection, isRailwayEndpoint, isRailwayToolBlocked, normalizeRailwayToolName, RAILWAY_TOOLS, RAILWAY_TOOL_PREFIX, RailwayError } from "./railway.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
 import {
   readSignedToolArgumentsPayload,
@@ -2401,6 +2402,8 @@ export function classifyRisk(
   const annotations = tool.annotations ?? {};
   if (annotations.destructiveHint === true || annotations.destructive === true)
     return "destructive";
+  const reviewedRisk = connectorToolPolicy(sourceTemplateKey).classifyRisk?.(tool);
+  if (reviewedRisk) return reviewedRisk;
   const normalizedToolName = normalizedProviderToolName(tool.name);
   if (isMemoryConnectorId(sourceTemplateKey)) {
     if (verbMatches(tool.name, "delete|remove|destroy|forget|prune|reset")) return "destructive";
@@ -2420,21 +2423,11 @@ export function classifyRisk(
   if (sourceTemplateKey === "browser-use-cloud") {
     return BROWSER_USE_TOOLS.find(t => t.name === tool.name)?.annotations.readOnlyHint ? "read" : "destructive";
   }
-  if (sourceTemplateKey === "daytona") return daytonaRisk(tool.name);
-  if (sourceTemplateKey === "railway") {
-    const reviewed = railwayRisk(normalizedToolName);
-    return reviewed === "read" && (annotations.readOnlyHint === false || annotations.writeHint === true) ? "write" : reviewed;
-  }
   // Fireflies sharing, moving, and access revocation are mutations even when
   // a provider omits annotations or mistakenly advertises a read hint.
   if (sourceTemplateKey === "fireflies" && [
     "fireflies-share-meeting", "fireflies-revoke-meeting-access", "fireflies-move-meeting",
   ].includes(normalizedToolName)) return "write";
-  // Enterpret's run_graph_query self-reports readOnlyHint: true, but Cypher is
-  // not a read-only language and live validation never established the tool as
-  // safe. Treat it as write so Ask-first defaults can restrict it.
-  if (sourceTemplateKey === "enterpret" && normalizedToolName === "run-graph-query")
-    return "write";
   // Gmail archive removes a system label. Keep it behind the archive method's
   // destructive Ask-first default even when the preview provider omits hints.
   if (sourceTemplateKey === "gmail" && normalizedToolName === "unlabel-thread")
@@ -7964,9 +7957,8 @@ export function toolAccessService(
       isGoogleWorkspaceConnectorProfileId(googleProfileValue)
         ? googleProfileValue
         : null;
-    const preserveReviewedCatalog =
-      (isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret" || isDaytonaConnection(connection)) &&
-      existingRows.length > 0;
+    const connectorPolicy = connectorToolPolicy(sourceTemplateKey, connection);
+    const preserveReviewedCatalog = connectorPolicy.quarantineNewEntries && existingRows.length > 0;
     const quarantineOnRefresh =
       (!refreshOptions.enableAllByDefault || preserveReviewedCatalog) &&
       shouldQuarantineNewEntries(connection) &&
@@ -7976,7 +7968,7 @@ export function toolAccessService(
         refreshOptions.quarantineManagedOAuthDraft === true);
     const safeDefault = asRecord(connection.config).safeDefault === true;
     for (const descriptor of descriptors) {
-      const riskLevel = classifyRisk(descriptor, isRailwayEndpoint(connection.config.url) ? "railway" : sourceTemplateKey);
+      const riskLevel = classifyRisk(descriptor, connectorPolicy.sourceTemplateKey);
       const hash = descriptorHash(descriptor, riskLevel);
       const schemaHash = stableHash(descriptor.inputSchema ?? {});
       const existing = existingByName.get(descriptor.name);
@@ -8043,8 +8035,7 @@ export function toolAccessService(
     const catalogByName = new Map(catalogRows.map(row => [row.toolName, row]));
     const updatedEntries = descriptors.map(descriptor => toCatalogEntry(catalogByName.get(descriptor.name)!));
 
-    const preserveQuarantine =
-      isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret" || isDaytonaConnection(connection);
+    const preserveQuarantine = connectorPolicy.quarantineNewEntries;
     const normalizedConfig = preserveQuarantine
       ? { ...connection.config, quarantineNewEntries: true }
       : refreshOptions.enableAllByDefault
@@ -12979,7 +12970,7 @@ export function toolAccessService(
           // Grant-backed setup keeps the full discovered catalog selectable;
           // the wizard projects the app's action defaults into policies at
           // finish time instead of using catalog quarantine as access state.
-          quarantineNewEntries: ["railway", "enterpret", "daytona"].includes(galleryEntry.slug),
+          quarantineNewEntries: connectorToolPolicy(galleryEntry.slug).quarantineNewEntries,
           ...(remoteMcpConnector ? {
             mcpSessionRequired: true,
             mcpAuthMode: input.authMode ?? "auto",
