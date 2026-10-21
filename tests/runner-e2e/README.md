@@ -1,5 +1,71 @@
 # Paid runner full-stack E2E
 
+## Automatic repository continuation
+
+The explicit-only `automatic-repository` suite is an early repair check for
+native Codex and Claude on local and Daytona execution. One browser request
+must stage its managed repository, continue without a timer or another user
+message, and deliver a registered download. The oracle compares downloaded
+JSON with the actual checkout and the original task file. The source admission
+creates an unpredictable reference and registers its bytes before setup. The
+observer must download that source-attributed artifact while only the first
+admission is running, before the successor starts. A missing original, late
+observation, or different successor-created reference fails qualification. The
+successor is instructed to stop on a missing file and never recreate it. Both admissions
+must retain one workspace and commit their native results. The successor must
+have its own dispatch receipt and saved native intent. It starts after the
+predecessor finishes; dispatch must not retag the predecessor. The fixture uses
+production hire instructions and records the selected catalog model. These four
+development cells do not qualify Slack, staging configurations, migration,
+finalization restart, or the complete dependable-work milestone.
+
+Select it explicitly with `--suite automatic-repository`. Every execution has
+one attempt, two expected provider admissions, and 1,000-cent company and agent
+hard stops. Automatic infrastructure retries are disabled. Existing campaign
+reports retain failures, timings, usage, runtime costs, and source identity.
+Source-server startup prepares the existing shared/plugin SDK build dependencies
+before importing native tool authority. Installed-package checks never execute
+checkout build helpers.
+
+## Configured repository and conversion checks
+
+The explicit-only `configured-repository` and `legacy-conversion` suites each
+have four development cells: Codex `gpt-6.1-sol` and Claude `claude-opus-5-5`,
+on local and Daytona environments. Each uses production hire instructions,
+one attempt, one expected provider admission, and 1,000-cent company and agent
+hard stops. The conversion journey creates a real legacy agent and selects
+Paperclip Runner through the public agent update API. It checks retained
+configuration, encrypted secret references, environment, instructions, and
+corresponding permission policy before submitting work through the browser.
+The disposable legacy profile starts without optional CLI-only extra arguments or turn limits;
+the journey does not remove settings from an existing user agent. For either
+provider, Daytona's public environment probe must save platform qualification
+before the same agent selects Runner. Probe leases and uncertain probe accounting
+remain included in attempt evidence and cleanup.
+
+The observer seeds a random reference in the fixture-owned Git checkout before
+task creation. It checks the downloaded JSON against the original file bytes,
+SHA-256 and commit, then checks the preserved source through the workspace API.
+A pass also requires the configured native provider/model, one committed run,
+a visible artifact link after reload, Done, and no pending question. No agent
+success claim or agent-authored test can replace these checks.
+
+The explicit-only `automatic-repository-configured-models` suite reuses the
+projectless continuation oracle above with those same two recorded staging
+models. Its four cells keep the first admission's artifact observation and the
+strict requirement for a saved same-agent continuation. A monitor fallback is
+still a failure of that requirement.
+
+These twelve development cells use API-key authentication and per-turn Runner
+lifecycle. They do not qualify staging subscription credentials, warm Runner
+reuse, Slack delivery, or the complete dependable-work matrix. Run one exact
+ID for a bounded check:
+
+```sh
+pnpm test:e2e:runner -- --id legacy-conversion.runner-codex.local.convert-and-deliver --max-automatic-retries 0
+pnpm test:e2e:runner -- --id automatic-repository-configured-models.runner-codex.local.automatic-repository-resume --max-automatic-retries 0
+```
+
 ## Latency observation bounds
 
 The explicit `codie-latency-diagnostic` arms its observation recorder before

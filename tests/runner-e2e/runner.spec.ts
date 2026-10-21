@@ -1,6 +1,8 @@
 import { runCaseHandoffsFlow } from "./case-handoffs-flow.js";
 import { runCaseReceiptFlow } from "./case-receipt-flow.js";
 import { runTaskWorkspacesFlow } from "./task-workspaces-flow.js";
+import { runRepositoryVerificationFlow } from "./repository-verification-flow.js";
+import { runAutomaticRepositoryFlow } from "./automatic-repository-flow.js";
 import { runNativeActiveStopFlow as runCopilotActiveStopFlow } from "./copilot-active-stop-flow.js";
 import { nativeActiveStopTasks as copilotActiveStopTasks } from "./copilot-active-stop-tasks.js";
 import type { RestartRunnerIdentity } from "./process-tree-owner.js";
@@ -1022,6 +1024,24 @@ for (const execution of executions) {
           matcherResults,
         }, secrets);
         await captureScreenshot("final-state", "Final visible task state", "final-state.png");
+      } else if (execution.task.flow === "repository_verification") {
+        const journey = await runRepositoryVerificationFlow({ page, api, fixtures, execution, nonce, workspacePath: workspacePath!, temporaryRoot,
+          deadlineAt: startedAtMs + deadlineMs - 30_000,
+          observe: (currentIssue, currentRuns, checks) => {
+            issue = currentIssue as IssueRecord; selectedRuns = currentRuns as RunRecord[];
+            matcherResults = checks.map(check => ({ matcher: { kind: "json_path" as const, path: `repositoryVerification.${check.id}`, expected: true }, passed: check.passed, detail: check.detail }));
+          }, capture: captureScreenshot, evidence: (name, data) => writeSanitizedJson(snapshotsDir, name, data, secrets),
+        });
+        issue = journey.issue as IssueRecord; selectedRuns = journey.runs as RunRecord[];
+      } else if (execution.task.flow === "automatic_repository") {
+        const journey = await runAutomaticRepositoryFlow({ page, api, fixtures, execution, nonce, temporaryRoot,
+          deadlineAt: startedAtMs + deadlineMs - 30_000,
+          observe: (currentIssue, currentRuns, checks) => {
+            issue = currentIssue as IssueRecord; selectedRuns = currentRuns as RunRecord[];
+            matcherResults = checks.map(check => ({ matcher: { kind: "json_path" as const, path: `automaticRepository.${check.id}`, expected: true }, passed: check.passed, detail: check.detail }));
+          }, capture: captureScreenshot, evidence: (name, data) => writeSanitizedJson(snapshotsDir, name, data, secrets),
+        });
+        issue = journey.issue as IssueRecord; selectedRuns = journey.runs as RunRecord[];
       } else if (execution.task.flow === "task_workspaces") {
         const journey = await runTaskWorkspacesFlow({ page, api, fixtures, execution, nonce, temporaryRoot,
           deadlineAt: startedAtMs + deadlineMs - 30_000,
