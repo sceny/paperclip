@@ -3414,6 +3414,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig, 
   const run = hydratedRun ?? initialRun;
   const runConnectionId = asRecord(run.contextSnapshot?.aiConnection)?.connectionId;
   const runAiConnectionId = typeof runConnectionId === "string" ? runConnectionId : undefined;
+  const runUsedAiConnection = aiConnectionBound || Boolean(runAiConnectionId);
   const { data: boardAccess } = useQuery({
     queryKey: queryKeys.access.currentBoardAccess,
     queryFn: () => accessApi.getCurrentBoardAccess(),
@@ -3777,7 +3778,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig, 
                 {run.errorCode && <span className="text-muted-foreground ml-1">({run.errorCode})</span>}
               </div>
             )}
-            {run.errorCode === "claude_auth_required" && adapterType === "claude_local" && aiConnectionBound && (
+            {run.errorCode === "claude_auth_required" && adapterType === "claude_local" && runUsedAiConnection && (
               <AiConnectionRunReconnect
                 companyId={run.companyId}
                 agentId={run.agentId}
@@ -3785,7 +3786,7 @@ function RunDetail({ run: initialRun, agentRouteId, adapterType, adapterConfig, 
                 connectionId={runAiConnectionId}
               />
             )}
-            {run.errorCode === "claude_auth_required" && adapterType === "claude_local" && !aiConnectionBound && (
+            {run.errorCode === "claude_auth_required" && adapterType === "claude_local" && !runUsedAiConnection && (
               <div className="space-y-2">
                 <Button
                   variant="outline"
