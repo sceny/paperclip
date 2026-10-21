@@ -170,6 +170,13 @@ to existing answered threads without another model invocation. Slack identity,
 permissions, and the ability to execute work in the same thread are unchanged.
 Other providers keep their existing lifecycle.
 
+Several chat conversations can share one task, such as the inline finding
+threads of a GitHub pull request review. A reviewed chat run attests exactly one
+conversation, so wake coalescing keeps each conversation in its own batch.
+Messages from the same conversation still coalesce into one run. Messages from
+different conversations queue separately and run one after the other. Wakes
+without a conversation keep their normal coalescing.
+
 ### `done`
 
 The work is complete and terminal.
