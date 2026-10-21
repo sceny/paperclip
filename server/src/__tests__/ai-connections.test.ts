@@ -1,3 +1,4 @@
+import { completeSetupTokenAiConnection } from "../services/setup-token-ai-connection.js";
 import { connectionIntentService } from "../services/connection-intents.js";
 import { connectionIntentDeliveryService } from "../services/connection-intent-delivery.js";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
@@ -844,7 +845,7 @@ describe("managed AI connections", () => {
       lock = vi.spyOn(codexAdapter, "withAccountHomeSecretMutationLock")
         .mockRejectedValueOnce(Object.assign(new Error("lock timeout"), { code: WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE }))
         .mockRejectedValueOnce(Object.assign(new Error("lock timeout"), { code: WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE }));
-      saving = service.save(companyId, loginOwner, { ...intent, agentIds: [] }, credential, sessionId);
+      saving = service.save(companyId, loginOwner, { ...intent, agentIds: [] }, credential, { id: sessionId });
       void saving.catch(() => {});
       await vi.waitFor(() => expect(lock).toHaveBeenCalledTimes(3));
       expect((await db.select().from(adapterAuthSessions).where(eq(adapterAuthSessions.id, sessionId)))[0].connectionId).toBeNull();
@@ -852,7 +853,7 @@ describe("managed AI connections", () => {
       const [, saved] = await Promise.all([refreshing, saving]);
       const [row] = (await service.quotaAccounts(companyId, loginOwner)).filter(row => row.connection.id === saved.connectionId);
       expect(await service.credential(row)).toBe(credential);
-      expect(await service.save(companyId, loginOwner, { ...intent, agentIds: [] }, credential, sessionId)).toEqual(saved);
+      expect(await service.save(companyId, loginOwner, { ...intent, agentIds: [] }, credential, { id: sessionId })).toEqual(saved);
       if (kind === "new") expect(JSON.parse(await service.credential(quotaRow))).toMatchObject({ tokens: { access_token: "quota-fresh", refresh_token: "quota-replacement" } });
     } finally {
       release.resolve(); await Promise.allSettled([refreshing, saving]); lock?.mockRestore(); request.mockRestore();
@@ -1667,11 +1668,57 @@ console.log(JSON.stringify({ type: "result", subtype: "success", result: "hello"
     const intent = { provider: "anthropic", method: "subscription", ownership: "personal", name: "Claude subscription", agentIds: [], allAgents: true } as const;
     const sessionId = randomUUID();
     await db.insert(adapterAuthSessions).values({ companyId, environmentId: environment.id, adapterType: "claude_local", startedByUserId: "alice", publicSessionId: sessionId, status: "submitting", aiConnection: { ...intent, agentIds: [] }, expiresAt: new Date(Date.now() + 60000) });
-    const first = await service.save(companyId, "alice", { ...intent, agentIds: [] }, "fixture-subscription", sessionId);
-    expect(await service.save(companyId, "alice", { ...intent, agentIds: [] }, "fixture-subscription", sessionId)).toEqual(first);
+    const first = await completeSetupTokenAiConnection(db, { scope: { companyId, ownerUserId: "alice", environmentId: environment.id, adapterType: "claude_local", aiConnection: { ...intent, agentIds: [] } }, token: "fixture-subscription", sessionId });
+    expect(await completeSetupTokenAiConnection(db, { scope: { companyId, ownerUserId: "alice", environmentId: environment.id, adapterType: "claude_local", aiConnection: { ...intent, agentIds: [] } }, token: "fixture-subscription", sessionId })).toEqual(first);
+    expect((await db.select().from(adapterAuthSessions).where(eq(adapterAuthSessions.publicSessionId, sessionId)))[0]).toMatchObject({ status: "stored", connectionId: first.connectionId, connectionGrantId: first.grantId });
     const cancelled = randomUUID();
     await db.insert(adapterAuthSessions).values({ companyId, environmentId: environment.id, adapterType: "claude_local", startedByUserId: "alice", publicSessionId: cancelled, status: "cancelled", expiresAt: new Date(Date.now() + 60000) });
-    await expect(service.save(companyId, "alice", { ...intent, agentIds: [] }, "fixture-never-save", cancelled)).rejects.toThrow("no longer active");
+    await expect(completeSetupTokenAiConnection(db, { scope: { companyId, ownerUserId: "alice", environmentId: environment.id, adapterType: "claude_local", aiConnection: { ...intent, agentIds: [] } }, token: "fixture-never-save", sessionId: cancelled })).rejects.toThrow("no longer active");
+  });
+  it.each(["anthropic", "openai"] as const)("binds %s by internal session ID without choosing its completion state", async provider => {
+    const owner = `session-owner-${provider}`;
+    await db.insert(companyMemberships).values({ companyId, principalId: owner, principalType: "user", status: "active", membershipRole: "member" });
+    const [environment] = await db.insert(environments).values({ name: `Session identity ${provider}`, driver: "sandbox" }).returning();
+    const intent = { provider, method: "subscription", ownership: "personal", name: `Session identity ${provider}`, allAgents: false, agentIds: [] } as const;
+    const [session] = await db.insert(adapterAuthSessions).values({ companyId, environmentId: environment.id,
+      adapterType: provider === "anthropic" ? "claude_local" : "codex_local", startedByUserId: owner,
+      publicSessionId: randomUUID(), status: "promoting", aiConnection: { ...intent, agentIds: [] },
+      expiresAt: new Date(Date.now() + 60_000),
+    }).returning();
+    const complete = vi.fn(async () => {});
+    try {
+      await expect(service.save(companyId, owner, { ...intent, agentIds: [] }, "fixture", { id: session.publicSessionId, complete })).rejects.toThrow("ownership mismatch");
+      await expect(service.save(companyId, "bob", { ...intent, agentIds: [] }, "fixture", { id: session.id, complete })).rejects.toThrow("ownership mismatch");
+      await expect(service.save(companyId, owner, { ...intent, agentIds: [], ownership: "shared" }, "fixture", { id: session.id, complete })).rejects.toThrow("target mismatch");
+      expect(complete).not.toHaveBeenCalled();
+      const saved = await service.save(companyId, owner, { ...intent, agentIds: [] }, "fixture", { id: session.id, complete });
+      expect((await db.select().from(adapterAuthSessions).where(eq(adapterAuthSessions.id, session.id)))[0]).toMatchObject({
+        connectionId: saved.connectionId, connectionGrantId: saved.grantId, status: "promoting",
+      });
+      expect(await service.save(companyId, owner, { ...intent, agentIds: [] }, "replacement", { id: session.id, complete })).toEqual(saved);
+      expect(complete).toHaveBeenCalledTimes(1);
+    } finally { await db.delete(adapterAuthSessions).where(eq(adapterAuthSessions.id, session.id)); }
+  });
+  it("rolls back credential and connection writes if setup-token completion loses its claim", async () => {
+    const owner = "lost-setup-token-claim";
+    await db.insert(companyMemberships).values({ companyId, principalId: owner, principalType: "user", status: "active", membershipRole: "member" });
+    const [environment] = await db.insert(environments).values({ name: "Lost setup claim", driver: "sandbox" }).returning();
+    const intent = { provider: "anthropic", method: "subscription", ownership: "personal", name: "Lost setup claim", allAgents: false, agentIds: [] } as const;
+    const [session] = await db.insert(adapterAuthSessions).values({ companyId, environmentId: environment.id,
+      adapterType: "claude_local", startedByUserId: owner, publicSessionId: randomUUID(), status: "submitting",
+      aiConnection: { ...intent, agentIds: [] }, expiresAt: new Date(Date.now() + 60_000), boundAt: new Date(),
+    }).returning();
+    try {
+      await expect(completeSetupTokenAiConnection(db, { scope: { companyId, ownerUserId: owner,
+        environmentId: environment.id, adapterType: "claude_local", aiConnection: { ...intent, agentIds: [] } },
+        sessionId: session.publicSessionId, token: "must-rollback",
+      })).rejects.toThrow();
+      expect((await db.select().from(adapterAuthSessions).where(eq(adapterAuthSessions.id, session.id)))[0]).toMatchObject({
+        connectionId: null, connectionGrantId: null, status: "submitting",
+      });
+      expect(await db.select().from(toolConnections).where(and(eq(toolConnections.companyId, companyId), eq(toolConnections.name, intent.name)))).toEqual([]);
+      expect(await db.select().from(companySecrets).where(eq(companySecrets.ownerUserId, owner))).toEqual([]);
+    } finally { await db.delete(adapterAuthSessions).where(eq(adapterAuthSessions.id, session.id)); }
   });
   it("preserves connection identity and defaults through reconnect; revocation wins over older attempts", async () => {
     const current = await service.select({ ...input, userId: "bob" });
@@ -1919,7 +1966,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", result: "hello"
     const sessionId = randomUUID();
     const intent = { provider: "anthropic", method: "subscription", ownership: "personal", name: "Expired", agentIds: [], allAgents: true } as const;
     await db.insert(adapterAuthSessions).values({ companyId, environmentId: environment.id, adapterType: "claude_local", startedByUserId: "alice", publicSessionId: sessionId, status: "submitting", aiConnection: { ...intent, agentIds: [] }, expiresAt: new Date(Date.now() - 1000) });
-    await expect(service.save(companyId, "alice", { ...intent, agentIds: [] }, "fixture-never-save", sessionId)).rejects.toThrow("no longer active");
+    await expect(completeSetupTokenAiConnection(db, { scope: { companyId, ownerUserId: "alice", environmentId: environment.id, adapterType: "claude_local", aiConnection: { ...intent, agentIds: [] } }, token: "fixture-never-save", sessionId })).rejects.toThrow("no longer active");
     expect((await service.list(companyId, "alice")).some(account => account.name === "Expired")).toBe(false);
   });
   it("authorizes account creation, reconnect and defaults at the HTTP boundary before provider calls", async () => {
@@ -2040,6 +2087,7 @@ console.log(JSON.stringify({ type: "result", subtype: "success", result: "hello"
       expect(started.headers["cache-control"]).toBe("no-store");
       expect(started.body.command).toBeUndefined();
       expect((await request(app).post(`${base}/attempts`).send(intent)).body).toEqual(started.body);
+      await db.update(adapterAuthSessions).set({ publicSessionId: randomUUID() }).where(eq(adapterAuthSessions.id, started.body.sessionId));
       const input = { ...intent, localSessionId: started.body.sessionId };
       for (const endpoint of [base, `${base}/check`]) {
         expect((await request(app).post(endpoint).set("x-test-user", "bob").send(input)).status).toBe(404);
