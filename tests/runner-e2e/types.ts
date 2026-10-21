@@ -312,6 +312,7 @@ export interface RunnerE2EResult {
   issueId?: string;
   issueIdentifier?: string | null;
   runIds?: string[];
+  latencyProbes?: import("./latency-timing.js").LatencyResult[];
   startupReuse?: Array<{ runId: string } & import("../../packages/adapter-utils/src/startup-reuse.js").StartupReuseSummary>;
   turnTimings?: Array<{
     turn: number;

@@ -1,3 +1,4 @@
+import { getAppDefinitionForApplicationKey, isConnectorFeatureEnabled } from "@paperclipai/shared";
 import { stableHash, descriptorHash } from "./tool-catalog-hash.js";
 import { assertProfileEntryInputs } from "./tool-profile-entry-validation.js";
 import { DAYTONA_TOOLS, daytonaClient, daytonaRisk, isDaytonaConnection, isDaytonaToolName } from "./daytona.js";
@@ -7182,6 +7183,7 @@ export function toolAccessService(
     unavailableServices: string[] = [],
   ): Promise<McpToolDescriptor[]> {
     assertSupportedConnection(connection);
+    await assertConnectorConnectionSetupEnabled(connection);
     let headers = credentialHeaders ?? {
       ...projectedConnectionHeaders(connection),
       ...(await resolveCredentialHeaders(connection, actor)),
@@ -7561,6 +7563,7 @@ export function toolAccessService(
     unavailableServices: string[] = [],
   ): Promise<McpToolDescriptor[]> {
     assertSupportedConnection(connection);
+    await assertConnectorConnectionSetupEnabled(connection);
     if (connection.connectionPurpose === "ai") throw unprocessable("AI connections provide runtime authentication, not tool actions");
     if (isDaytonaConnection(connection)) {
       const headers = credentialHeaders ?? await resolveCredentialHeaders(connection, actor);
@@ -7681,6 +7684,7 @@ export function toolAccessService(
   ): Promise<ToolConnectionHealthCheckResult> {
     const connection = await getConnectionRow(connectionId);
     if (connection.connectionPurpose === "ai") return { connection: toConnection(connection), runtimeSlot: null };
+    await assertConnectorConnectionSetupEnabled(connection);
     const unavailableServices: string[] = [];
     try {
       assertSupportedConnection(connection);
@@ -7828,6 +7832,7 @@ export function toolAccessService(
   ): Promise<ToolCatalogRefreshResult> {
     const connection = await getConnectionRow(connectionId);
     if (connection.connectionPurpose === "ai") throw unprocessable("AI connections do not have a tool catalog");
+    await assertConnectorConnectionSetupEnabled(connection);
     const refreshedAt = now();
     const unavailableServices: string[] = [];
     let descriptors: McpToolDescriptor[];
@@ -12440,10 +12445,29 @@ export function toolAccessService(
   }
 
   async function assertExperimentalConnectorSetupEnabled(provider: unknown, existing = false) {
-    if (!existing && isMemoryConnectorId(provider)
-      && !(await instanceSettingsService(db).getExperimental()).enableMemoryConnectors) {
+    const app = typeof provider === "string" ? getConnectableAppDefinition(provider) : null;
+    if (!app?.experimentalFeatureKey && (existing || !isMemoryConnectorId(provider))) return;
+    const settings = await instanceSettingsService(db).getExperimental();
+    if (app && !isConnectorFeatureEnabled(app, settings)) {
+      throw forbidden(`${app.name} is unavailable on this instance`, { code: "connector_disabled" });
+    }
+    if (!existing && isMemoryConnectorId(provider) && !settings.enableMemoryConnectors) {
       throw forbidden("Enable memory connectors in Settings → Experimental to set up this connection", { code: "memory_connectors_disabled" });
     }
+  }
+
+  async function assertConnectorConnectionSetupEnabled(connection: { config?: Record<string, unknown>; transportConfig?: Record<string, unknown>; applicationId?: string; companyId?: string; status?: string }, applicationKey?: unknown) {
+    let resolvedApplicationKey = applicationKey;
+    if (resolvedApplicationKey == null && connection.applicationId && connection.companyId) {
+      const [application] = await db.select({ applicationKey: toolApplications.applicationKey })
+        .from(toolApplications).where(and(eq(toolApplications.id, connection.applicationId),
+          eq(toolApplications.companyId, connection.companyId))).limit(1);
+      resolvedApplicationKey = application?.applicationKey;
+    }
+    const marker = connection.config?.sourceTemplateKey ?? connection.transportConfig?.sourceTemplateKey;
+    const app = resolvedApplicationKey != null ? getAppDefinitionForApplicationKey(resolvedApplicationKey)
+      : typeof marker === "string" ? getConnectableAppDefinition(marker) : null;
+    if (app) await assertExperimentalConnectorSetupEnabled(app.slug, connection.status !== "draft");
   }
 
   async function connectGalleryApp(
@@ -12565,6 +12589,7 @@ export function toolAccessService(
       }
     }
 
+    await assertConnectorConnectionSetupEnabled(requestedResumeConnection ?? {}, existingApplication?.applicationKey);
     const requestedName =
       input.name ??
       existingApplication?.name ??
@@ -12769,7 +12794,7 @@ export function toolAccessService(
       }
     }
     const requestedGrantKind =
-      retainedGrantKind ?? input.grantKind ?? "organization";
+      retainedGrantKind ?? input.grantKind ?? (method?.grantKinds?.length === 1 ? method.grantKinds[0]! : "organization");
     if (method?.grantKinds && !method.grantKinds.includes(requestedGrantKind)) {
       throw badRequest(
         `${galleryEntry?.name ?? "This app"} supports only ${method.grantKinds.join(" or ")} credentials`,
@@ -14066,6 +14091,7 @@ export function toolAccessService(
     actor?: ActorInfo,
   ): Promise<FinishToolAppResult> {
     const connection = await getConnectionRow(connectionId, companyId);
+    await assertConnectorConnectionSetupEnabled(connection);
     if (connection.status === "archived")
       throw conflict("Archived app connections cannot be finished");
     if (connection.config.mcpPreserveAccess === true && isRemoteMcpConnectorMethod(connection.config.sourceTemplateKey, connection.config.connectionMethodKey)) {
@@ -14561,6 +14587,7 @@ export function toolAccessService(
   ): Promise<ToolConnectionHealthCheckResult> {
     const connection = await getConnectionRow(connectionId, companyId);
     assertSupportedConnection(connection);
+    await assertConnectorConnectionSetupEnabled(connection);
     await assertExperimentalConnectorSetupEnabled(connection.config.sourceTemplateKey, connection.status !== "draft");
     if (connection.status === "archived")
       throw conflict("Archived app connections cannot be reconnected");
@@ -14745,6 +14772,7 @@ export function toolAccessService(
   ): Promise<ToolOAuthStartResult> {
     let connection = await getConnectionRow(connectionId, companyId);
     assertSupportedConnection(connection);
+    await assertConnectorConnectionSetupEnabled(connection);
     await assertExperimentalConnectorSetupEnabled(connection.config.sourceTemplateKey, connection.status !== "draft");
     if (connection.status === "archived")
       throw conflict("Archived app connections cannot start sign in");
@@ -16371,6 +16399,7 @@ export function toolAccessService(
       status: connection.status,
       enabled: connection.enabled,
     };
+    await assertConnectorConnectionSetupEnabled(connection);
     const sourceTemplateKey =
       typeof connection.config.sourceTemplateKey === "string"
         ? connection.config.sourceTemplateKey
@@ -18474,6 +18503,7 @@ export function toolAccessService(
       const config = normalizeGoogleSheetsConnectionConfig(
         input.config ?? input.transportConfig ?? {},
       );
+      await assertConnectorConnectionSetupEnabled({ config, applicationId, companyId });
       // Validate company-scoped references before touching a caller-supplied
       // network endpoint. Besides failing fast, this keeps cross-company
       // authorization errors from being masked by DNS or SSRF validation.
@@ -18489,6 +18519,7 @@ export function toolAccessService(
       if (applicationId) {
         const app = await assertApplication(companyId, applicationId);
         applicationNamespace = app.applicationKey ?? app.name;
+        await assertConnectorConnectionSetupEnabled({ config }, applicationNamespace);
         if (
           (transport === "mcp_remote" && app.type !== "mcp_http") ||
           (transport === "local_stdio" && app.type !== "mcp_stdio")
