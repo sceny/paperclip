@@ -2111,19 +2111,21 @@ export function recoveryService(
     return userResolvedInteraction === null;
   }
 
+  async function getInvocationBlockForIssue(
+    issue: typeof issues.$inferSelect,
+    agentId: string,
+  ) {
+    return budgets.getInvocationBlock(issue.companyId, agentId, {
+      issueId: issue.id,
+      projectId: issue.projectId,
+    });
+  }
+
   async function isInvocationBudgetBlocked(
     issue: typeof issues.$inferSelect,
     agentId: string,
   ) {
-    const budgetBlock = await budgets.getInvocationBlock(
-      issue.companyId,
-      agentId,
-      {
-        issueId: issue.id,
-        projectId: issue.projectId,
-      },
-    );
-    return Boolean(budgetBlock);
+    return Boolean(await getInvocationBlockForIssue(issue, agentId));
   }
 
   async function reconcileUnassignedBlockingIssues() {
@@ -4667,7 +4669,14 @@ export function recoveryService(
           continue;
         }
       }
-      if (await isInvocationBudgetBlocked(issue, agentId)) {
+      const invocationBlock = await getInvocationBlockForIssue(issue, agentId);
+      // A manual pause is a temporary operator hold: leave the assignment
+      // untouched so the normal dispatch paths pick it up after Resume.
+      if (invocationBlock && "manualPause" in invocationBlock && invocationBlock.manualPause) {
+        result.skipped += 1;
+        continue;
+      }
+      if (invocationBlock) {
         const classification = classifyContinuationFailure(latestRun);
         if (
           classification.kind === "deliberate_wait_without_target" ||
