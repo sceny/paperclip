@@ -44,6 +44,7 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
 
 import {
   mapClaudeAcpAuthErrorCode,
+  promoteClaudeAcpTerminalAuthFailure,
   probeClaudeAcpSandboxLogin,
   testClaudeAcpEnvironment,
 } from "./acp.js";
@@ -96,6 +97,52 @@ afterEach(() => {
   vi.clearAllMocks();
   probeResult.value = { exitCode: 1, stdout: "", stderr: "", timedOut: false };
   probeResult.throwError = null;
+});
+
+describe("promoteClaudeAcpTerminalAuthFailure", () => {
+  const failedTurn = (errorMessage: string, stopReason = errorMessage): AdapterExecutionResult => ({
+    exitCode: 1,
+    signal: null,
+    timedOut: false,
+    errorMessage,
+    errorCode: "acpx_turn_failed",
+    resultJson: { status: "failed", stopReason },
+  });
+
+  it("maps the real bridge auth failure with no terminal diagnostic to claude_auth_required", () => {
+    const mapped = mapClaudeAcpAuthErrorCode(
+      promoteClaudeAcpTerminalAuthFailure(failedTurn("Authentication required")),
+    );
+
+    expect(mapped.errorCode).toBe("claude_auth_required");
+    expect(mapped.errorMeta?.category).toBe("auth");
+  });
+
+  it("matches case-insensitively and ignores surrounding space and a final period", () => {
+    expect(promoteClaudeAcpTerminalAuthFailure(failedTurn(" authentication REQUIRED. ")).errorCode).toBe(
+      "acpx_auth_required",
+    );
+  });
+
+  it.each([
+    "Internal error",
+    "Reauthentication required by the proxy before the stream resumed",
+    "OAuth stream error: Authentication required while reading the file",
+    "stream disconnected before completion",
+  ])("leaves a failed turn alone when the message is not exactly the auth text: %s", (message) => {
+    const result = failedTurn(message);
+    expect(promoteClaudeAcpTerminalAuthFailure(result)).toBe(result);
+  });
+
+  it("leaves the result alone when the stop reason is different text", () => {
+    const result = failedTurn("Authentication required", "Internal error");
+    expect(promoteClaudeAcpTerminalAuthFailure(result)).toBe(result);
+  });
+
+  it("leaves other error codes alone", () => {
+    const result = { ...failedTurn("Authentication required"), errorCode: "acpx_timeout" };
+    expect(promoteClaudeAcpTerminalAuthFailure(result)).toBe(result);
+  });
 });
 
 describe("mapClaudeAcpAuthErrorCode", () => {
