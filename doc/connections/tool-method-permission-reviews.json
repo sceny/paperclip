@@ -2879,6 +2879,24 @@
       "liveProof": "not-run",
       "evidenceLimit": "Public provider documentation and OAuth metadata only. Account-bound connect, discovery, read/write execution, run-scoped gateway, refresh/reconnect, removal, and secret handling remain to be qualified for this method.",
       "keyPermissions": "Create a Braintrust API key in Settings → API keys for the account and organization whose data agents should access. The key must authorize the reads and writes you intend to allow; Paperclip cannot increase or narrow its provider permissions. Evaluations and Topics processing can incur costs. Dataset edits can permanently delete rows; automation activation can enable retention or delivery."
+    },
+    {
+      "app": "unikraft",
+      "method": "api-token",
+      "auth": "api_key",
+      "policy": "provider-key",
+      "requestedScopes": [],
+      "capability": "write",
+      "supportedActions": "All published Unikraft Cloud platform API operations (instances, checkpoints, templates, service groups, autoscale, volumes, images, certificates, and quotas) and sandbox plugin operations (commands and files) in every published metro. The audit event stream is not exposed.",
+      "evidence": [
+        "https://unikraft.com/docs/sdks/overview#authentication",
+        "https://unikraft.com/docs/platform/metros",
+        "https://raw.githubusercontent.com/unikraft-cloud/openapi/5dd107ea1cd8716b83cb86a83ed2a6ee46f99b5b/platform.json",
+        "https://raw.githubusercontent.com/unikraft-cloud/openapi/5dd107ea1cd8716b83cb86a83ed2a6ee46f99b5b/plugins/sandbox.json"
+      ],
+      "reviewedAt": "2026-10-15",
+      "liveProof": "not-run",
+      "keyPermissions": "Create an API token in the Unikraft Cloud console. A token acts for its whole organization in every metro, including running sandbox commands and deleting resources. Unikraft does not offer narrower token permissions, so choose trusted agents and use action permissions to limit what they can do."
     }
   ]
 }

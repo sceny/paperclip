@@ -702,6 +702,12 @@
       "catalogVisible": true,
       "localAsset": "/brands/apps/paperclip-notebook.svg",
       "darkAsset": "/brands/apps/paperclip-notebook-dark.svg"
+    },
+    {
+      "slug": "unikraft",
+      "provider": "Unikraft",
+      "catalogVisible": true,
+      "localAsset": "/brands/apps/unikraft.svg"
     }
   ]
 }

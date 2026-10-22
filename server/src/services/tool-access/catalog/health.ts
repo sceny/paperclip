@@ -3,7 +3,7 @@ import { connectionSetupUrl, connectionReconnectUrl } from "../identifiers.js";
 import { createGitHubGrantContinuity } from "../github-grant-continuity.js";
 import { createToolRuntimeSlots } from "../runtime/slots.js";
 import type { ActorInfo } from "../types.js";
-import { isDaytonaConnection } from "../../daytona.js";
+import { nativeProviderCatalogFor } from "../../native-provider-catalogs.js";
 import { retainMcpConnectionFailure } from "../../mcp-connection-failure.js";
 import { isBrowserUseConnection } from "../../browser-use-client.js";
 import { and, asc, eq, isNull, lte, ne, or, sql } from "drizzle-orm";
@@ -121,7 +121,7 @@ export function createConnectionHealth(db: Db, { now, audit, getConnectionRow, d
           });
         for (const grant of grantsToCheck)
           await refreshManagedGitHubGrantAccess(connection, grant, actor);
-      } else if (isBrowserUseConnection(connection) || isDaytonaConnection(connection)) {
+      } else if (isBrowserUseConnection(connection) || nativeProviderCatalogFor(connection)) {
         await discoverTools(connection, undefined, actor);
       } else if (isAgentMailConnection(connection)) {
         await validateAgentMailConnection(connection);
@@ -157,8 +157,8 @@ export function createConnectionHealth(db: Db, { now, audit, getConnectionRow, d
           : config.sourceTemplateKey === "github" &&
           oauth.connectorProfile === "github.code"
           ? "GitHub account, installation, and repository access are available."
-          : isDaytonaConnection(connection)
-            ? "Daytona API access is connected."
+          : nativeProviderCatalogFor(connection)
+            ? `${nativeProviderCatalogFor(connection)!.name} API access is connected.`
           : isBrowserUseConnection(connection)
             ? "Browser Use API key is connected."
           : isAgentMailConnection(connection)

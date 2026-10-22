@@ -4,7 +4,7 @@ import { createToolRuntimeSlots } from "../runtime/slots.js";
 import type { ActorInfo, ToolAccessMutationDb } from "../types.js";
 import { connectionMethodForConnection } from "../connection-methods.js";
 import { stableHash, descriptorHash } from "../../tool-catalog-hash.js";
-import { isDaytonaConnection } from "../../daytona.js";
+import { nativeProviderCatalogFor } from "../../native-provider-catalogs.js";
 import { googleWorkspaceToolTarget, googleWorkspaceGrantedScopes, isGoogleWorkspaceToolGranted } from "@paperclipai/shared";
 import { retainMcpConnectionFailure } from "../../mcp-connection-failure.js";
 import { isRemoteMcpConnectorMethod } from "@paperclipai/shared";
@@ -115,9 +115,9 @@ export function createToolCatalogPublication(db: Db, { now, audit, getConnection
     const existingByName = new Map(
       existingRows.map((entry) => [entry.toolName, entry]),
     );
-    const nativeDaytona = isDaytonaConnection(connection);
+    const nativeProvider = Boolean(nativeProviderCatalogFor(connection));
     if (connection.config.sourceTemplateKey === "google-workspace"
-      || nativeDaytona || isRemoteMcpConnectorMethod(connection.config.sourceTemplateKey, connection.config.connectionMethodKey)) {
+      || nativeProvider || isRemoteMcpConnectorMethod(connection.config.sourceTemplateKey, connection.config.connectionMethodKey)) {
       const discoveredNames = new Set(descriptors.map((descriptor) => descriptor.name));
       // The catalog is shared, but discovery uses only the caller's grant. A
       // narrower personal consent must not remove actions another active grant
@@ -135,13 +135,13 @@ export function createToolCatalogPublication(db: Db, { now, audit, getConnection
       }
       // Preserve only consent-filtered actions, not failed-service catalogs or
       // tools a successful, sufficiently authorized discovery actually removed.
-      const removedStatus = nativeDaytona ? "removed" : "disabled";
+      const removedStatus = nativeProvider ? "removed" : "disabled";
       const removedIds = existingRows.filter((entry) => !discoveredNames.has(entry.toolName) && entry.status !== removedStatus
         && !(otherWorkspaceGrants.some((scopes) => isGoogleWorkspaceToolGranted(entry.toolName, scopes))
           && !isGoogleWorkspaceToolGranted(entry.toolName, selectedWorkspaceScopes)
           && !unavailableServices.includes(googleWorkspaceToolTarget(entry.toolName)?.service ?? ""))).map((entry) => entry.id);
       if (removedIds.length) await publish(tx => tx.update(toolCatalogEntries)
-        .set({ status: removedStatus, quarantineReason: nativeDaytona ? "provider_tool_removed" : "mcp_tool_removed", updatedAt: refreshedAt })
+        .set({ status: removedStatus, quarantineReason: nativeProvider ? "provider_tool_removed" : "mcp_tool_removed", updatedAt: refreshedAt })
         .where(and(eq(toolCatalogEntries.companyId, connection.companyId), eq(toolCatalogEntries.connectionId, connection.id), inArray(toolCatalogEntries.id, removedIds))));
     }
     // Retired native actions are absent from discovery, but old catalog rows
@@ -200,7 +200,7 @@ export function createToolCatalogPublication(db: Db, { now, audit, getConnection
         quarantineOnRefresh &&
         (!existing || changed) &&
         existing?.status !== "disabled" &&
-        (!safeDefault || riskLevel !== "read" || nativeDaytona);
+        (!safeDefault || riskLevel !== "read" || nativeProvider);
       const providerPermanentlyBlocked = Boolean(
         googleProfile &&
         !isGoogleWorkspaceToolAllowed(googleProfile, descriptor),

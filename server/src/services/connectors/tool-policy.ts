@@ -1,5 +1,5 @@
 import type { ToolRiskLevel } from "@paperclipai/shared";
-import { daytonaRisk, isDaytonaConnection } from "../daytona.js";
+import { NATIVE_PROVIDER_CATALOGS } from "../native-provider-catalogs.js";
 import { classifyRailwayToolRisk, isRailwayEndpoint } from "../railway.js";
 import { braintrustRisk } from "./braintrust/risk.js";
 import { enterpretRisk } from "./enterpret/risk.js";
@@ -34,12 +34,13 @@ const reviewedPolicies: ReviewedToolPolicy[] = [
     // review and drift handling, without enabling the native API bridge.
     matchesEndpoint: connection => isRailwayEndpoint(connection.config.url),
   },
-  {
-    sourceTemplateKey: "daytona",
+  // Native REST providers (Daytona, Unikraft) classify from their generated contract.
+  ...NATIVE_PROVIDER_CATALOGS.map((provider): ReviewedToolPolicy => ({
+    sourceTemplateKey: provider.slug,
     quarantineNewEntries: true,
-    classifyRisk: tool => daytonaRisk(tool.name),
-    matchesConnection: isDaytonaConnection,
-  },
+    classifyRisk: tool => provider.risk(tool.name),
+    matchesConnection: provider.isConnection,
+  })),
   { sourceTemplateKey: "enterpret", quarantineNewEntries: true, classifyRisk: enterpretRisk },
   { sourceTemplateKey: "braintrust", quarantineNewEntries: true, classifyRisk: braintrustRisk },
 ];

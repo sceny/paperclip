@@ -72,7 +72,7 @@ export { loadGitHubGrantMetadata, loadGitHubTokenRepositories } from "./tool-acc
 
 import { stableHash } from "./tool-catalog-hash.js";
 
-import { isDaytonaConnection } from "./daytona.js";
+import { NATIVE_PROVIDER_SLUGS, nativeProviderCatalogFor } from "./native-provider-catalogs.js";
 import { connectorToolPolicy } from "./connectors/tool-policy.js";
 
 import { notifyChatEndpointWork } from "./chat-work-notifications.js";
@@ -2412,7 +2412,7 @@ export function toolAccessService(
                 applicationKey: `app-gallery:${galleryEntry?.slug ?? "link"}:${randomUUID()}`,
                 name: applicationName,
                 description: safeApplicationDescription,
-                type: transport === "rest_api" && ["browser-use-cloud", "daytona"].includes(galleryEntry?.slug ?? "") ? "rest_api" : transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
+                type: transport === "rest_api" && ["browser-use-cloud", ...NATIVE_PROVIDER_SLUGS].includes(galleryEntry?.slug ?? "") ? "rest_api" : transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
                 status: "draft",
                 metadata: galleryEntry
                   ? {
@@ -4488,7 +4488,7 @@ export function toolAccessService(
             companyId,
             applicationKey: normalizeKey(input.applicationName ?? input.name),
             name: input.applicationName ?? input.name,
-            type: isBrowserUseConnection({ transport, config }) || isDaytonaConnection({ transport, config }) ? "rest_api" : transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
+            type: isBrowserUseConnection({ transport, config }) || nativeProviderCatalogFor({ transport, config }) ? "rest_api" : transport === "mcp_remote" ? "mcp_http" : "mcp_stdio",
             status: "active",
             metadata: {},
           })

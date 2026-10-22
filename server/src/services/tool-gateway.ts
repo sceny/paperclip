@@ -5,7 +5,7 @@ import type { BudgetServiceHooks } from "./budgets.js";
 import type { PromptInjectionDetectorMetadata } from "@paperclipai/shared";
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { measureToolDiscovery, measureRunPhase } from "./execution-preparation-timing.js";
-import { executeDaytonaTool, isDaytonaConnection, isCurrentDaytonaCatalogEntry } from "./daytona.js";
+import { nativeProviderCatalogFor } from "./native-provider-catalogs.js";
 import { composeConnectionInstructions } from "./connection-instructions.js";
 import { googleWorkspaceToolTarget, googleWorkspaceGrantedScopes, isGoogleWorkspaceToolGranted } from "@paperclipai/shared";
 import { isInsufficientConnectionScope, INSUFFICIENT_CONNECTION_SCOPE_MESSAGE } from "./connection-permission-errors.js";
@@ -1445,9 +1445,9 @@ export function createToolGatewayService(
       ({ catalogEntry, connection, application }) =>
         (!featureSettings || isConnectorFeatureEnabled(getAppDefinitionForApplicationKey(application.applicationKey), featureSettings)) &&
         !isRetiredComposioConnection(connection) &&
-        !(isDaytonaConnection(connection) && !isCurrentDaytonaCatalogEntry(catalogEntry)) &&
+        !(nativeProviderCatalogFor(connection) && !nativeProviderCatalogFor(connection)!.isCurrentEntry(catalogEntry)) &&
         !(isRailwayEndpoint(connection.config.url) && (isRailwayToolBlocked(catalogEntry.toolName) || (normalizeRailwayToolName(catalogEntry.toolName).startsWith(RAILWAY_TOOL_PREFIX) && connection.config.railwayApiStatus !== "available"))) &&
-        (((isBrowserUseConnection(connection) || isDaytonaConnection(connection)) && application.type === "rest_api") ||
+        (((isBrowserUseConnection(connection) || nativeProviderCatalogFor(connection)) && application.type === "rest_api") ||
         (connection.transport === "mcp_remote" &&
           application.type === "mcp_http") ||
         (connection.transport === "local_stdio" &&
@@ -1473,7 +1473,7 @@ export function createToolGatewayService(
       ({ catalogEntry, connection, application }, index) => {
         if (
           connection.transport !== "mcp_remote" &&
-          connection.transport !== "local_stdio" && !isBrowserUseConnection(connection) && !isDaytonaConnection(connection)
+          connection.transport !== "local_stdio" && !isBrowserUseConnection(connection) && !nativeProviderCatalogFor(connection)
         ) {
           throw new Error(
             `Non-MCP connection ${connection.id} cannot be exposed through the MCP gateway`,
@@ -4903,7 +4903,7 @@ export function createToolGatewayService(
         ),
       )
       .limit(1);
-    if (!connection || (connection.transport !== "mcp_remote" && !isBrowserUseConnection(connection) && !isDaytonaConnection(connection))) {
+    if (!connection || (connection.transport !== "mcp_remote" && !isBrowserUseConnection(connection) && !nativeProviderCatalogFor(connection))) {
       throw new ToolGatewayHttpError(
         404,
         `Tool "${tool.name}" not found`,
@@ -4926,8 +4926,9 @@ export function createToolGatewayService(
     if (isRailwayEndpoint(connection.config.url) && isRailwayToolBlocked(entry.toolName)) {
       throw new ToolGatewayHttpError(403, "This Railway action cannot bind its effects to an approved target. Use redeploy, restart, or rollback for an existing deployment.", "railway_action_blocked");
     }
-    if (isDaytonaConnection(connection) && !isCurrentDaytonaCatalogEntry(entry)) {
-      throw new ToolGatewayHttpError(409, "Daytona's action catalog changed. Review the updated actions in Permissions.", "daytona_catalog_changed");
+    const nativeProvider = nativeProviderCatalogFor(connection);
+    if (nativeProvider && !nativeProvider.isCurrentEntry(entry)) {
+      throw new ToolGatewayHttpError(409, `${nativeProvider.name}'s action catalog changed. Review the updated actions in Permissions.`, `${nativeProvider.slug}_catalog_changed`);
     }
     return { entry, connection };
   }
@@ -6069,11 +6070,12 @@ export function createToolGatewayService(
       ms = railwayCommandBudgetMs(parameters);
     }
     const grant = await resolveConnectionGrant(session, connection);
-    if (isDaytonaConnection(connection)) {
+    const nativeProvider = nativeProviderCatalogFor(connection);
+    if (nativeProvider) {
       const budgetMs = Math.min(ms, 30_000);
       const deadlineAt = Date.now() + budgetMs;
       const signal = AbortSignal.timeout(budgetMs);
-      const data = await executeDaytonaTool({ binding: session, connection,
+      const data = await nativeProvider.execute({ binding: session, connection,
         headers: await resolveCredentialHeaders(session, connection, grant),
         request: (url, init) => options.remoteHttpRequest ? options.remoteHttpRequest(url, init)
           : guardedRemoteHttpFetch(url, init, remoteHttpFetchOptions()),

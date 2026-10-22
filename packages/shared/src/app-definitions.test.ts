@@ -886,7 +886,7 @@ describe("AppDefinition catalog", () => {
       "ticktick",
       "xero",
     ]);
-    expect(APP_STORE_DEFINITIONS).toHaveLength(85);
+    expect(APP_STORE_DEFINITIONS).toHaveLength(86);
     const connectableSlugs = new Set(
       CONNECTABLE_APP_DEFINITIONS.map((entry) => entry.slug),
     );
@@ -1284,6 +1284,38 @@ describe("AppDefinition catalog", () => {
       expect(method.tenantFields ?? []).toEqual([]);
       expect(method.warnings).toHaveLength(2);
     }
+  });
+  it("connects Unikraft Cloud's published HTTP APIs with an organization API token", () => {
+    const unikraft = APP_DEFINITIONS.find((app) => app.slug === "unikraft")!;
+    expect(unikraft).toMatchObject({
+      name: "Unikraft",
+      categories: ["developer"],
+      urlPatterns: ["https://console.unikraft.com/*", "https://*.unikraft.cloud/*"],
+      docsUrl: "https://unikraft.com/docs/api/platform/v1",
+      branding: { logoUrl: "/brands/apps/unikraft.svg" },
+    });
+    expect(APP_STORE_DEFINITIONS.some((app) => app.slug === "unikraft")).toBe(true);
+    expect(CONNECTABLE_APP_DEFINITIONS.some((app) => app.slug === "unikraft")).toBe(true);
+    expect(unikraft.methods.map((method) => method.key)).toEqual(["api-token"]);
+    const [method] = unikraft.methods;
+    expect(method).toMatchObject({
+      transport: "rest_api",
+      auth: "api_key",
+      ownershipModes: ["customer"],
+      riskTier: "S4",
+      defaults: { serverUrl: "https://controlplane.unikraft.cloud/v1" },
+      keyPlacement: { location: "header", name: "Authorization", prefix: "Bearer " },
+    });
+    expect(method!.credentialFields).toEqual([
+      expect.objectContaining({ key: "authorization", type: "password", secret: true, required: true }),
+    ]);
+    // The key form renders credential helper text, not method warnings.
+    expect(method!.credentialFields?.[0]?.helperMd).toContain("running sandbox commands and deleting resources");
+    // The default metro is optional: setup asks only for the token.
+    expect(method!.tenantFields).toEqual([
+      expect.objectContaining({ key: "metro", type: "select", advanced: true, defaultValue: "fra" }),
+    ]);
+    expect(method!.tenantFields?.[0]?.options?.map((option) => option.value)).toEqual(["dal", "fra", "sfo", "sin", "was"]);
   });
   it("connects Gauge's hosted server with browser sign-in or an organization API key", () => {
     const gauge = APP_DEFINITIONS.find((app) => app.slug === "gauge")!;
