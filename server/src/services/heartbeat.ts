@@ -810,6 +810,7 @@ export function heartbeatService(
     getAgent,
     resolveSessionBeforeForWakeup,
     getRun,
+    getRunStatus,
     ensureRuntimeState,
     getTaskSession,
     getLatestAgentConfigRevision,
@@ -819,6 +820,7 @@ export function heartbeatService(
     clearTaskSessions,
     resolveExplicitResumeSessionOverride,
     hasResolvablePriorSessionWorkspaceForWake,
+    getRunReadAccess,
     getRunLogAccess,
     listRuns,
     getRuntimeStateWithSessions,
@@ -1305,7 +1307,7 @@ export function heartbeatService(
     issuesSvc,
     recovery,
     companySkills,
-    getRun,
+    getRunStatus,
     emitTerminalAgentTaskRun,
     getIssueExecutionContext,
     budgets,
@@ -3976,6 +3978,7 @@ export function heartbeatService(
     recordRuntimeProgress: recordCurrentHeartbeatRunRuntimeProgress,
     sweepExpiredRuntimeStatuses: sweepExpiredHeartbeatRunRuntimeStatuses,
 
+    getRunReadAccess,
     getRunLogAccess,
 
     getRuntimeState: getRuntimeStateWithSessions,

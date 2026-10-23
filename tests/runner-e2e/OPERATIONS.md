@@ -156,12 +156,115 @@ keys. The server environment strips the gateway token and upstream credentials.
 
 Every upstream attempt reserves its maximum estimated charge in an fsynced
 journal before dispatch. Requests, retries, and cancelled calls retain distinct
-IDs. Unknown usage keeps the reservation held. One shared writer serializes
+IDs. Braintrust gateway requests propagate the reserved request ID, campaign,
+execution, attempt and phase as allowlisted `paperclip_eval_*` metadata in the
+SDK-compatible parent context. The exact context is retained in the private
+receipt before dispatch, so a request canceled before response headers can
+still be looked up by `metadata.paperclip_eval_request_id` in project logs.
+This context contains no provider credential, prompt or response, and does not
+create an extra model call or a synthetic parent span. Direct provider routes
+receive no Braintrust context. Older project-only receipts cannot acquire this
+identity retroactively; time or session matches remain candidate evidence.
+A matching logged span does not itself prove complete usage or final billing.
+Unknown usage keeps the reservation held. One shared writer serializes
 admission across cells, so concurrent requests cannot each spend the same remaining
 allowance. Campaign deadline, request count, and in-flight count are also enforced.
 Private request receipts retain transport IDs, response IDs, usage and cache TTLs,
 route/cache/failover evidence, and final accounting status without request bodies
 or credentials. Raw provider responses remain only in the normal private evidence.
+
+### Disconnects and gateway shutdown
+
+When an HTTP client disconnects, the gateway drains an already-dispatched
+provider response for at most five more seconds to retain its final usage.
+The original provider timeout and campaign deadline still apply; the grace
+period never extends either. No additional provider request or retry is made.
+An upload or identity lookup interrupted before dispatch is not sent upstream.
+Gateway shutdown immediately stops admission, disconnects clients, and waits
+for that same bounded drain. Repeated shutdown calls share the same completion.
+
+A private receipt records `clientDisconnected: true` and keeps the request
+outcome `cancelled`, even if a complete provider response arrives during drain.
+A disconnect during receipt or ledger persistence also saves the corrected
+cancellation outcome before completion.
+Final usage may then replace its existing hold with an estimate under the normal
+ledger rules. It does not change the product verdict or establish invoice
+settlement. If no complete usage arrives, the unknown hold remains. The provider
+may continue billing after an abort, so a grace timeout is not evidence of zero
+cost. Drain time belongs to launcher cleanup and can add up to five seconds per
+attempt; no historical receipt or hold is rewritten by this change.
+
+## Provisional completion and later reconciliation
+
+Recurring campaigns may finish with provisional accounting when every pending
+charge has an explicit reviewed bound, all requests have stopped, no receipts
+conflict, and known costs plus retained holds fit the campaign cap. Product,
+cleanup, feedback, trace and ingestion requirements still apply. Reports and
+Braintrust experiment metadata label accounting as `provisional`,
+`receipts_complete`, `blocked`, or `unavailable`. Receipt completeness is separate
+from invoice reconciliation. The original failed campaign remains failed; a
+later report or policy does not change its original result.
+
+The optional `provisionalBound` on a manifest model or operating component is:
+
+```json
+{
+  "version": 1,
+  "scope": "full_lifecycle",
+  "evidenceSha256": "SHA256_OF_RETAINED_REVIEWED_AUDIT",
+  "configurationSha256": "SHA256_OF_EXACT_REVIEWED_CONFIGURATION"
+}
+```
+
+These placeholders are invalid until replaced with actual lowercase SHA-256
+values. Use `costBoundConfigurationSha256` from `cost-bound-evidence.ts` for
+stable key-sorted JSON hashing. The model configuration contains `provider`,
+`mode` (the manifest route), `price`, `maximumInputTokens`,
+`maximumOutputTokens`, and `reservation` (the nine-decimal value from
+`evalRequestReservation`). An operating configuration contains allowance
+`reference`, `runner`, `verifiedAt`, `expiresAt`, and a `component` object with
+its `component`, `maxUsd`, and `reference`. Changing any of those values
+invalidates the approval hash. Evidence metadata itself is excluded from this
+configuration hash.
+
+An operator must retain and review the audit before configuring its hash.
+Hashes bind evidence and configuration; they do not prove the audit is true.
+A model audit must establish the provider's full context ceiling, all billable
+token prices and tiers, standard inference, and the route's billing behavior.
+The gateway enforces output limits and supported request shapes. An operating
+audit must cover setup, failed attempts, build time, publication, transfer,
+observability and the full retained-storage lifecycle, including uncertainty in
+resource deletion and invoice arrival. It must name the enforceable resource
+limits and rates that keep the whole component below `maxUsd`. A current-day
+usage estimate or an arbitrary contingency amount is insufficient. A zero bound
+also needs evidence. Keep raw audits private; public reports expose only counts
+and the existing journal checkpoint.
+
+The ledger retains bound evidence before model dispatch. Unexpected or missing
+Braintrust route confirmation, failover, a returned model mismatch, or observed
+usage above a declared limit disqualifies that request's bound. Provider usage
+normalization retains a separate input/output lower bound even when missing or
+contradictory cache counters prevent pricing. Malformed reported counts also
+disqualify a bound. In-flight
+requests, conflicts, pending charges above their bound, and campaign overruns
+still block completion. Gateway cancellation before route confirmation remains
+unqualified even if it retained an admission reservation. Later receipts remain
+the way to resolve it.
+
+Provisional completion never releases a reservation or manufactures a zero
+charge. A missing receipt stays unknown and holds its full bound, less any
+known partial amount, until a valid final receipt supersedes it. The existing
+receipt importer still requires complete billing/resource windows before it
+marks a receipt final. Later bills can reveal an overrun; this local journal
+cannot stop external billing. Reconcile the same retained journal after its
+billing windows close, regenerate its report, and inspect any overruns before
+admitting more work. Existing subscription costs remain separate from the
+incremental daily/weekly budgets.
+
+Old journals and reports remain readable. They gain no bound evidence by
+upgrade or by this policy; unresolved legacy charges still block. Existing
+configured allowances and price cards are not automatically qualified by the
+new optional field. Recurrence remains subject to its existing enable gates.
 
 ## Manifest
 
@@ -410,8 +513,9 @@ lifecycles. They do not occupy model concurrency, but they count toward the
 finite charge-record limit. Resuming cannot change or drop them. Until matched
 cost observations arrive, the report shows them as unknown and keeps their
 allowance held; even a zero allowance does not claim a known zero charge.
-The existing finalizer reports incomplete accounting while these receipts are
-missing. Do not dismiss that finding to enable recurrence.
+The finalizer permits provisional completion only when each pending charge has
+explicit reviewed bound evidence as described below. Missing or unqualified
+bounds remain incomplete accounting; a reservation alone does not qualify.
 
 Reconcile a component through its existing request ID with provenance-bound
 `infrastructure` or `invoice` observations. Partial observations keep the
@@ -435,7 +539,9 @@ The collector uses the existing `gh` authentication and only reads
 revision and repository, reads every returned job/artifact page up to 1,000
 records per inventory, and rejects changed or incomplete inventories. It retains
 job identities, summed job seconds, run-start delay, artifact sizes and expiration
-dates. It omits arbitrary job names, artifact names and upstream responses.
+dates. Skipped jobs with a null or zero runner ID count as not started and use
+zero VM time. Started jobs still require a numeric runner identity. It omits
+arbitrary job names, artifact names and upstream responses.
 Existing output files cannot be replaced. This is a current inventory, not an
 invoice: deleted artifacts are absent, compressed bytes are not billed
 byte-hours, job duration is not VM lifetime, and present repository visibility
@@ -490,6 +596,62 @@ does not open a new spending window, change limits, dispatch tests or rewrite
 previous records. Regenerate the campaign report from the same ledger afterward;
 an old report snapshot is not rewritten by an offline receipt import.
 
+### Compare retained Anthropic billing exports
+
+Use the read-only comparison command to repeat a provider-window comparison
+without dispatching a test or changing the cost journal:
+
+```sh
+node --import ./server/node_modules/tsx/dist/esm/index.mjs tests/runner-e2e/anthropic-billing-comparison.ts /private/path/comparison-config.json /private/path/new-comparison.json
+```
+
+The private configuration has this shape. `apiKeyLabel` is the label in the CSV,
+not an API credential. Copy `sourceDataAsOf` from the provider's reporting view.
+Use absolute input paths and retain the original exported CSV bytes.
+
+```json
+{
+  "version": 1,
+  "manifest": "/private/path/manifest.json",
+  "ledger": "/private/path/ledger.jsonl",
+  "usageExport": "/private/path/claude-usage.csv",
+  "costExport": "/private/path/claude-cost.csv",
+  "workspace": "Dedicated eval workspace",
+  "apiKeyLabel": "dedicated-eval-key",
+  "date": "2026-10-23",
+  "sourceDataAsOf": "2026-10-23T18:07:00Z"
+}
+```
+
+The first supported export shape is one Claude Sonnet 5 campaign, one workspace
+and key label, standard global inference, and context buckets at or below 200k.
+Usage rows are hourly; cost rows are daily. Both must cover the selected UTC
+date, and every selected journal request must have finished inside that day and
+before the source timestamp. The command rejects mixed scopes, duplicate rows,
+unsupported pricing dimensions, conflicting observations and damaged journals.
+A provider export may still be delayed after these checks pass. Matching scope
+labels do not establish exclusive use of a key or completeness of its export.
+
+The output records source hashes, the journal checkpoint, the reporting window,
+its provisional status, provider tokens priced with the retained manifest,
+rounded provider charges, and the retained request subtotal. Complete and
+partial token receipts remain distinct from dollar-cost completeness. Each known
+token category counts once per request even when the cost or other token fields
+are unknown. Missing-field counts remain explicit. Final token evidence takes
+precedence over partial evidence; equally strong contradictory values fail. Canceled requests without a
+returned model identity remain explicitly unconfirmed. The token and estimated
+USD differences can be positive or negative; neither is assigned to a request.
+Non-model charges are shown separately. The report does not add the provider
+total to the ledger subtotal or interpret rounded zero charges as free usage.
+
+The command creates a new mode-0600 output and refuses to replace an existing
+file. It makes no network or provider call, does not import receipts, and leaves
+all reservations and historical evidence intact. A comparison is supporting
+evidence for reconciliation, not a settled invoice or an admission override.
+Keep the config, raw exports and comparison private; they are not public report
+projections. Other providers and export shapes still require their own reviewed
+comparison path.
+
 The checked pricecard expires on November 19, 2026. Admission stops when the
 pricecard expires, the catalog model changes, the project is missing, or the
 preflight already exists. Review current official prices and context limits
@@ -519,8 +681,8 @@ explicit, unbounded qualification path and does not inherit these allowances.
 
 After execution, deterministic review dismisses only exact synthetic feedback
 bodies corroborated by all feedback-persistence graders. Novel feedback remains
-`needs_investigation`; no extra model call is made. Missing accounting, unresolved
-receipts, feedback collection/submission failures, novel feedback, export failure
+`needs_investigation`; no extra model call is made. Missing accounting, unbounded
+pending charges, conflicts, spending overruns, feedback collection/submission failures, novel feedback, export failure
 and incomplete experiment import or indexing fail the job with bounded diagnostic codes.
 Successful unchanged runs produce artifacts without posting messages. GitHub's
 workflow failure notifications remain the operator's notification channel.

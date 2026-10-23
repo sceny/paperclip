@@ -1,13 +1,14 @@
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
-import { companies, projects, projectWorkspaces, issues, executionWorkspaces, agents, heartbeatRuns, nativeRunFinalizations, workspaceRuntimeServices, executionWorkspaceRestorePoints, createDb } from "@paperclipai/db";
+import { companies, projects, projectWorkspaces, issues, executionWorkspaces, agents, heartbeatRuns, issueRecoveryActions, nativeRunFinalizations, workspaceRuntimeServices, executionWorkspaceRestorePoints, createDb } from "@paperclipai/db";
 import { markGitRestorePointExpired } from "../services/git-restore-point-storage.js";
 import { GIT_RESTORE_POINT_EXPIRED_WARNING } from "../services/execution-workspaces.js";
 import { getStorageService } from "../storage/index.js";
@@ -18,7 +19,7 @@ import { materializeIsolatedRemoteWorkspaceSource } from "../services/isolated-r
 import { realizeExecutionWorkspace, ensurePersistedExecutionWorkspaceAvailable } from "../services/workspace-runtime.js";
 import { executionWorkspaceService } from "../services/execution-workspaces.js";
 import { prepareProjectRepositoryWorkspaces, mergeExecutionWorkspaceMetadataForPersistence } from "../services/heartbeat/workspaces.js";
-import { expireReconstructableGitWorkspace } from "../services/git-workspace-expiration.js";
+import { describeGitExpirationFailure, expireReconstructableGitWorkspace } from "../services/git-workspace-expiration.js";
 import * as activityLog from "../services/activity-log.js";
 import { readGitCacheRestoration } from "../services/git-workspace-restoration.js";
 import { gitCacheExpirationLockLocations, readGitCacheExpiration } from "../services/git-workspace-restoration.js";
@@ -318,6 +319,92 @@ describeEmbeddedPostgres("reconstructable Git expiration", () => {
       expect(await f.expire({ expireBase: false, restorePoint: restorePoint() }))
         .toMatchObject({ expired: false, skipReason: "unsupported_commit_message" });
       expect(await exists(f.cwd)).toBe(true);
+      vi.unstubAllEnvs();
+    });
+
+    async function staleRemoteTrackingRef(f: Awaited<ReturnType<typeof nestedFixture>>) {
+      git(f.nestedSource, "checkout", "-q", "-b", "squashed-away");
+      await fs.writeFile(path.join(f.nestedSource, "feature.txt"), "merged by squash, then deleted\n");
+      git(f.nestedSource, "add", "."); git(f.nestedSource, "commit", "-m", "Feature");
+      const feature = git(f.nestedSource, "rev-parse", "HEAD");
+      git(f.nestedSource, "push", "-q", f.nestedRemote, "squashed-away");
+      git(f.nestedSource, "checkout", "-q", "main");
+      git(f.nested.cwd, "fetch", "-q", "origin", "+refs/heads/squashed-away:refs/remotes/origin/squashed-away");
+      git(f.nestedRemote, "branch", "-D", "squashed-away");
+      git(f.nestedRemote, "reflog", "expire", "--expire=now", "--all");
+      git(f.nestedRemote, "gc", "-q", "--prune=now");
+      expect(() => git(f.nestedRemote, "cat-file", "-e", `${feature}^{commit}`)).toThrow();
+      return feature;
+    }
+
+    it("saves a clean nested checkout's stale remote-tracking commits in its restore point", async () => {
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
+      const f = await nestedFixture(false);
+      const feature = await staleRemoteTrackingRef(f);
+      expect(await f.expire({ expireBase: false })).toMatchObject({ expired: false, skipReason: "unpushed_managed_checkout" });
+      expect(await f.expire({ expireBase: false, restorePoint: restorePoint() })).toMatchObject({ expired: true, restorePoint: true, skipReason: null });
+      const recipe = (await f.row()).metadata?.gitCacheRestoration as Record<string, any>;
+      expect(recipe.contents.checkouts[0].restorePoint).toMatchObject({ head: f.nestedA, headOnRemote: true, worktree: null });
+      expect(await f.reopen()).toMatchObject({ ok: true, reopened: true });
+      expect(git(f.nested.cwd, "rev-parse", "HEAD")).toBe(f.nestedA);
+      expect(git(f.nested.cwd, "cat-file", "-t", feature)).toBe("commit");
+      vi.unstubAllEnvs();
+    });
+
+    it("rolls back when a nested checkout's remote-tracking refs change after capture", async () => {
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
+      const f = await nestedFixture(false);
+      await staleRemoteTrackingRef(f);
+      const result = await f.expire({ expireBase: false, restorePoint: restorePoint(), beforeDelete: async () => {
+        const later = execFileSync("git", ["commit-tree", git(f.nested.cwd, "rev-parse", "HEAD^{tree}"), "-p", "HEAD", "-m", "Fetched after capture"],
+          { cwd: f.nested.cwd, env: gitEnv, encoding: "utf8" }).trim();
+        git(f.nested.cwd, "update-ref", "refs/remotes/origin/fetched-later", later);
+      } });
+      expect(result).toMatchObject({ expired: false, skipReason: "restore_point_contents_changed" });
+      expect(await exists(f.cwd)).toBe(true);
+      vi.unstubAllEnvs();
+    });
+
+    it("rolls back when only a nested checkout's remote-tracking reflog changes after capture", async () => {
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
+      const f = await nestedFixture(false);
+      await staleRemoteTrackingRef(f);
+      const result = await f.expire({ expireBase: false, restorePoint: restorePoint(), beforeDelete: async () => {
+        const tip = git(f.nested.cwd, "rev-parse", "refs/remotes/origin/squashed-away");
+        git(f.nested.cwd, "update-ref", "-m", "moved", "--create-reflog", "refs/remotes/origin/squashed-away", f.nestedA);
+        git(f.nested.cwd, "update-ref", "-m", "moved back", "refs/remotes/origin/squashed-away", tip);
+      } });
+      expect(result).toMatchObject({ expired: false, skipReason: "restore_point_contents_changed" });
+      vi.unstubAllEnvs();
+    });
+
+    it("counts distinct reflog commits, not repeated entries, against the tip budget", async () => {
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
+      const f = await nestedFixture(false);
+      await unpushedNestedWork(f.nested.cwd);
+      const head = git(f.nested.cwd, "rev-parse", "HEAD");
+      const log = path.join(f.nested.cwd, ".git", "logs", "refs", "heads", "main");
+      const entry = `${head} ${head} Fixture <fixture@example.test> 1700000000 +0000\treset: moving to HEAD\n`;
+      await fs.appendFile(log, entry.repeat(6_000));
+      expect(await f.expire({ expireBase: false, restorePoint: restorePoint() })).toMatchObject({ expired: true, restorePoint: true, skipReason: null });
+      vi.unstubAllEnvs();
+    });
+
+    it("expires despite a stale pending restore point left by an earlier attempt", async () => {
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
+      const f = await nestedFixture(false);
+      await unpushedNestedWork(f.nested.cwd);
+      const generation = Number((await f.row()).metadata?.lifecycleGeneration ?? 0) + 1;
+      const base = { companyId: f.companyId, executionWorkspaceId: f.workspaceId, sourceIssueId: f.issueId, generation,
+        sha256: "0".repeat(64), byteSize: 1 };
+      const [stale] = await db.insert(executionWorkspaceRestorePoints).values([
+        { ...base, checkoutName: path.basename(f.nested.cwd), objectKey: `stale/${randomUUID()}.pcrp`, status: "pending" },
+        { ...base, checkoutName: "", objectKey: `stale/${randomUUID()}.pcrp`, status: "superseded" },
+      ]).returning();
+      expect(await f.expire({ expireBase: false, restorePoint: restorePoint() })).toMatchObject({ expired: true, restorePoint: true, skipReason: null });
+      const rows = await ledger(f.workspaceId);
+      expect(rows.find(row => row.id === stale!.id)).toMatchObject({ status: "superseded" });
+      expect(rows.filter(row => row.status === "active").map(row => row.checkoutName)).toEqual([path.basename(f.nested.cwd)]);
       vi.unstubAllEnvs();
     });
 
@@ -735,6 +822,47 @@ describeEmbeddedPostgres("reconstructable Git expiration", () => {
     expect(await exists(f.cwd)).toBe(true);
   });
 
+  it("describes an unexpected inspection failure without the command or credentials", async () => {
+    const f = await fixture();
+    await fs.writeFile(path.join(f.cwd, ".git"), `gitdir: ${path.join(f.cwd, "missing-admin")}\n`);
+    const result = await f.expire();
+    expect(result).toMatchObject({ expired: false, skipReason: "inspection_failed",
+      failure: { name: "Error", code: expect.any(String), at: expect.stringMatching(/^at /), stderr: expect.stringContaining("not a git repository") } });
+    expect(await exists(f.cwd)).toBe(true);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("describes an unexpected failure while inspecting the base", async () => {
+    const f = await fixture();
+    const locked = path.join(f.baseCwd, "locked-dir");
+    const result = await f.expire({ beforeDelete: async () => {
+      await fs.mkdir(locked);
+      await fs.writeFile(path.join(locked, "file"), "x");
+      await fs.chmod(locked, 0o000);
+    } });
+    await fs.chmod(locked, 0o755);
+    expect(result).toMatchObject({ expired: true, baseExpired: false, skipReason: "inspection_failed",
+      failure: { code: "EACCES", at: expect.stringMatching(/^at /) } });
+  });
+
+  it("redacts credentials from a described git failure", async () => {
+    const error = await promisify(execFile)("git", ["-c", "http.extraHeader=Authorization: Bearer sk-secret-header",
+      "ls-remote", "https://user:sk-secret-pass@127.0.0.1:9/repo.git"], { env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } })
+      .then(() => { throw new Error("expected git to fail"); }, (error: Error) => error);
+    const described = describeGitExpirationFailure(error);
+    expect(JSON.stringify(described)).not.toContain("sk-secret");
+    expect(JSON.stringify(described)).not.toContain("ls-remote");
+    expect(described).toMatchObject({ name: "Error", code: expect.any(String), stderr: expect.any(String) });
+  });
+
+  it("redacts credentials that git echoes on stderr", () => {
+    const error = Object.assign(new Error("Command failed: git fetch https://user:sk-secret-pass@example.test/repo.git"), {
+      code: 128, stderr: "fatal: unable to access 'https://user:sk-secret-pass@example.test/repo.git/'\nheader Authorization: Bearer sk-secret-header\n" });
+    const described = describeGitExpirationFailure(error);
+    expect(JSON.stringify(described)).not.toContain("sk-secret");
+    expect(described.stderr).toContain("https://<redacted>@example.test/repo.git");
+    expect(described.code).toBe("128");
+  });
+
   it("retries after interruption with the restoration recipe already committed", async () => {
     const f = await fixture();
     expect((await f.expire({ beforeDelete: async () => { throw new Error("interrupted_fixture"); } })).expired).toBe(false);
@@ -794,13 +922,24 @@ describeEmbeddedPostgres("reconstructable Git expiration", () => {
     await db.insert(heartbeatRuns).values({ id: runId, companyId: f.companyId, agentId, nativeIssueId: f.issueId, status: "scheduled_retry" });
     expect((await f.expire()).expired).toBe(false);
     await db.update(heartbeatRuns).set({ status: "failed", finishedAt: new Date() }).where(eq(heartbeatRuns.id, runId));
-    await db.insert(nativeRunFinalizations).values({ runId, companyId: f.companyId, issueId: f.issueId, phase: "terminal_failure", recoveryState: "blocked" });
+    await db.insert(nativeRunFinalizations).values({ runId, companyId: f.companyId, issueId: f.issueId, phase: "observed", recoveryState: "resuming_session" });
     expect((await f.expire()).expired).toBe(false);
+    await db.update(nativeRunFinalizations).set({ phase: "committed", leaseOwner: "native-finalizer:live" }).where(eq(nativeRunFinalizations.runId, runId)); expect((await f.expire()).expired).toBe(false);
     await db.delete(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, runId));
     await db.insert(workspaceRuntimeServices).values({ id: randomUUID(), companyId: f.companyId, executionWorkspaceId: f.workspaceId,
       scopeType: "execution_workspace", serviceName: "Preview", status: "running", lifecycle: "persistent", provider: "local" });
     expect((await f.expire()).expired).toBe(false);
     expect(await exists(f.cwd)).toBe(true);
+  });
+
+  it("expires a closed tree whose native recovery state was left behind", async () => {
+    const f = await fixture(), agentId = randomUUID(), runIds = [randomUUID(), randomUUID()];
+    await db.insert(agents).values({ id: agentId, companyId: f.companyId, name: "Fixture", role: "engineer", adapterType: "process" });
+    await db.insert(heartbeatRuns).values(runIds.map(id => ({ id, companyId: f.companyId, agentId, nativeIssueId: f.issueId, status: "succeeded", finishedAt: new Date(Date.now() - 48 * 3_600_000) })));
+    await db.insert(nativeRunFinalizations).values([["committed", "resuming_session"], ["terminal_failure", "blocked"]].map(([phase, recoveryState], i) => ({ runId: runIds[i]!, companyId: f.companyId, issueId: f.issueId, phase, recoveryState })));
+    await db.insert(issueRecoveryActions).values({ companyId: f.companyId, sourceIssueId: f.issueId, kind: "active_run_watchdog", ownerAgentId: agentId,
+      cause: "native_finalization_error", fingerprint: randomUUID(), nextAction: "Resume the native run.", wakePolicy: { kind: "resume_native_run", runId: runIds[0] } });
+    expect(await f.expire()).toMatchObject({ expired: true }); expect(await exists(f.cwd)).toBe(false);
   });
 
   it("skips deletion when authenticated upstream verification fails", async () => {

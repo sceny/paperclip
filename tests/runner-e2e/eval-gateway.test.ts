@@ -1,3 +1,4 @@
+import { costBoundConfigurationSha256 } from "./cost-bound-evidence.js";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -31,11 +32,53 @@ it("fsyncs reservation before dispatch, pins gateway routing, and replaces reser
   const result = await forwardEvalRequest({ ...f, transport });
   expect(reservedBeforeDispatch).toBe(true);
   expect(transport.mock.calls[0]![0]).toBe("https://gateway.braintrust.dev/responses");
-  expect(captured).toMatchObject({ redirect: "error", headers: { authorization: `Bearer ${route.apiKey}`, "x-bt-use-cache": "never", "cache-control": "no-cache, no-store", "x-bt-project-id": route.projectId, "x-bt-endpoint-name": route.endpointName, "x-bt-parent": `project_id:${route.projectId}` } });
+  expect(captured).toMatchObject({ redirect: "error", headers: { authorization: `Bearer ${route.apiKey}`, "x-bt-use-cache": "never", "cache-control": "no-cache, no-store", "x-bt-project-id": route.projectId, "x-bt-endpoint-name": route.endpointName, "x-bt-parent": result.braintrustParent } });
   expect(JSON.parse(captured!.body as string)).toMatchObject({ max_output_tokens: 100, service_tier: "default" });
   expect(result).toMatchObject({ outcome: "succeeded", costUsd: "0.000068000", final: true, usageComplete: true, gatewaySpanId: "gateway-span" });
   expect(f.ledger.snapshot()).toMatchObject({ knownUsd: "0.000068000", heldUsd: "0.000000000", inflight: 0 });
   expect(await readFile(f.file, "utf8")).not.toContain(route.apiKey);
+});
+it.each(["openai", "anthropic"] as const)("correlates %s gateway logs before response headers even when the client cancels", async provider => {
+  const f = await fixture();
+  const selectedRoute: EvalGatewayRoute = provider === "openai" ? route : { ...route, provider, endpointName: "ANTHROPIC_API_KEY",
+    price: { ...route.price, provider, cacheWrite5mUsdPerMillion: "2", cacheWrite1hUsdPerMillion: "4" } };
+  const parents: string[] = [];
+  const initialReceipts: EvalGatewayReceipt[] = [];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const receipt = await forwardEvalRequest({ ...f, route: selectedRoute, signal: controller.signal,
+      transport: async (_url, init) => {
+        parents.push(new Headers(init?.headers).get("x-bt-parent")!);
+        initialReceipts.push(structuredClone(f.receipts.at(-1)!));
+        controller.abort();
+        throw new DOMException("client disconnected", "AbortError");
+      },
+    });
+    expect(receipt).toMatchObject({ outcome: "cancelled", errorCode: "request_cancelled", costUsd: null, final: false });
+    expect(receipt.gatewaySpanId).toBeUndefined();
+  }
+  expect(parents[0]).not.toBe(parents[1]);
+  for (const [index, encoded] of parents.entries()) {
+    const bytes = Buffer.from(encoded, "base64");
+    expect([...bytes.subarray(0, 3)]).toEqual([4, 2, 0]);
+    expect(JSON.parse(bytes.subarray(3).toString())).toEqual({ object_id: route.projectId, propagated_event: { metadata: {
+      paperclip_eval_request_id: initialReceipts[index]!.requestId, paperclip_eval_campaign_id: "campaign",
+      paperclip_eval_execution_id: identity.executionId, paperclip_eval_attempt_id: identity.attemptId, paperclip_eval_phase: "agent",
+    } } });
+    expect(initialReceipts[index]).toMatchObject({ braintrustParent: encoded, final: false, costUsd: null });
+  }
+  expect(f.ledger.snapshot()).toMatchObject({ inflight: 0, unknownRequests: 2, knownUsd: "0.000000000" });
+  expect(f.ledger.snapshot().heldUsd).not.toBe("0.000000000");
+  expect(JSON.stringify(initialReceipts)).not.toContain(route.apiKey);
+});
+it("keeps Braintrust request metadata out of direct provider requests", async () => {
+  const f = await fixture();
+  let headers: Headers | undefined;
+  const receipt = await forwardEvalRequest({ ...f, route: { ...route, mode: "direct" }, transport: async (_url, init) => {
+    headers = new Headers(init?.headers); return response();
+  } });
+  expect(headers!.has("x-bt-parent")).toBe(false);
+  expect(receipt).not.toHaveProperty("braintrustParent");
 });
 it("stops at the campaign cap before any upstream request", async () => {
   const f = await fixture("0.002"), transport = vi.fn<typeof fetch>();
@@ -312,4 +355,49 @@ it("refuses missing or unreviewed attribution checkpoints before request dispatc
   await expect(createEvalAttemptPhase(phasePath, identity)).rejects.toThrow();
   await writeFile(phasePath, JSON.stringify({ version: 1, ...identity, providerResponse: "private" }));
   await expect(readEvalAttemptPhase(phasePath, identity)).rejects.toThrow("Invalid eval phase");
+});
+
+const provisionalBound = { version: 1 as const, scope: "full_lifecycle" as const, evidenceSha256: "a".repeat(64),
+  configurationSha256: costBoundConfigurationSha256({ provider: route.provider, mode: route.mode, price: route.price,
+    maximumInputTokens: route.maximumInputTokens, maximumOutputTokens: route.maximumOutputTokens, reservation: evalRequestReservation(route) }) };
+it("retains a reviewed model bound through a partial response and durable reload without releasing the hold", async () => {
+  const f = await fixture();
+  const receipt = await forwardEvalRequest({ ...f, route: { ...route, provisionalBound }, transport: async () => {
+    expect((await readEvalCostLedger(f.file)).state.requests.values().next().value?.bound?.evidence).toEqual(provisionalBound);
+    return Response.json({ object: "response", status: "in_progress", model: "fixture" },
+      { headers: { "x-bt-used-endpoint": route.endpointName! } });
+  } });
+  expect(receipt).toMatchObject({ costUsd: null, final: false });
+  expect((await readEvalCostLedger(f.file)).state.snapshot()).toMatchObject({ boundedUnresolvedRequests: 1, heldUsd: "0.003000000" });
+});
+it.each(["no-headers", "route", "failover", "model", "input-limit", "output-limit"])("disqualifies a model bound on %s evidence", async reason => {
+  const f = await fixture();
+  await forwardEvalRequest({ ...f, route: { ...route, provisionalBound }, transport: async () => {
+    if (reason === "no-headers") throw new Error("No response headers");
+    return Response.json({ object: "response", status: "in_progress", model: reason === "model" ? "other" : "fixture",
+      usage: { input_tokens: reason === "input-limit" ? 1001 : 10, input_tokens_details: { cache_write_tokens: 0, cached_tokens: 0 },
+        output_tokens: reason === "output-limit" ? 101 : 0 } },
+      { headers: { "x-bt-used-endpoint": reason === "route" ? "OTHER" : route.endpointName!,
+        ...(reason === "failover" ? { "x-bt-failover-to": "OTHER" } : {}) } });
+  } });
+  const replay = (await readEvalCostLedger(f.file)).state;
+  expect(replay.snapshot()).toMatchObject({ boundedUnresolvedRequests: 0, unknownRequests: 1, inflight: 0 });
+  expect([...replay.requests.values()][0]!.boundInvalidated).toBe(true);
+});
+
+it("refuses a changed model limit or rate with a stale reviewed bound before dispatch", async () => {
+  const f = await fixture(), transport = vi.fn<typeof fetch>();
+  for (const changed of [{ ...route, maximumInputTokens: 500 }, { ...route, price: { ...route.price, inputUsdPerMillion: "20" } }]) {
+    await expect(forwardEvalRequest({ ...f, route: { ...changed, provisionalBound }, transport })).rejects.toThrow("configuration changed");
+  }
+  expect(transport).not.toHaveBeenCalled();
+  expect(f.ledger.snapshot().requests).toHaveLength(0);
+});
+
+it("disqualifies excessive reported input even when missing cache details prevent pricing", async () => {
+  const f = await fixture();
+  await forwardEvalRequest({ ...f, route: { ...route, provisionalBound }, transport: async () => Response.json({
+    object: "response", status: "completed", model: "fixture", usage: { input_tokens: 1001, output_tokens: 1 },
+  }, { headers: { "x-bt-used-endpoint": route.endpointName! } }) });
+  expect((await readEvalCostLedger(f.file)).state.snapshot()).toMatchObject({ boundedUnresolvedRequests: 0, unknownRequests: 1, heldUsd: "0.003000000" });
 });
