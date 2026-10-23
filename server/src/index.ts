@@ -1483,6 +1483,7 @@ async function startServerWithDatabaseTeardown(
       gitRestorePoints: config.gitRestorePointsEnabled ? {
         storage: storageService,
         terminalDelayMs: config.gitRestorePointTerminalDelayDays * 24 * 60 * 60 * 1000,
+        idleMs: config.gitRestorePointIdleDays > 0 ? config.gitRestorePointIdleDays * 24 * 60 * 60 * 1000 : null,
         keyDurable: config.storageProvider !== "s3" || Boolean(process.env.PAPERCLIP_SECRETS_MASTER_KEY?.trim()),
       } : undefined,
       workspaceReaperCooldownDays: config.workspaceReaperCooldownDays,

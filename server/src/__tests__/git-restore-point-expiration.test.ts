@@ -6,12 +6,12 @@ import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
-import { companies, createDb, executionWorkspaceRestorePoints, executionWorkspaces, issues } from "@paperclipai/db";
+import { agents, companies, createDb, executionWorkspaceRestorePoints, executionWorkspaces, heartbeatRuns, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { materializeIsolatedRemoteWorkspaceSource } from "../services/isolated-remote-workspace-source.js";
 import { ensurePersistedExecutionWorkspaceAvailable, realizeExecutionWorkspace } from "../services/workspace-runtime.js";
 import { executionWorkspaceService } from "../services/execution-workspaces.js";
-import { expireReconstructableGitWorkspace } from "../services/git-workspace-expiration.js";
+import { expireReconstructableGitWorkspace, gitWorkspaceLastActivityAt } from "../services/git-workspace-expiration.js";
 import { getStorageService } from "../storage/index.js";
 
 const gitEnv = { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.test",
@@ -224,6 +224,104 @@ describeEmbeddedPostgres("git restore point expiration", () => {
     expect(failed.metadata?.gitCacheRestoration).toMatchObject({ restorePoint: { objectKey: recipe.restorePoint.objectKey, appliedAt: null } });
     await expect(fs.access(path.join(f.cwd, "notes", "todo.md"))).rejects.toMatchObject({ code: "ENOENT" });
     expect(await f.reopen()).toMatchObject({ ok: false, code: "rebuild_failed" });
+  });
+
+  describe("idle open issues", () => {
+    async function openIdle(f: Awaited<ReturnType<typeof fixture>>, idleDays: number) {
+      await db.update(issues).set({ status: "in_progress", completedAt: null, updatedAt: new Date(Date.now() - idleDays * DAY_MS) })
+        .where(eq(issues.id, f.issueId));
+    }
+    const idle = (now = Date.now()) => ({ idleCutoff: new Date(now - 7 * DAY_MS) });
+
+    it("expires an open issue's idle worktree with a restore point and restores it on reopen", async () => {
+      const f = await fixture();
+      const unpushed = await makeUnsavedWork(f.cwd);
+      await openIdle(f, 8);
+      expect(await f.expire()).toMatchObject({ expired: false, skipReason: "live_or_unresolved_consumer" });
+      expect(await f.expire(idle())).toMatchObject({ expired: true, restorePoint: true, skipReason: null });
+      expect(await exists(f.cwd)).toBe(false);
+      expect((await f.row()).status).toBe("archived");
+      expect(await f.reopen()).toMatchObject({ ok: true, reopened: true });
+      expect(git(f.cwd, "rev-parse", "HEAD")).toBe(unpushed);
+      expect(await fs.readFile(path.join(f.cwd, "notes", "todo.md"), "utf8")).toBe("untracked work\n");
+    });
+
+    it("lets the workspace reaper expire idle open issues at their idle deadline", async () => {
+      const f = await fixture();
+      await makeUnsavedWork(f.cwd);
+      const updatedAt = new Date(Date.now() - 3 * DAY_MS);
+      await db.update(issues).set({ status: "in_progress", completedAt: null, updatedAt }).where(eq(issues.id, f.issueId));
+      const worker = (now: number) => executionWorkspaceService(db, { gitCacheExpirationEnabled: true, now: () => new Date(now),
+        gitRestorePoints: { storage: getStorageService(), terminalDelayMs: 3 * DAY_MS, keyDurable: true, idleMs: 7 * DAY_MS } });
+      const early = worker(Date.now());
+      expect(await early.sweepTerminalWorkspaces()).toMatchObject({ archived: 0, skippedNonTerminalTree: 1 });
+      expect(await early.nextTerminalWorkspaceSweepAt()).toBe(updatedAt.getTime() + 7 * DAY_MS);
+      expect(await exists(f.cwd)).toBe(true);
+      const due = worker(updatedAt.getTime() + 7 * DAY_MS + 60_000);
+      expect(await due.sweepTerminalWorkspaces()).toMatchObject({ archived: 1 });
+      expect(await exists(f.cwd)).toBe(false);
+      expect(await f.ledger()).toMatchObject([{ status: "active" }]);
+    });
+
+    it("lets the workspace reaper finish an interrupted idle expiration while the issue stays open", async () => {
+      const f = await fixture();
+      await makeUnsavedWork(f.cwd);
+      await openIdle(f, 8);
+      expect(await f.expire({ ...idle(), beforeDelete: async () => { throw new Error("interrupted_fixture"); } }))
+        .toMatchObject({ expired: false });
+      expect(await f.row()).toMatchObject({ status: "archived", metadata: { gitCacheExpiration: { completed: false } } });
+      expect(await exists(f.cwd)).toBe(true);
+      const worker = executionWorkspaceService(db, { gitCacheExpirationEnabled: true,
+        gitRestorePoints: { storage: getStorageService(), terminalDelayMs: 3 * DAY_MS, keyDurable: true, idleMs: 7 * DAY_MS } });
+      expect(await worker.sweepTerminalWorkspaces()).toMatchObject({ archived: 1 });
+      expect(await exists(f.cwd)).toBe(false);
+      expect(await f.reopen()).toMatchObject({ ok: true, reopened: true });
+      expect(await fs.readFile(path.join(f.cwd, "notes", "todo.md"), "utf8")).toBe("untracked work\n");
+    });
+
+    it("counts activity on another issue bound to the workspace", async () => {
+      const f = await fixture();
+      await makeUnsavedWork(f.cwd);
+      await openIdle(f, 8);
+      const other = randomUUID();
+      await db.insert(issues).values({ id: other, companyId: f.companyId, title: "Unrelated issue sharing the workspace", status: "todo",
+        executionWorkspaceId: f.workspaceId, updatedAt: new Date(Date.now() - DAY_MS) });
+      expect((await gitWorkspaceLastActivityAt(db, await f.row()))!.getTime()).toBeGreaterThan(Date.now() - 2 * DAY_MS);
+      expect(await f.expire(idle())).toMatchObject({ expired: false, skipReason: "live_or_unresolved_consumer" });
+      expect(await exists(f.cwd)).toBe(true);
+    });
+
+    it("never expires open issues when idle expiry is off", async () => {
+      const f = await fixture();
+      await makeUnsavedWork(f.cwd);
+      await openIdle(f, 30);
+      const worker = executionWorkspaceService(db, { gitCacheExpirationEnabled: true,
+        gitRestorePoints: { storage: getStorageService(), terminalDelayMs: 3 * DAY_MS, keyDurable: true, idleMs: null } });
+      expect(await worker.sweepTerminalWorkspaces()).toMatchObject({ archived: 0, skippedNonTerminalTree: 1 });
+      expect(await worker.nextTerminalWorkspaceSweepAt()).toBeNull();
+      expect(await exists(f.cwd)).toBe(true);
+    });
+
+    it("keeps an open issue's worktree that saw activity inside the idle window", async () => {
+      const f = await fixture();
+      await makeUnsavedWork(f.cwd);
+      await openIdle(f, 3);
+      expect(await f.expire(idle())).toMatchObject({ expired: false, skipReason: "live_or_unresolved_consumer" });
+      expect(await exists(f.cwd)).toBe(true);
+    });
+
+    it("keeps an open issue's worktree whose latest run finished inside the idle window", async () => {
+      const f = await fixture();
+      await makeUnsavedWork(f.cwd);
+      await openIdle(f, 8);
+      const agentId = randomUUID();
+      await db.insert(agents).values({ id: agentId, companyId: f.companyId, name: "Worker", adapterType: "process" });
+      await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId, issueId: f.issueId, status: "succeeded",
+        createdAt: new Date(Date.now() - 2 * DAY_MS), startedAt: new Date(Date.now() - 2 * DAY_MS), finishedAt: new Date(Date.now() - 2 * DAY_MS) });
+      expect(await gitWorkspaceLastActivityAt(db, await f.row())).toEqual(expect.any(Date));
+      expect(await f.expire(idle())).toMatchObject({ expired: false, skipReason: "live_or_unresolved_consumer" });
+      expect(await exists(f.cwd)).toBe(true);
+    });
   });
 
   it("reports a restore point candidate in dry run without storing anything", async () => {
