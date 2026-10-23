@@ -179,6 +179,8 @@ type Binding = {
   assertBridgeAuthority?: (database?: Db) => Promise<void>;
   executionTargetKind?: "local" | "remote";
   readRemoteWorkspaceFile?: RemoteWorkspaceFileReader;
+  readRemoteTaskFile?: RemoteWorkspaceFileReader;
+  readRemoteApiFile?: (path: string, maxBytes: number) => Promise<Buffer>;
   currentWakeComments?: CurrentWakeCommentsBinding;
   chatAttachmentReadScope?: NativeChatAttachmentReadScope;
   syncIssueExternalObjects?: (issueId: string) => Promise<void>;
@@ -278,7 +280,7 @@ export class PaperclipRunnerToolAuthority {
           descriptor.allowedModes.includes(workMode) &&
           (descriptor.operationId !== "register_deliverable" ||
             (Boolean(this.binding.workspaceRoot) &&
-              ((this.binding.executionTargetKind ?? "local") === "local" || Boolean(this.binding.readRemoteWorkspaceFile)))),
+              ((this.binding.executionTargetKind ?? "local") === "local" || Boolean(this.binding.readRemoteWorkspaceFile || this.binding.readRemoteTaskFile)))),
       ).map((descriptor) => ({
         name: descriptor.operationId,
         description:
@@ -303,8 +305,9 @@ export class PaperclipRunnerToolAuthority {
                   },
                   contentRef: {
                     ...(descriptor.inputSchema.properties?.contentRef ?? {}),
-                    description:
-                      "Workspace-relative source path. Absolute paths, URLs, traversal, and symlinks are rejected.",
+                    description: this.binding.readRemoteTaskFile
+                      ? "Path to the file on the execution host: workspace-relative or absolute within a location granted to this task, including its agent home."
+                      : "Workspace-relative source path. Absolute paths, URLs, traversal, and symlinks are rejected.",
                   },
                 },
               }
@@ -1165,6 +1168,14 @@ export class PaperclipRunnerToolAuthority {
       await assertArtifactAccess();
       return { bytes: Buffer.concat(chunks), filename: asset.originalFilename ?? "file", contentType: asset.contentType };
     }
+    if (this.binding.executionTargetKind === "remote") {
+      if (!this.binding.readRemoteApiFile) throw badRequest("Remote workspace file uploads are unavailable for this execution provider");
+      await this.#boundContext();
+      const bytes = await this.binding.readRemoteApiFile(file.path!, RUNNER_API_MAX_BYTES);
+      await this.#boundContext();
+      if (bytes.length > RUNNER_API_MAX_BYTES) throw badRequest("Workspace file exceeds API transfer limit");
+      return { bytes, filename: basename(file.path!), contentType: "application/octet-stream" };
+    }
     const resolved = await workspaceFileResourceService(this.db).prepareDownload(this.binding.issueId, { path: file.path!, workspace: "auto" });
     const handle = await openRunnerApiWorkspaceFile(resolved.realPath);
     try {
@@ -1940,6 +1951,7 @@ export class PaperclipRunnerToolAuthority {
             workspaceRoot,
             executionTargetKind: this.binding.executionTargetKind ?? "local",
             readRemoteWorkspaceFile: this.binding.readRemoteWorkspaceFile,
+            readRemoteTaskFile: this.binding.readRemoteTaskFile,
           },
           deliverable: {
             filename: typeof input.filename === "string" ? input.filename : "",

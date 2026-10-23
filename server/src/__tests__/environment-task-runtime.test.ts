@@ -21,7 +21,7 @@ const row = () => ({
 });
 function database(value: ReturnType<typeof row> | null = row(), projectRows = [{ id: projectId }], workspaceRows: unknown[] = []) {
   let selectedRows: unknown[] = projectRows;
-  const results = [value ? [value] : [], [{ id: "issue" }]];
+  const results = [value ? [value] : [], [{ id: "issue" }], value ? [value] : []];
   const query: any = { from: (table: unknown) => { selectedRows = table === executionWorkspaces ? workspaceRows : projectRows; return query; }, leftJoin: () => query, where: vi.fn(() => query), limit: () => Promise.resolve(results.shift()), then: (resolve: (rows: typeof projectRows) => unknown) => Promise.resolve(selectedRows).then(resolve as (rows: unknown[]) => unknown) };
   const sets: Record<string, unknown>[] = [];
   const update: any = { set: (value: Record<string, unknown>) => { sets.push(value); return update; }, where: () => update,
@@ -80,7 +80,7 @@ describe("plugin-provided Runner execution", () => {
     await expect(executeEnvironmentTask(database(value, [], [workspace]).db, denied as never, { companyId: "company", leaseId, operation: { ...submit, projectIds: [] } })).rejects.toThrow("binding changed");
     expect(denied.call).not.toHaveBeenCalled();
   });
-  it("accepts artifact identity and excludes filesystem transfer from the contract", () => {
+  it("accepts artifact identity without arbitrary filesystem or execution settings", () => {
     const operation = environmentTaskOperationSchema.parse({ kind: "describe" });
     const description = { kind: "description", taskId: "attempt-1", runner: { version: "fixture", digest: `sha256:${"a".repeat(64)}` } };
     expect(parseEnvironmentTaskResult(operation, "attempt-1", description)).toEqual(description);
@@ -90,6 +90,28 @@ describe("plugin-provided Runner execution", () => {
     for (const kind of ["checkpoint", "read_file"]) {
       expect(environmentTaskOperationSchema.safeParse({ kind }).success).toBe(false);
     }
+  });
+  it("bounds file reads to the active task identity and validated project scope", async () => {
+    const value=row();
+    const identity={runnerInstanceId:"runner",environmentLeaseId:leaseId,runId:"run",normalizedSessionId:"session",turnId:"turn",itemId:"item"};
+    Object.assign(value.lease.metadata,{runnerTaskIdentity:{...submit.runner}});
+    const operation={kind:"read_file" as const,identity,projectIds:[projectId],path:"proof.txt",maxBytes:1024};
+    const result={kind:"file",taskId:"attempt-1",base64:"",byteSize:0,sha256:"a".repeat(64)};
+    const workers=worker(result);
+    await expect(executeEnvironmentTask(database(value).db,workers as never,{companyId:"company",leaseId,operation})).resolves.toEqual(result);
+    workers.call.mockClear();
+    for(const invalid of [{...operation,projectIds:[]},{...operation,identity:{...identity,itemId:"foreign"}}]) {
+      await expect(executeEnvironmentTask(database(value).db,workers as never,{companyId:"company",leaseId,operation:invalid})).rejects.toThrow();
+    }
+    value.lease.expiresAt=new Date(0);
+    await expect(executeEnvironmentTask(database(value).db,workers as never,{companyId:"company",leaseId,operation})).rejects.toThrow("not active");
+    expect(workers.call).not.toHaveBeenCalled();
+    value.lease.expiresAt=null;
+    workers.call.mockImplementation(async()=>{value.run!.status="cancelled";return result;});
+    await expect(executeEnvironmentTask(database(value).db,workers as never,{companyId:"company",leaseId,operation})).rejects.toThrow("operation unavailable");
+    for(const path of ["//etc/passwd","../escape","a/../b","a\\b","https://example.test/file"]) expect(environmentTaskOperationSchema.safeParse({...operation,path}).success).toBe(false);
+    expect(environmentTaskOperationSchema.safeParse({...operation,maxBytes:11*1024*1024}).success).toBe(false);
+    expect(()=>parseEnvironmentTaskResult(operation,"attempt-1",{...result,taskId:"other"})).toThrow();
   });
   it("reads only the current task's saved identity and rejects inactive checkpoint operations", async () => {
     const value = row();

@@ -43,10 +43,10 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
   const activeProbe = lease.heartbeatRunId === null && lease.issueId === null && probe
     && typeof probe.runId === "string" && typeof probe.sessionId === "string"
     && typeof probe.expiresAtMs === "number" && probe.expiresAtMs > Date.now();
-  if ((operation.kind === "describe" || operation.kind === "prepare" || operation.kind === "submit" || operation.kind === "connection" || operation.kind === "read_state" || operation.kind === "archive_state" || operation.kind === "check_project_auth" || operation.kind === "copilot_metadata") &&
+  if ((operation.kind === "read_file" || operation.kind === "describe" || operation.kind === "prepare" || operation.kind === "submit" || operation.kind === "connection" || operation.kind === "read_state" || operation.kind === "archive_state" || operation.kind === "check_project_auth" || operation.kind === "copilot_metadata") &&
       (metadata.runnerTaskRetiring === true || !environment || (!activeProbe && run?.status !== "running") || lease.status !== "active" || (lease.expiresAt && lease.expiresAt.getTime() <= Date.now()))) throw new Error("Plugin-provided Runner execution lease is not active");
   if (operation.kind === "copilot_metadata" && !activeProbe) throw new Error("Copilot metadata requires a private setup lease");
-  const checkpointIdentity = operation.kind === "read_state" ? operation.identity
+  const checkpointIdentity = operation.kind === "read_state" || operation.kind === "read_file" ? operation.identity
     : operation.kind === "archive_state" ? operation.priorIdentity : null;
   const runner = checkpointIdentity ? { runnerId: checkpointIdentity.runnerInstanceId, leaseId: checkpointIdentity.environmentLeaseId,
     runId: checkpointIdentity.runId, sessionId: checkpointIdentity.normalizedSessionId } : operation.kind === "submit" ? operation.runner : operation.kind === "prepare" ? {
@@ -55,7 +55,7 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
     runId: operation.requirements.identity.runId, sessionId: operation.requirements.identity.normalizedSessionId,
   } : null;
   const launches = operation.kind === "submit" || operation.kind === "prepare";
-  const scopesProjects = launches || operation.kind === "check_project_auth";
+  const scopesProjects = launches || operation.kind === "check_project_auth" || operation.kind === "read_file";
   const resumeFrom = launches || checkpointIdentity ? (operation as { resumeFrom?: string }).resumeFrom : undefined;
   const savedIdentity = metadata.runnerTaskIdentity as Record<string, unknown> | undefined;
   const ownCheckpoint = checkpointIdentity && !resumeFrom && savedIdentity
@@ -101,7 +101,7 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
       eq(executionWorkspaces.id, workspaceBinding.executionWorkspaceId), eq(executionWorkspaces.companyId, input.companyId)));
     const saved = readWorkspaceProviderBinding(workspace?.metadata);
     if (!workspace || workspace.id !== lease.executionWorkspaceId || workspace.providerType !== "plugin" || workspace.providerRef !== workspaceBinding.workspaceRef ||
-        (launches && !["active", "idle", "in_review"].includes(workspace.status)) ||
+        (scopesProjects && !["active", "idle", "in_review"].includes(workspace.status)) ||
         workspaceBinding.pluginId !== plugin.id || !saved || JSON.stringify(saved) !== JSON.stringify(workspaceBinding)) {
       throw new Error("Managed workspace execution binding changed");
     }
@@ -127,6 +127,12 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
   const driverConfig = config.pluginKey === plugin.pluginKey && config.driverKey === metadata.driverKey
     ? (config.driverConfig as Record<string, unknown> | undefined) ?? {} : {};
   let requiredProjectAuthProof: Record<string, unknown> | undefined;
+  if (operation.kind === "read_file") {
+    const proof = metadata.runnerTaskProjectAuthValidation as { projectIds?: string[] } | undefined;
+    if (metadata.runnerTaskExecutionStopped === true || !Array.isArray(proof?.projectIds) ||
+      JSON.stringify([...proof.projectIds].sort()) !== JSON.stringify([...operation.projectIds].sort()))
+      throw new Error("Plugin Runner file scope unavailable");
+  }
   if (operation.kind === "submit") {
     const proof = metadata.runnerTaskProjectAuthValidation as { configurationId?: unknown; provider?: unknown; projectIds?: string[] } | undefined;
     const provider = operation.runner.harness === "codex" ? "openai" : operation.runner.harness === "claude" ? "anthropic" : operation.runner.harness;
@@ -174,9 +180,17 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
       taskId, runId: run?.id ?? (activeProbe ? String(probe.runId) : null), agentId: run?.agentId ?? null, projectIds,
       lease: { providerLeaseId: lease.providerLeaseId, metadata: lease.metadata ?? undefined },
       ...(workspaceBinding ? { workspace: workspaceBinding } : {}),
-      ...(freshWorkspace && (launches || operation.kind === "check_project_auth") ? { fresh: freshWorkspace } : {}), operation,
+      ...(freshWorkspace && scopesProjects ? { fresh: freshWorkspace } : {}), operation,
     }, operation.kind === "copilot_metadata" ? Math.max(1, Math.min(40_000, Number(probe?.expiresAtMs) - Date.now())) : 15_000);
     const parsed = parseEnvironmentTaskResult(operation, taskId, result);
+    if (operation.kind === "read_file") {
+      const [current] = await db.select({ lease: environmentLeases, run: heartbeatRuns }).from(environmentLeases)
+        .leftJoin(heartbeatRuns, and(eq(heartbeatRuns.id, environmentLeases.heartbeatRunId), eq(heartbeatRuns.companyId, environmentLeases.companyId)))
+        .where(and(eq(environmentLeases.id, lease.id), eq(environmentLeases.companyId, input.companyId))).limit(1);
+      if (!current || current.lease.status !== "active" || current.run?.status !== "running" ||
+        current.lease.metadata?.runnerTaskRetiring === true || current.lease.metadata?.runnerTaskExecutionStopped === true ||
+        current.lease.expiresAt && current.lease.expiresAt.getTime() <= Date.now()) throw new Error("Plugin Runner file lease expired during transfer");
+    }
     if (freshWorkspace && parsed.kind === "description" && parsed.freshWorkspaceVersion !== 1)
       throw new Error("Plugin-provided fresh workspace preparation unavailable");
     if (operation.kind === "check_project_auth" && parsed.kind === "project_auth") {

@@ -16,8 +16,10 @@ Implement these hooks:
 - `onEnvironmentDestroyLease`
 
 Task execution does not require `onEnvironmentExecute` or
-`onEnvironmentRealizeWorkspace`. The task API has no shell or file transfer
-operation. Use a separate workflow to install and save agent files.
+`onEnvironmentRealizeWorkspace`. The task API has no shell command or file installation
+operation. Use a separate workflow to install agent files. Providers that
+advertise `workspaceFileReadVersion: 1` can return task output files through the
+bounded `read_file` operation for attachments and deliverables.
 
 Core supports per-turn workspace sessions with Codex, OpenCode, and ACPX.
 OpenCode and ACPX require the existing qualified provider profiles.
