@@ -25,9 +25,10 @@ export function AiConnectionRunReconnect({
   const connections = accounts.data?.connections ?? [];
   const target = connections.find((account) => account.id === connectionId)
     ?? connections.find((account) => account.provider === provider && account.isDefault && account.ownership === "personal" && account.ownerUserId === accounts.data?.currentUserId);
-  if (done) return <p role="status" className="text-xs text-muted-foreground">Connection renewed. Run the agent again.</p>;
+  if (done) return <p role="status" className="text-xs text-muted-foreground">Connection renewed. Tasks waiting on it restart by themselves.</p>;
   if (accounts.isPending) return null;
   if (!target) return <p className="text-xs text-muted-foreground">Open the agent's AI connection settings and choose Reconnect.</p>;
+  if (target.status === "connected") return <p className="text-xs text-muted-foreground">{target.name} is connected.</p>;
   return (
     <>
       <Button variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={() => setOpen(true)}>Reconnect {target.name}</Button>
