@@ -259,6 +259,14 @@ function preserveWorkspaceMetadataForPatch(
       }
     }
   }
+  const freshIntentKeys = ["workspaceProviderFresh", "runnerTaskFreshWorkspace", "runnerTaskWorkspaceOwner"] as const;
+  if (patch.metadata !== undefined && (patch.metadata !== null || freshIntentKeys.some(key => current.metadata?.[key] !== undefined))) {
+    nextPatch.metadata = { ...(nextPatch.metadata ?? patch.metadata) };
+    for (const key of freshIntentKeys) {
+      if (current.metadata?.[key] !== undefined) nextPatch.metadata[key] = current.metadata[key];
+      else delete nextPatch.metadata[key];
+    }
+  }
   const retainedSources = {
     ...parseObject(parseObject(patch.metadata)._issuePrivacySources),
     ...parseObject(current.metadata?._issuePrivacySources),
