@@ -23,3 +23,16 @@
 # Load-sensitive: both tests failed in the full run and in the script's re-run on 2026-10-16 (builds 2414b5815, 9e399e9dd, 4fc0a1dc2; the last one already contains upstream 5555817c2), always with `unknown_base_git_files` instead of `unpushed_managed_checkout`. They pass 14/14 when run alone through box-gate-runner.sh on build 4fc0a1dc2 (2026-10-17, lower load). Our branches do not touch Git files. Added 2026-10-17 (upstream 5555817c2).
 |@paperclipai/server| src/__tests__/git-reproducible-managed-checkouts.test.ts > assertReproducibleGitFiles with Paperclip-managed files > rejects a detached HEAD commit after its reflog expires
 |@paperclipai/server| src/__tests__/git-reproducible-managed-checkouts.test.ts > assertReproducibleGitFiles with Paperclip-managed files > rejects commits kept by a branch, a tag, or only the reflog
+
+# Load-sensitive, spawns real service processes: timeouts of 10-20 s in the full run and when the file is run alone (2026-10-23, build c3f382033, load 12-39). A different subset fails on every run (5 of 176 in the full run, 7, then 6 alone). No branch in the build touches workspace-runtime code. Added 2026-10-23.
+|@paperclipai/server| src/__tests__/workspace-runtime.test.ts > ensureRuntimeServicesForRun > reuses shared runtime services across runs and starts a new service after release
+|@paperclipai/server| src/__tests__/workspace-runtime.test.ts > ensureRuntimeServicesForRun > does not reuse project-scoped shared services across different workspace launch contexts
+|@paperclipai/server| src/__tests__/workspace-runtime.test.ts > ensureRuntimeServicesForRun > injects isolated browser callback origins into separate worktree runtimes
+|@paperclipai/server| src/__tests__/workspace-runtime.test.ts > ensureRuntimeServicesForRun > stops only the selected execution workspace runtime service
+|@paperclipai/server| src/__tests__/workspace-runtime.test.ts > workspace runtime service control persistence > allocates distinct persisted ports for concurrent isolated siblings without stopping either service
+|@paperclipai/server| src/__tests__/workspace-runtime.test.ts > workspace runtime service control persistence > commits fixed-port reservations before readiness windows longer than 60 seconds
+|@paperclipai/server| src/__tests__/workspace-runtime.test.ts > workspace runtime service control persistence > reuses a stopped isolated workspace's actual port when it is free
+|@paperclipai/server| src/__tests__/workspace-runtime.test.ts > workspace runtime service control persistence > persists provisioning before starting and excludes provision time from readiness timeout
+|@paperclipai/server| src/__tests__/workspace-runtime.test.ts > workspace runtime service control persistence > retries a bind race on the next bounded port and persists the selected URL
+|@paperclipai/server| src/__tests__/workspace-runtime.test.ts > workspace runtime startup reconciliation > restores desired services when one row is stopped and a live registered service has no row
+|@paperclipai/server| src/__tests__/workspace-runtime.test.ts > workspace runtime startup reconciliation > backfills a pre-existing HTTP-only managed worktree runtime to verified HTTPS in place
