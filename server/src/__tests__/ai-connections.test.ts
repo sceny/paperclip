@@ -1389,6 +1389,42 @@ console.log(JSON.stringify({ type: "result", subtype: "success", result: "hello"
     expect((await service.select({ companyId, agentId: id, userId, adapterType, binding: selectedBinding })).grant.status).toBe("active");
   });
 
+  it("closes the open sign-in card and wakes its task when the connection is reconnected outside the card", async () => {
+    const userId = `reconnect-card-${randomUUID()}`;
+    const id = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+    const selectedBinding = { provider: "anthropic", method: "api_key", mode: "responsible_user" } as const;
+    await db.insert(companyMemberships).values({ companyId, principalId: userId, principalType: "user", status: "active", membershipRole: "member" });
+    await db.insert(agents).values({ id, companyId, name: "Reconnect card", adapterType: "claude_local", runtimeConfig: { aiConnection: selectedBinding } });
+    await db.insert(issues).values({ id: issueId, companyId, title: "Reconnect elsewhere", status: "in_progress", assigneeAgentId: id });
+    const account = await service.save(companyId, userId, { provider: "anthropic", method: "api_key", ownership: "personal", name: "Reconnect account", apiKey: "fixture", agentIds: [id], allAgents: false }, "fixture-old-key");
+    const runtime = await prepareManagedAiRuntime(db, { companyId, agentId: id, responsibleUserId: userId, adapterType: "claude_local", binding: selectedBinding, config: {} });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId: id, status: "failed", errorCode: "claude_auth_required", responsibleUserId: userId,
+      contextSnapshot: { issueId, aiConnection: { ...runtime.attribution, identity: runtime.identity } } });
+    await runtime.cleanup();
+    const intents = connectionIntentService(db);
+    const card = await intents.requestForRunAuthFailure(runId);
+    expect(card).toMatchObject({ state: "needs_user_action" });
+    // Another person's reconnect, or one that does not use this connection, leaves the card alone.
+    expect(await intents.resolveAfterReconnect(companyId, "someone-else", account.connectionId)).toEqual([]);
+    expect(await intents.resolveAfterReconnect(companyId, userId, randomUUID())).toEqual([]);
+    expect(await intents.resolveAfterReconnect(companyId, userId, account.connectionId)).toEqual([]);
+
+    await service.save(companyId, userId, { provider: "anthropic", method: "api_key", ownership: "personal", name: "Reconnect account", connectionId: account.connectionId, apiKey: "fixture", agentIds: [id], allAgents: false }, "fixture-new-key");
+    expect(await intents.resolveAfterReconnect(companyId, userId, account.connectionId)).toEqual([card!.interactionId]);
+    const [closed] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card!.interactionId!));
+    expect(closed).toMatchObject({ status: "accepted", result: { outcome: "connected", connectionId: account.connectionId } });
+    expect(await intents.resolveAfterReconnect(companyId, userId, account.connectionId)).toEqual([]);
+
+    const wakeup = vi.fn(async (_agentId, opts) => {
+      await db.insert(agentWakeupRequests).values({ companyId, agentId: id, source: "automation", status: "queued", idempotencyKey: opts.idempotencyKey });
+      return null;
+    });
+    await connectionIntentDeliveryService(db, { wakeup } as never).deliver(card!.interactionId!);
+    expect(wakeup).toHaveBeenCalledWith(id, expect.objectContaining({ contextSnapshot: expect.objectContaining({ taskId: issueId, forceFreshSession: true }) }));
+  });
+
   it("marks the connection as needing sign-in when a run without a task fails authentication", async () => {
     const userId = `no-issue-${randomUUID()}`;
     const id = randomUUID();

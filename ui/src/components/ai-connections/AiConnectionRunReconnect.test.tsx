@@ -70,3 +70,9 @@ it("points to the connection settings when no account can be found", async () =>
   await mount([]);
   expect(container.textContent).toContain("choose Reconnect");
 });
+
+it("offers no reconnect for a connection that is already connected", async () => {
+  await mount([account({ status: "connected" })], "failed-connection");
+  expect(button("Reconnect My Claude")).toBeUndefined();
+  expect(container.textContent).toContain("My Claude is connected.");
+});

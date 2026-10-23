@@ -1198,9 +1198,39 @@ export function connectionIntentService(db: Db) {
     );
   }
 
+  /** A reconnect outside the card closes the AI cards its connection left open, so their tasks can resume. */
+  async function resolveAfterReconnect(
+    companyId: string,
+    userId: string,
+    connectionId: string,
+    options: { bypassCurrentMembershipCheck?: boolean } = {},
+  ) {
+    const pending = await db.select({ id: issueThreadInteractions.id })
+      .from(issueThreadInteractions)
+      .innerJoin(heartbeatRuns, eq(heartbeatRuns.id, issueThreadInteractions.sourceRunId))
+      .where(and(
+        eq(issueThreadInteractions.companyId, companyId),
+        eq(issueThreadInteractions.kind, "connection_intent"),
+        eq(issueThreadInteractions.status, "pending"),
+        eq(issueThreadInteractions.addresseeUserId, userId),
+        sql`${issueThreadInteractions.payload}->>'purpose' = 'ai'`,
+        sql`${heartbeatRuns.contextSnapshot}->'aiConnection'->>'connectionId' = ${connectionId}`,
+      ));
+    const resolved: string[] = [];
+    for (const { id } of pending) {
+      // The reconnect is already saved. A card that cannot close stays open for the user.
+      try {
+        await complete(id, connectionId, userId, options);
+        resolved.push(id);
+      } catch { /* leave the card pending */ }
+    }
+    return resolved;
+  }
+
   return {
     validate: loadRunContext,
     usableConnectionForAgent,
+    resolveAfterReconnect,
     search,
     request,
     // Controller-only entry point. Runtime tokens still require a running run.
