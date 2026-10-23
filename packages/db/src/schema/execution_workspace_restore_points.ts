@@ -19,6 +19,7 @@ export const executionWorkspaceRestorePoints = pgTable(
     executionWorkspaceId: uuid("execution_workspace_id").notNull(),
     sourceIssueId: uuid("source_issue_id"),
     generation: integer("generation").notNull(),
+    checkoutName: text("checkout_name").notNull().default(""),
     objectKey: text("object_key").notNull(),
     sha256: text("sha256").notNull(),
     byteSize: bigint("byte_size", { mode: "number" }).notNull(),
@@ -34,8 +35,8 @@ export const executionWorkspaceRestorePoints = pgTable(
   },
   (table) => ({
     objectKeyUniqueIdx: uniqueIndex("execution_workspace_restore_points_object_key_uniq").on(table.objectKey),
-    liveGenerationUniqueIdx: uniqueIndex("execution_workspace_restore_points_live_generation_uniq")
-      .on(table.executionWorkspaceId, table.generation)
+    liveGenerationUniqueIdx: uniqueIndex("execution_workspace_restore_points_live_checkout_uniq")
+      .on(table.executionWorkspaceId, table.generation, table.checkoutName)
       .where(sql`${table.status} <> 'deleted'`),
     statusDeleteAfterIdx: index("execution_workspace_restore_points_status_delete_after_idx").on(table.status, table.deleteAfter),
     companyIdx: index("execution_workspace_restore_points_company_idx").on(table.companyId),

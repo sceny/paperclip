@@ -446,3 +446,10 @@ export async function openRestorePoint(input: {
   }
   return payload;
 }
+
+export async function restorePointHistoryDigest(input: string, signal?: AbortSignal): Promise<string> {
+  const cwd = await fs.realpath(input);
+  const reflog = await gitText(cwd, ["reflog", "show", "--format=%H", "HEAD"], { signal }).catch(() => "");
+  const original = await gitText(cwd, ["rev-parse", "--verify", "-q", "ORIG_HEAD^{commit}"], { signal }).catch(() => "");
+  return createHash("sha256").update(JSON.stringify([reflog.split("\n").filter((line) => SHA.test(line)), SHA.test(original) ? original : null])).digest("hex");
+}

@@ -9,7 +9,7 @@ import { executionWorkspaces, issues, heartbeatRuns, nativeRunFinalizations, env
 import { createGitRemoteAuthProvider } from "./git-credentials.js";
 import type { StorageService } from "../storage/types.js";
 import { currentRestorePointSnapshot, RestorePointSkip, type RestorePointLimits } from "./git-restore-point.js";
-import { abandonGitRestorePoint, abandonGitRestorePointById, activateGitRestorePoint, restorePointSnapshotMatches, storeGitRestorePoint } from "./git-restore-point-storage.js";
+import { abandonGitRestorePoint, abandonGitRestorePointsByKey, activateGitRestorePoints, restorePointHistoryUnchanged, restorePointSnapshotMatches, storeGitRestorePoint } from "./git-restore-point-storage.js";
 import { withIsolatedRepositorySourceLock, verifiedRecordedIsolatedRemoteSource } from "./isolated-remote-workspace-source.js";
 import { managedProjectCheckoutName } from "./managed-project-checkout-name.js";
 import type { GitRemoteAuthProvider } from "./git-credentials.js";
@@ -54,17 +54,22 @@ export type GitRestorePointExpirationOptions = {
 };
 
 const RESTORE_POINT_RELAXABLE = new Set(["dirty_or_untracked_files", "unique_ignored_files", "unique_original_head",
-  "unique_reflog_commits", "upstream_commit_unverified"]);
+  "unique_reflog_commits", "upstream_commit_unverified", "unpushed_managed_checkout"]);
+const CHECKOUT_RESTORE_POINT_RELAXABLE = new Set(["dirty_or_untracked_files", "unpushed_managed_checkout", "unique_ignored_files",
+  "unique_original_head", "unique_reflog_commits"]);
 
-async function restorePointBoundary(recipe: GitCacheRestoration, headOnRemote: boolean, auth: GitRemoteAuthProvider, signal?: AbortSignal) {
-  if (headOnRemote) return [recipe.commit];
-  const upstream = await gitCacheCommand(recipe.worktreePath, ["rev-parse", "--verify", "-q", "refs/remotes/origin/HEAD"], signal)
+type CheckoutRestorePointNeed = { headOnRemote: boolean; path: string; repoUrl: string };
+
+async function restorePointBoundary(cwd: string, repoUrl: string, headOnRemote: boolean, auth: GitRemoteAuthProvider, signal?: AbortSignal) {
+  const head = (await gitCacheCommand(cwd, ["rev-parse", "--verify", "HEAD^{commit}"], signal)).trim();
+  if (headOnRemote) return [head];
+  const upstream = await gitCacheCommand(cwd, ["rev-parse", "--verify", "-q", "refs/remotes/origin/HEAD"], signal)
     .catch(() => "");
   const tip = upstream.trim();
   if (!tip) return [];
-  const base = (await gitCacheCommand(recipe.worktreePath, ["merge-base", "HEAD", tip], signal).catch(() => "")).trim();
+  const base = (await gitCacheCommand(cwd, ["merge-base", "HEAD", tip], signal).catch(() => "")).trim();
   if (!/^[a-f0-9]{40}$/.test(base)) return [];
-  try { await verifyRemoteGitCommit(recipe.repoUrl, base, auth, signal); return [base]; }
+  try { await verifyRemoteGitCommit(repoUrl, base, auth, signal); return [base]; }
   catch (error) { if (signal?.aborted) throw error; return []; }
 }
 
@@ -163,7 +168,8 @@ async function inspectBase(db: Db, workspace: Workspace, signal?: AbortSignal, a
   return allocatedBytes(recipe.sourcePath, () => { signal?.throwIfAborted(); return true; });
 }
 
-function managedCheckoutProver(db: Db, workspace: Workspace, auth: GitRemoteAuthProvider, checkouts: Map<string, ManagedCheckoutContents>): ManagedCheckoutProver {
+function managedCheckoutProver(db: Db, workspace: Workspace, auth: GitRemoteAuthProvider, checkouts: Map<string, ManagedCheckoutContents>,
+  restorePoints?: Map<string, CheckoutRestorePointNeed>): ManagedCheckoutProver {
   let rows: Promise<Array<{ id: string; repoUrl: string | null; repoRef: string | null; cwd: string | null }>> | undefined;
   return async (checkoutPath, name, signal) => {
     if (!workspace.projectId) throw new Error("unknown_managed_checkout");
@@ -173,7 +179,12 @@ function managedCheckoutProver(db: Db, workspace: Workspace, auth: GitRemoteAuth
     const source = selectRestoredProjectRepositories(await rows, readGitCacheRestoration(workspace)?.contents).find(row => row.repoUrl
       && managedProjectCheckoutName({ id: row.id, repoUrl: row.repoUrl, repoRef: row.repoRef, cwd: row.cwd }) === name);
     if (!source?.repoUrl) throw new Error("unknown_managed_checkout");
-    await assertReproducibleManagedCheckout(checkoutPath, { repoUrl: source.repoUrl, resolveGitAuth: auth, signal });
+    try { await assertReproducibleManagedCheckout(checkoutPath, { repoUrl: source.repoUrl, resolveGitAuth: auth, signal }); }
+    catch (error) {
+      if (!restorePoints || !CHECKOUT_RESTORE_POINT_RELAXABLE.has(skipReason(error))) throw error;
+      const { headOnRemote } = await assertReproducibleManagedCheckout(checkoutPath, { repoUrl: source.repoUrl, resolveGitAuth: auth, signal, restorePoint: true });
+      restorePoints.set(name, { headOnRemote, path: checkoutPath, repoUrl: source.repoUrl });
+    }
     checkouts.set(name, await readManagedCheckoutContents(checkoutPath, name, { ...source, repoUrl: source.repoUrl }, signal));
   };
 }
@@ -185,7 +196,7 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
 }): Promise<GitExpirationResult> {
   const result: GitExpirationResult = { candidate: false, expired: false, reclaimedBytes: 0,
     candidateBytes: 0, baseExpired: false, skipReason: null, restorePoint: false };
-  let pendingRestorePoint: string | null = null;
+  let pendingRestorePoints: string[] = [];
   if (!snapshot.sourceIssueId) return { ...result, skipReason: "missing_source_issue" };
   try {
     return await withIsolatedRepositorySourceLock(db, snapshot.companyId, snapshot.sourceIssueId, () =>
@@ -203,6 +214,7 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
         const checkouts = new Map<string, ManagedCheckoutContents>();
         const identity = { companyId: workspace.companyId, workspaceId: workspace.id };
         const proveManagedCheckout = managedCheckoutProver(db, workspace, auth, checkouts);
+        const checkoutRestorePoints = new Map<string, CheckoutRestorePointNeed>();
         let headOnRemote = true;
         let needsRestorePoint = false;
         let recipe: GitCacheRestoration;
@@ -214,7 +226,9 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
             if (options.now.getTime() < options.restorePoint.notBefore.getTime()) throw new Error("restore_point_not_due");
             if (!options.restorePoint.keyDurable) throw new Error("restore_point_key_not_durable");
             checkouts.clear();
-            const inspected = await inspectGitCacheRecipeForRestorePoint(workspace, auth, options.signal, { proveManagedCheckout });
+            checkoutRestorePoints.clear();
+            const inspected = await inspectGitCacheRecipeForRestorePoint(workspace, auth, options.signal, {
+              proveManagedCheckout: managedCheckoutProver(db, workspace, auth, checkouts, checkoutRestorePoints) });
             recipe = inspected.recipe;
             headOnRemote = inspected.headOnRemote;
             needsRestorePoint = true;
@@ -242,17 +256,28 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
           if (await fs.realpath(worktreeAdmin) !== canonicalAdmin || await fs.realpath(rawAdmin) !== canonicalAdmin) {
             throw new Error("unproven_worktree_admin");
           }
-          let activateLedger: string | null = null;
           if (needsRestorePoint) {
-            const stored = await storeGitRestorePoint({ db, storage: options.restorePoint!.storage,
-              workspace: { companyId: workspace.companyId, id: workspace.id, sourceIssueId: workspace.sourceIssueId },
+            const owner = { companyId: workspace.companyId, id: workspace.id, sourceIssueId: workspace.sourceIssueId };
+            const stored = await storeGitRestorePoint({ db, storage: options.restorePoint!.storage, workspace: owner,
               cwd: recipe.worktreePath, generation, headOnRemote, limits: options.restorePoint!.limits, signal: options.signal,
-              upstreamCommits: await restorePointBoundary(recipe, headOnRemote, auth, options.signal) });
+              upstreamCommits: await restorePointBoundary(recipe.worktreePath, recipe.repoUrl, headOnRemote, auth, options.signal) });
             if (stored) {
-              pendingRestorePoint = stored.ledgerId;
-              activateLedger = stored.ledgerId;
-              recipe = { ...recipe, schema: GIT_CACHE_RESTORATION_SCHEMA_V2, restorePoint: stored.ref };
+              pendingRestorePoints.push(stored.ledgerId);
+              recipe = { ...recipe, restorePoint: stored.ref };
             } else if (!headOnRemote) throw new Error("upstream_commit_unverified");
+            for (const [name, need] of [...checkoutRestorePoints.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+              const storedCheckout = await storeGitRestorePoint({ db, storage: options.restorePoint!.storage, workspace: owner,
+                cwd: need.path, checkout: name, generation, headOnRemote: need.headOnRemote, limits: options.restorePoint!.limits,
+                signal: options.signal, upstreamCommits: await restorePointBoundary(need.path, need.repoUrl, need.headOnRemote, auth, options.signal) });
+              if (!storedCheckout) {
+                if (!need.headOnRemote) throw new Error("unpushed_managed_checkout");
+                continue;
+              }
+              pendingRestorePoints.push(storedCheckout.ledgerId);
+              recipe = { ...recipe, contents: { ...recipe.contents!, checkouts: recipe.contents!.checkouts.map(checkout =>
+                checkout.name === name ? { ...checkout, restorePoint: storedCheckout.ref } : checkout) } };
+            }
+            if (pendingRestorePoints.length > 0) recipe = { ...recipe, schema: GIT_CACHE_RESTORATION_SCHEMA_V2 };
           }
           state = { schema: "paperclip.git-cache-expiration.v1", generation, workspaceRemoved: false,
             worktreeTrash: path.join(path.dirname(recipe.worktreePath), `.expired-git-worktree-${workspace.id}-${generation}`),
@@ -266,10 +291,10 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
           };
           [workspace] = await db.transaction(async (archiveTx) => {
             const rows = await archiveTx.update(executionWorkspaces).set(archive).where(eq(executionWorkspaces.id, workspace!.id)).returning();
-            if (activateLedger) await activateGitRestorePoint(archiveTx, { ledgerId: activateLedger, workspaceId: workspace!.id, at: options.now });
+            await activateGitRestorePoints(archiveTx, { ledgerIds: pendingRestorePoints, workspaceId: workspace!.id, at: options.now });
             return rows;
           });
-          pendingRestorePoint = null;
+          pendingRestorePoints = [];
         }
         if (!workspace) throw new Error("workspace_changed");
         const persist = async () => {
@@ -289,15 +314,30 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
           try {
             try {
               checkouts.clear();
-              await assertReproducibleGitFiles(recipe.worktreePath, options.signal, { proveManagedCheckout, preserveSettings: true,
+              const savedCheckoutRestorePoints = new Map((recipe.contents?.checkouts ?? []).filter(checkout => checkout.restorePoint)
+                .map(checkout => [checkout.name, checkout.restorePoint!]));
+              const relaxedChecks = new Map<string, CheckoutRestorePointNeed>();
+              const relaxedProver = managedCheckoutProver(db, workspace, auth, checkouts, relaxedChecks);
+              await assertReproducibleGitFiles(recipe.worktreePath, options.signal, { preserveSettings: true,
+                proveManagedCheckout: async (checkoutPath, name, signal) => {
+                  if (!savedCheckoutRestorePoints.has(name)) return proveManagedCheckout(checkoutPath, name, signal);
+                  await relaxedProver(checkoutPath, name, signal);
+                  if (!await restorePointHistoryUnchanged(savedCheckoutRestorePoints.get(name)!, checkoutPath, signal)) {
+                    throw new Error("restore_point_contents_changed");
+                  }
+                },
                 restorePoint: Boolean(recipe.restorePoint),
                 verifyFetchedCommit: (commit, signal) => verifyRemoteGitCommit(recipe.repoUrl, commit, auth, signal) });
-              if (recipe.restorePoint && !restorePointSnapshotMatches(recipe.restorePoint,
-                await currentRestorePointSnapshot(recipe.worktreePath, options.signal))) throw new Error("restore_point_contents_changed");
+              if (recipe.restorePoint && (!restorePointSnapshotMatches(recipe.restorePoint,
+                await currentRestorePointSnapshot(recipe.worktreePath, options.signal))
+                || !await restorePointHistoryUnchanged(recipe.restorePoint, recipe.worktreePath, options.signal))) throw new Error("restore_point_contents_changed");
               for (const checkout of checkouts.values()) {
                 const cwd = path.join(recipe.worktreePath, ".paperclip-repositories", checkout.name);
                 locks.push(await acquireGitExpirationLocks(lockLocations.filter(location => location.checkout === checkout.name), state.lockToken));
-                if ((await gitCacheCommand(cwd, ["status", "--porcelain=v1", "--untracked-files=all", "-z"], options.signal)).length) throw new Error("managed_checkouts_changed");
+                const savedCheckout = savedCheckoutRestorePoints.get(checkout.name);
+                if (savedCheckout) {
+                  if (!restorePointSnapshotMatches(savedCheckout, await currentRestorePointSnapshot(cwd, options.signal))) throw new Error("restore_point_contents_changed");
+                } else if ((await gitCacheCommand(cwd, ["status", "--porcelain=v1", "--untracked-files=all", "-z"], options.signal)).length) throw new Error("managed_checkouts_changed");
                 checkouts.set(checkout.name, await readManagedCheckoutContents(cwd, checkout.name, checkout.source, options.signal));
               }
               await assertGitWorkspaceContentsUnchanged(recipe.worktreePath, identity, recipe.contents, [...checkouts.values()]);
@@ -306,12 +346,16 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
             } catch (error) {
               for (const lock of [...locks].reverse()) await lock.release();
               const { restorePoint: _abandoned, ...reproducible } = recipe;
+              const strippedContents = reproducible.contents && { ...reproducible.contents,
+                checkouts: reproducible.contents.checkouts.map(({ restorePoint: _checkoutRestorePoint, ...checkout }) => checkout) };
               const metadata: Record<string, unknown> = { ...workspace.metadata, lifecycleGeneration: state.generation + 1,
-                [GIT_CACHE_RESTORATION_KEY]: { ...reproducible, schema: "paperclip.git-cache-restoration.v1", restoredAt: new Date().toISOString() } };
+                [GIT_CACHE_RESTORATION_KEY]: { ...reproducible, ...(strippedContents ? { contents: strippedContents } : {}),
+                  schema: "paperclip.git-cache-restoration.v1", restoredAt: new Date().toISOString() } };
               delete metadata[EXPIRATION_KEY];
               await db.update(executionWorkspaces).set({ status: "active", closedAt: null, cleanupEligibleAt: null,
                 cleanupReason: null, metadata, updatedAt: new Date() }).where(eq(executionWorkspaces.id, workspace.id));
-              if (recipe.restorePoint) await abandonGitRestorePointById(db, workspace.id, recipe.restorePoint.objectKey);
+              await abandonGitRestorePointsByKey(db, workspace.id, [recipe.restorePoint?.objectKey,
+                ...(recipe.contents?.checkouts ?? []).map(checkout => checkout.restorePoint?.objectKey)].filter((key): key is string => Boolean(key)));
               throw error;
             }
             await fs.rename(recipe.worktreePath, state.worktreeTrash);
@@ -350,7 +394,7 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
         return result;
       })), true);
   } catch (error) {
-    if (pendingRestorePoint) await abandonGitRestorePoint(db, pendingRestorePoint).catch(() => undefined);
+    for (const ledgerId of pendingRestorePoints) await abandonGitRestorePoint(db, ledgerId).catch(() => undefined);
     options.signal?.throwIfAborted();
     result.skipReason = error instanceof RestorePointSkip ? error.reason : skipReason(error);
     return result;
