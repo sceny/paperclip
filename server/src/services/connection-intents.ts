@@ -1183,13 +1183,20 @@ export function connectionIntentService(db: Db) {
     // Controller-only entry point. Runtime tokens still require a running run.
     requestForRunAuthFailure: async (runId: string) => {
       const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
-      if (!run || run.status !== "failed" || !isAiAuthenticationRepairable(run) || !run.responsibleUserId) return null;
-      const context = await loadRunContext({ sub: run.agentId, company_id: run.companyId, run_id: run.id, responsible_user_id: run.responsibleUserId }, true);
-      const [latest] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
-        eq(heartbeatRuns.companyId, run.companyId),
-        sql`coalesce(${heartbeatRuns.contextSnapshot}->>'issueId', ${heartbeatRuns.contextSnapshot}->>'taskId', ${heartbeatRuns.nativeIssueId}::text) = ${context.issue.id}`,
-      )).orderBy(desc(heartbeatRuns.createdAt)).limit(1);
-      if (latest?.id !== run.id) return null;
+      if (!run || run.status !== "failed" || !isAiAuthenticationRepairable(run)) return null;
+      const snapshot = record(run.contextSnapshot);
+      const issueId = text(snapshot?.issueId) ?? text(snapshot?.taskId) ?? run.nativeIssueId;
+      // Runs without a task cannot carry a card, but the stored sign-in is still dead.
+      const context = issueId && run.responsibleUserId
+        ? await loadRunContext({ sub: run.agentId, company_id: run.companyId, run_id: run.id, responsible_user_id: run.responsibleUserId }, true)
+        : null;
+      if (context) {
+        const [latest] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.companyId, run.companyId),
+          sql`coalesce(${heartbeatRuns.contextSnapshot}->>'issueId', ${heartbeatRuns.contextSnapshot}->>'taskId', ${heartbeatRuns.nativeIssueId}::text) = ${context.issue.id}`,
+        )).orderBy(desc(heartbeatRuns.createdAt)).limit(1);
+        if (latest?.id !== run.id) return null;
+      }
       const [agent] = await db.select().from(agents).where(and(eq(agents.id, run.agentId), eq(agents.companyId, run.companyId)));
       if (!agent) return null;
       const saved = aiConnectionBindingSchema.safeParse(agent.runtimeConfig.aiConnection).data;
@@ -1205,7 +1212,7 @@ export function connectionIntentService(db: Db) {
           runStartedAt: run.startedAt ?? run.createdAt,
           attribution: attribution as unknown as AiConnectionAttribution & { identity: string } });
       }
-      return requestWithContext(context, binding.provider, { purpose: "ai" });
+      return context ? requestWithContext(context, binding.provider, { purpose: "ai" }) : null;
     },
     loadIntent,
     setupOptions,

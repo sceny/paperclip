@@ -366,6 +366,10 @@ const ACPX_AUTH_REQUIRED_ERROR_CODE = "acpx_auth_required";
  */
 const CLAUDE_AUTH_REQUIRED_ERROR_CODE = "claude_auth_required";
 
+const GENERIC_TERMINAL_ACCESS_FAILURE = "ACP agent reported a terminal access failure.";
+const CLAUDE_SIGN_IN_AGAIN_MESSAGE =
+  "Claude sign-in expired or was rejected. Sign in again: open the agent's AI connection and choose Reconnect.";
+
 /**
  * Translate the generic acpx auth-required code into the Claude-specific code at
  * the claude-local boundary. The shared acpx engine reports the generic
@@ -379,12 +383,36 @@ export function mapClaudeAcpAuthErrorCode(
   result: AdapterExecutionResult,
 ): AdapterExecutionResult {
   if (result.errorCode !== ACPX_AUTH_REQUIRED_ERROR_CODE) return result;
+  const rewrite = (value: unknown) => (value === GENERIC_TERMINAL_ACCESS_FAILURE ? CLAUDE_SIGN_IN_AGAIN_MESSAGE : value);
   return {
     ...result,
     errorCode: CLAUDE_AUTH_REQUIRED_ERROR_CODE,
-    ...(result.errorMessage === "ACP agent reported a terminal access failure."
-      ? { errorMessage: "Claude sign-in failed. Sign in again and try again." }
-      : {}),
+    errorMessage: rewrite(result.errorMessage) as typeof result.errorMessage,
+    ...(result.summary !== undefined ? { summary: rewrite(result.summary) as typeof result.summary } : {}),
+  };
+}
+
+// The bridge ends an expired-sign-in turn with only this text and no typed
+// access failure, so the shared engine reports a plain `acpx_turn_failed`.
+// Match the whole message: a looser auth-word test gives false sign-in prompts.
+const CLAUDE_ACP_AUTH_REQUIRED_TURN_MESSAGE = /^\s*authentication required\.?\s*$/i;
+
+/**
+ * Promote a failed turn whose terminal message is exactly the bridge's
+ * "Authentication required" text to the generic auth code, so the Claude
+ * mapping and the reconnect path treat it as an expired sign-in.
+ */
+export function promoteClaudeAcpTerminalAuthFailure(
+  result: AdapterExecutionResult,
+): AdapterExecutionResult {
+  if (result.errorCode !== "acpx_turn_failed") return result;
+  if (!CLAUDE_ACP_AUTH_REQUIRED_TURN_MESSAGE.test(result.errorMessage ?? "")) return result;
+  const stopReason = result.resultJson?.stopReason;
+  if (typeof stopReason === "string" && !CLAUDE_ACP_AUTH_REQUIRED_TURN_MESSAGE.test(stopReason)) return result;
+  return {
+    ...result,
+    errorCode: ACPX_AUTH_REQUIRED_ERROR_CODE,
+    errorMeta: { ...result.errorMeta, category: "auth" },
   };
 }
 
@@ -405,7 +433,7 @@ export function createClaudeAcpExecutor(options: ClaudeAcpExecutorOptions = {}):
       ...ctx,
       config: buildClaudeAcpConfig(ctx.config, target?.kind === "remote" ? {} : process.env),
     });
-    return mapClaudeAcpAuthErrorCode(result);
+    return mapClaudeAcpAuthErrorCode(promoteClaudeAcpTerminalAuthFailure(result));
   };
 }
 
