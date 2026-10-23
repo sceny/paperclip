@@ -508,6 +508,7 @@ import {
 
 import { resolveAndRetainRunTrustPreset } from "./run-trust-preset.js";
 
+import { effectiveProjectWorkspacePolicy } from "./project-workspace-provider.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 
 import { computeTaskDrain, applyTaskDrain, startTaskDrain, stopTaskDrain, readTaskDrain } from "./task-admission.js";
@@ -2208,19 +2209,6 @@ export function heartbeatService(
       const [taskWorkspaceIntentRow] = issueId && !externalProvider ? await db.select({ intent: issues.workspaceSelection }).from(issues)
         .where(and(eq(issues.id, issueId), eq(issues.companyId, agent.companyId))) : [];
       const freshWorkspace = await readFreshWorkspaceReadiness(db, run);
-      const runtimeWorkspaceSelectionEnabled = !externalProvider && (freshWorkspace?.mode === "fresh_isolated_workspace" || taskWorkspaceRuntimeSelectionEnabled({ legacyUiEnabled: isolatedWorkspacesEnabled, hasTypedSelection: Boolean(taskWorkspaceIntentRow?.intent), hasBinding: Boolean(issueContext?.executionWorkspaceId) }));
-      const parsedIssueExecutionWorkspaceSettings =
-        parseIssueExecutionWorkspaceSettings(
-          issueContext?.executionWorkspaceSettings,
-        );
-      const issueExecutionWorkspaceSettings = runtimeWorkspaceSelectionEnabled
-        ? parsedIssueExecutionWorkspaceSettings
-        : null;
-      const environmentExecutionWorkspaceSettings =
-        selectEnvironmentExecutionWorkspaceSettings(
-          parsedIssueExecutionWorkspaceSettings,
-          runtimeWorkspaceSelectionEnabled,
-        );
       const contextProjectId = readNonEmptyString(context.projectId);
       const boundSourceWorkspace = !externalProvider && issueContext?.executionWorkspaceId
         ? await executionWorkspacesSvc.getStoredById(agent.companyId, issueContext.executionWorkspaceId) : null;
@@ -2242,6 +2230,9 @@ export function heartbeatService(
                       or nullif(btrim(${projectWorkspaces.repoUrl}), '') is not null)`,
                   )),
               ).mapWith(Boolean),
+              hasGitSource: exists(db.select({ id: projectWorkspaces.id }).from(projectWorkspaces)
+                .where(and(eq(projectWorkspaces.projectId, projects.id), eq(projectWorkspaces.companyId, agent.companyId),
+                  sql`nullif(btrim(${projectWorkspaces.repoUrl}), '') is not null`))).mapWith(Boolean),
               env: projects.env,
               updatedAt: projects.updatedAt,
             })
@@ -2377,21 +2368,33 @@ export function heartbeatService(
         !boundSourceWorkspace && !taskWorkspaceIntentRow?.intent && !issueContext?.projectWorkspaceId
           ? taskProjectContext : null
       );
-      const parsedProjectExecutionWorkspacePolicy =
-        parseProjectExecutionWorkspacePolicy(
-          workspacePolicyContext?.executionWorkspacePolicy,
-        );
+      const parsedProjectExecutionWorkspacePolicy = workspacePolicyContext && !boundSourceWorkspace
+        ? await effectiveProjectWorkspacePolicy(db, agent.companyId, workspacePolicyContext.executionWorkspacePolicy, workspacePolicyContext.hasGitSource)
+        : parseProjectExecutionWorkspacePolicy(workspacePolicyContext?.executionWorkspacePolicy);
       const projectExecutionWorkspacePolicy =
         applyDefaultIsolatedExecutionWorkspacePolicy({
           projectPolicy: gateProjectExecutionWorkspacePolicy(
             parsedProjectExecutionWorkspacePolicy,
-            isolatedWorkspacesEnabled,
+            isolatedWorkspacesEnabled || Boolean(parsedProjectExecutionWorkspacePolicy?.storageProviderPluginId),
           ),
           defaultIsolatedWorkspacesEnabled,
           // Projects without workspace configuration get a plain managed
           // directory. The operator default cannot turn it into a worktree.
           hasProjectWorkspace: workspaceProjectContext?.hasWorkspace ?? false,
         });
+      const runtimeWorkspaceSelectionEnabled = !externalProvider && (freshWorkspace?.mode === "fresh_isolated_workspace" || taskWorkspaceRuntimeSelectionEnabled({ legacyUiEnabled: isolatedWorkspacesEnabled || Boolean(projectExecutionWorkspacePolicy?.storageProviderPluginId), hasTypedSelection: Boolean(taskWorkspaceIntentRow?.intent), hasBinding: Boolean(issueContext?.executionWorkspaceId) }));
+      const parsedIssueExecutionWorkspaceSettings =
+        parseIssueExecutionWorkspaceSettings(
+          issueContext?.executionWorkspaceSettings,
+        );
+      const issueExecutionWorkspaceSettings = runtimeWorkspaceSelectionEnabled
+        ? parsedIssueExecutionWorkspaceSettings
+        : null;
+      const environmentExecutionWorkspaceSettings =
+        selectEnvironmentExecutionWorkspaceSettings(
+          parsedIssueExecutionWorkspaceSettings,
+          runtimeWorkspaceSelectionEnabled,
+        );
       const retainedTrust = await resolveAndRetainRunTrustPreset(db, {
         companyId: agent.companyId,
         agentId: agent.id,

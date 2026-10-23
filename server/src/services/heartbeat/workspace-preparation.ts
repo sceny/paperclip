@@ -27,7 +27,7 @@ import path from "node:path";
 import { CONTROLLER_PROVISION_COPY_ONLY, workspaceRequiresCopyOnlyProvisioning } from "../workspace-host-provision.js";
 import { and, asc, eq } from "drizzle-orm";
 import { type ExecutionWorkspace } from "@paperclipai/shared";
-import { heartbeatRuns, issues, projects, projectWorkspaces } from "@paperclipai/db";
+import { heartbeatRuns, issues, projectWorkspaces } from "@paperclipai/db";
 import { getStartupTracer } from "../../instrumentation.js";
 import { createHostDuplexObservabilityRecorder } from "../duplex-observability-recorder.js";
 import { incrementToolRuntimeMetricCounter } from "../tool-runtime-metrics.js";
@@ -330,6 +330,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
           useProjectWorkspace:
             requestedExecutionWorkspaceMode !== "agent_default",
           configuredCwd: readNonEmptyString(mergedConfig.cwd),
+          storageProviderPluginId: projectExecutionWorkspacePolicy?.storageProviderPluginId ?? null,
           anchorWorkspace: !pluginTaskWorkspace && requestedShouldReuseExisting && reusableExistingExecutionWorkspace?.strategyType === "git_worktree"
             ? await resolveReusedGitWorkspaceAnchor({
                 agent,
@@ -375,14 +376,10 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
   }));
   const hostProvisionDriver = selectedEnvironmentForConfig?.driver ?? lowTrustPreflightEnvironmentDriver;
   if (fresh && !isDotRun) {
-    const [project] = resolvedWorkspace.projectId ? await db.select({
-      policy: projects.executionWorkspacePolicy,
-    }).from(projects).where(and(eq(projects.id, resolvedWorkspace.projectId),
-      eq(projects.companyId, agent.companyId))) : [];
     const sourceWorkspace = reusableExistingExecutionWorkspace ?? existingExecutionWorkspace;
     if (sourceWorkspace?.providerType === "plugin" ||
         readWorkspaceProviderBinding(sourceWorkspace?.metadata) ||
-        project?.policy?.storageProviderPluginId) {
+        (resolvedWorkspace.workspaceId && projectExecutionWorkspacePolicy?.storageProviderPluginId)) {
       throw new WorkspaceValidationFailure("A fresh attempt is unavailable for this workspace storage provider. The existing workspace is retained.", {
         reason: "fresh_workspace_storage_unsupported",
       });
@@ -392,6 +389,7 @@ async function prepareHeartbeatWorkspaceLocked(db: Db, input: HeartbeatWorkspace
     companyId: agent.companyId, projectId: resolvedWorkspace.projectId, projectWorkspaceId: resolvedWorkspace.workspaceId,
     issueId, runId: run.id, agentId: agent.id, responsibleUserId,
     existingWorkspaceId: reusableExistingExecutionWorkspace?.id ?? issueRef?.executionWorkspaceId ?? null,
+    selectedProviderPluginId: projectExecutionWorkspacePolicy?.storageProviderPluginId ?? null,
     mode: requestedExecutionWorkspaceMode,
     strategy: resolveEffectiveWorkspaceStrategyType(requestedExecutionWorkspaceMode, mergedConfig),
     branchMode: typeof parseObject(mergedConfig.workspaceStrategy).existingBranch === "string" ? "existing" : "create",

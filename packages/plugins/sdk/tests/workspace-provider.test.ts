@@ -103,6 +103,13 @@ describe("workspace provider SDK", () => {
       resourceLifecycle: ["project"],
     };
     expect(pluginManifestV1Schema.safeParse(manifest).success).toBe(true);
+    const withDefault = { ...manifest, workspaceProvider: { ...manifest.workspaceProvider,
+      defaultForProjects: { mode: "isolated_workspace", strategy: "git_worktree" } } };
+    expect(pluginManifestV1Schema.parse(withDefault).workspaceProvider?.defaultForProjects).toEqual({
+      mode: "isolated_workspace", strategy: "git_worktree",
+    });
+    expect(pluginManifestV1Schema.safeParse({ ...withDefault, workspaceProvider: { ...withDefault.workspaceProvider,
+      defaultForProjects: { mode: "shared_workspace", strategy: "git_worktree" } } }).success).toBe(false);
     expect(
       pluginManifestV1Schema.safeParse({
         ...manifest,

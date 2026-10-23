@@ -793,6 +793,10 @@ export const pluginManifestV1Schema = z.object({
   workspaceProvider: z.object({
     modes: z.array(z.enum(["shared_workspace", "isolated_workspace", "operator_branch"])).min(1).max(3),
     strategies: z.array(z.enum(["project_primary", "git_worktree"])).min(1).max(2),
+    defaultForProjects: z.object({
+      mode: z.enum(["shared_workspace", "isolated_workspace", "operator_branch"]),
+      strategy: z.enum(["project_primary", "git_worktree"]),
+    }).strict().optional(),
   }).strict().optional(),
   resourceLifecycle: z.array(z.enum(["agent", "project", "agent_runtime"])).min(1).max(3).optional(),
   aiConnectionRouter: z.object({ name: z.string().trim().min(1).max(100), description: z.string().trim().min(1).max(500) }).strict().optional(),
@@ -825,6 +829,10 @@ export const pluginManifestV1Schema = z.object({
 
   if (manifest.workspaceProvider && (!manifest.capabilities.includes("workspaces.manage") || !manifest.resourceLifecycle?.includes("project"))) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["workspaceProvider"], message: "Workspace providers require workspaces.manage and project resource lifecycle" });
+  }
+  const defaults = manifest.workspaceProvider?.defaultForProjects;
+  if (defaults && (!manifest.workspaceProvider!.modes.includes(defaults.mode) || !manifest.workspaceProvider!.strategies.includes(defaults.strategy))) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["workspaceProvider", "defaultForProjects"], message: "Project defaults must use a declared workspace mode and strategy" });
   }
   if (manifest.resourceLifecycle && !manifest.capabilities.includes("events.subscribe")) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Resource lifecycle delivery requires events.subscribe", path: ["capabilities"] });

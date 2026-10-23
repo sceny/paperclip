@@ -1,3 +1,4 @@
+import { effectiveProjectWorkspacePolicy, isWorkspaceProvider } from "./project-workspace-provider.js";
 import { randomUUID, createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import {
@@ -56,9 +57,7 @@ async function provider(
     !plugin ||
     plugin.status !== "ready" ||
     settings?.enabled === false ||
-    !plugin.manifestJson.workspaceProvider ||
-    !plugin.manifestJson.capabilities.includes("workspaces.manage") ||
-    !plugin.manifestJson.resourceLifecycle?.includes("project") ||
+    !isWorkspaceProvider(plugin.manifestJson) ||
     !workers
       .getWorker(pluginId)
       ?.supportedMethods?.includes("workspaceOperation")
@@ -164,6 +163,7 @@ export async function preparePluginWorkspace(
     existingWorkspaceId: string | null;
     mode: string;
     strategy: string;
+    selectedProviderPluginId?: string | null;
     branchMode?: "create" | "existing";
     branchName?: string | null;
     baseRef?: string | null;
@@ -185,6 +185,7 @@ export async function preparePluginWorkspace(
     existing?.metadata?.workspaceProviderRemoval
   )
     throw conflict("Workspace storage is retired or awaiting cleanup");
+  if (!existing && (!input.projectId || !input.projectWorkspaceId)) return null;
   const saved = readWorkspaceProviderBinding(existing?.metadata);
   const mode = existing?.mode ?? input.mode,
     strategy = existing?.strategyType ?? input.strategy;
@@ -200,10 +201,10 @@ export async function preparePluginWorkspace(
           ),
         )
     : [];
-  const owner =
-    saved?.pluginId ??
-    existing?.metadata?.workspaceProviderOwner ??
-    project?.executionWorkspacePolicy?.storageProviderPluginId;
+  if (existing && existing.providerType !== "plugin" && !saved && !existing.metadata?.workspaceProviderOwner) return null;
+  const owner = saved?.pluginId ?? existing?.metadata?.workspaceProviderOwner ??
+    (!existing && input.selectedProviderPluginId !== undefined ? input.selectedProviderPluginId :
+      !existing && project ? (await effectiveProjectWorkspacePolicy(db, input.companyId, project.executionWorkspacePolicy, false))?.storageProviderPluginId : null);
   const pluginId = typeof owner === "string" ? owner : null;
   if (!pluginId) {
     if (existing?.providerType === "plugin")
@@ -341,7 +342,7 @@ export async function preparePluginWorkspace(
       if (
         !currentProject ||
         currentProject.archivedAt ||
-        currentProject.executionWorkspacePolicy?.storageProviderPluginId !==
+        (await effectiveProjectWorkspacePolicy(tx, input.companyId, currentProject.executionWorkspacePolicy, false))?.storageProviderPluginId !==
           pluginId ||
         !currentSource ||
         currentSource.repoUrl !== source.repoUrl ||

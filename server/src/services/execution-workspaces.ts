@@ -1,3 +1,4 @@
+import { effectiveProjectWorkspacePolicy } from "./project-workspace-provider.js";
 import { inspectPluginWorkspace, removePluginWorkspace, restorePluginWorkspace, type WorkspaceWorkers } from "./plugin-workspaces.js";
 import { acquireExecutionWorkspaceLifecycleLock, withExecutionWorkspaceLifecycleLock } from "./execution-workspace-lifecycle-lock.js";
 import { measureRunTransaction } from "./execution-transaction-timing.js";
@@ -5,6 +6,7 @@ import { measureRunPhase } from "./execution-preparation-timing.js";
 import { assertExecutionWorkspaceRecordAccess, assertTaskWorkspaceExecutionAccess, assertTaskWorkspaceSourceProjectAccess } from "./task-workspace-access.js";
 import { verifiedRecordedIsolatedRemoteSource, withIsolatedRepositorySourceLock } from "./isolated-remote-workspace-source.js";
 import { expireReconstructableGitWorkspace, hasPendingGitExpiration } from "./git-workspace-expiration.js";
+import type { StorageService } from "../storage/types.js";
 import { readGitCacheRestoration, restoreGitCacheBase, recoverGitCacheExpirationLocks, GitCacheRestorationFailure } from "./git-workspace-restoration.js";
 import { parseObject } from "../adapters/utils.js";
 import { resolveCoreTrustPreset } from "./trust-preset-resolver.js";
@@ -289,6 +291,7 @@ export type ExecutionWorkspaceServiceOptions = {
   gitCacheExpirationEnabled?: boolean;
   gitBaseExpirationEnabled?: boolean;
   gitCacheExpirationDryRun?: boolean;
+  gitRestorePoints?: { storage: StorageService; terminalDelayMs: number; keyDurable: boolean };
   terminalWorkspaceInspectionBackoffMs?: number;
   resolvePullRequestDetails?: PullRequestMergeDetailsResolver;
   now?: () => Date;
@@ -1404,6 +1407,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     companyId: string; issueId?: string | null; assigneeAgentId?: string | null;
     assigneeAdapterOverrides?: unknown; executionWorkspaceSettings?: unknown;
     executionWorkspacePolicy: unknown; typedSelection?: boolean; projectId?: string | null; executionPolicy?: unknown;
+    sourceWorkspaceId?: string | null; inheritProviderDefaults?: boolean;
   }, reader: Db | DbTransaction = db) {
     const [task] = input.issueId ? await reader.select().from(issues).where(and(
       eq(issues.id, input.issueId), eq(issues.companyId, input.companyId),
@@ -1413,12 +1417,21 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       .where(and(eq(agents.id, assigneeAgentId), eq(agents.companyId, input.companyId))) : [];
     const overrides = assigneeAgentId ? parseIssueAssigneeAdapterOverrides(task ? task.assigneeAdapterOverrides : input.assigneeAdapterOverrides) : null;
     const experimental = await instanceSettingsService(db).getExperimental();
+    const sourceId = input.sourceWorkspaceId ?? task?.projectWorkspaceId;
+    const sourceProjectId = input.projectId ?? task?.projectId;
+    const [source] = sourceId || sourceProjectId ? await reader.select({ repoUrl: projectWorkspaces.repoUrl }).from(projectWorkspaces).where(and(
+      eq(projectWorkspaces.companyId, input.companyId),
+      sourceId ? eq(projectWorkspaces.id, sourceId) : eq(projectWorkspaces.projectId, sourceProjectId!),
+    )).orderBy(desc(projectWorkspaces.isPrimary), asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id)).limit(1) : [];
+    const effectivePolicy = input.inheritProviderDefaults === false
+      ? parseProjectExecutionWorkspacePolicy(input.executionWorkspacePolicy)
+      : await effectiveProjectWorkspacePolicy(reader, input.companyId, input.executionWorkspacePolicy, Boolean(source?.repoUrl));
     const projectPolicy = applyDefaultIsolatedExecutionWorkspacePolicy({
-      projectPolicy: gateProjectExecutionWorkspacePolicy(parseProjectExecutionWorkspacePolicy(input.executionWorkspacePolicy), experimental.enableIsolatedWorkspaces),
+      projectPolicy: gateProjectExecutionWorkspacePolicy(effectivePolicy, experimental.enableIsolatedWorkspaces || Boolean(effectivePolicy?.storageProviderPluginId)),
       defaultIsolatedWorkspacesEnabled: experimental.enableIsolatedWorkspaces && experimental.enableIsolatedWorkspacesByDefault,
       hasProjectWorkspace: true,
     });
-    const settingsEnabled = experimental.enableIsolatedWorkspaces || input.typedSelection || task?.workspaceSelection || task?.executionWorkspaceId;
+    const settingsEnabled = experimental.enableIsolatedWorkspaces || Boolean(effectivePolicy?.storageProviderPluginId) || input.typedSelection || task?.workspaceSelection || task?.executionWorkspaceId;
     const issueSettings = settingsEnabled ? parseIssueExecutionWorkspaceSettings(input.executionWorkspaceSettings) : null;
     const projectId = task ? task.projectId : input.projectId;
     const [organization] = projectId ? await reader.select({ companyId: projects.companyId, executionWorkspacePolicy: projects.executionWorkspacePolicy })
@@ -1475,7 +1488,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         executionWorkspaceSettings = { ...parseObject(task.settings), mode };
       }
       await resolveSourceWorkspaceStrategy({ ...input, typedSelection: true,
-        executionWorkspaceSettings, executionWorkspacePolicy: source.executionWorkspacePolicy }, reader);
+        executionWorkspaceSettings, executionWorkspacePolicy: source.executionWorkspacePolicy, sourceWorkspaceId: source.id }, reader);
       await assertTaskWorkspaceSourceProjectAccess(reader, input.actor, input.companyId, source.projectId);
       return { executionWorkspaceId: null, projectWorkspaceId: source.id, executionWorkspacePreference: null,
         executionWorkspaceSettings };
@@ -1565,7 +1578,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
             eq(projectWorkspaces.companyId, input.companyId), eq(projectWorkspaces.id, patch.projectWorkspaceId!),
           ));
         const { strategy, config } = await resolveSourceWorkspaceConfiguration({ ...input, typedSelection: true,
-          executionWorkspacePolicy: source?.policy, executionWorkspaceSettings: patch.executionWorkspaceSettings }, tx);
+          executionWorkspacePolicy: source?.policy, executionWorkspaceSettings: patch.executionWorkspaceSettings, sourceWorkspaceId: patch.projectWorkspaceId }, tx);
         if (strategy === "git_worktree") {
           const workspaceStrategy = { ...parseObject(config.workspaceStrategy), type: "git_worktree",
             existingBranch: null, branchTemplate: "retry-{{issue.id}}" };
@@ -1634,7 +1647,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
     if (!sourceProject) throw notFound("Workspace source is unavailable or inaccessible");
     await resolveSourceWorkspaceStrategy({ companyId: task.companyId, issueId: task.id,
       executionWorkspaceSettings: task.executionWorkspaceSettings,
-      executionWorkspacePolicy: sourceProject.executionWorkspacePolicy }, tx);
+      executionWorkspacePolicy: sourceProject.executionWorkspacePolicy, sourceWorkspaceId: sourceId, inheritProviderDefaults: !workspace }, tx);
   }
 
   async function prepareTaskWorkspaceUpdate(input: {
@@ -3343,6 +3356,11 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           const expiration = await expireReconstructableGitWorkspace(db, workspace, {
             dryRun: opts.gitCacheExpirationDryRun ?? false, expireBase: opts.gitBaseExpirationEnabled ?? false,
             now: now(), signal, beforeDelete: opts.beforeTerminalWorkspaceCleanup,
+            restorePoint: opts.gitRestorePoints ? {
+              storage: opts.gitRestorePoints.storage,
+              notBefore: new Date(latestTerminalAt + opts.gitRestorePoints.terminalDelayMs),
+              keyDurable: opts.gitRestorePoints.keyDurable,
+            } : undefined,
           });
           const expirationDueAt = now().getTime() + 60 * 60 * 1000;
           terminalWorkspaceDeadlines.set(workspace.id,
@@ -3988,6 +4006,17 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
                 .returning({ id: executionWorkspaces.id });
               if (updated.length !== 1) throw new GitCacheRestorationFailure();
               nextMetadata.gitCacheRestoration = { ...currentRecipe as Record<string, unknown>, contentsRestoredAt: at };
+            },
+            persistRestorePointAppliedAt: async at => {
+              const currentRecipe = nextMetadata.gitCacheRestoration as Record<string, unknown>;
+              const appliedRecipe = { ...currentRecipe, restorePoint: { ...currentRecipe.restorePoint as Record<string, unknown>, appliedAt: at } };
+              const updated = await db.update(executionWorkspaces).set({
+                metadata: sql`jsonb_set(${executionWorkspaces.metadata}, '{gitCacheRestoration}', ${JSON.stringify(appliedRecipe)}::jsonb)`,
+              }).where(and(eq(executionWorkspaces.id, row.id), eq(executionWorkspaces.companyId, row.companyId),
+                sql`${executionWorkspaces.metadata}->'gitCacheRestoration' = ${JSON.stringify(currentRecipe)}::jsonb`))
+                .returning({ id: executionWorkspaces.id });
+              if (updated.length !== 1) throw new GitCacheRestorationFailure();
+              nextMetadata.gitCacheRestoration = appliedRecipe;
             },
             prepareRestoredLocalSource: async sourceCwd => {
               const sourceIdentity = await fs.realpath(sourceCwd);

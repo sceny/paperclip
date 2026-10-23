@@ -32,6 +32,11 @@ export { projectAccessMembers } from "./project_access_members.js";
 export { documentMemberships } from "./document_memberships.js";
 export { projectWorkspaces } from "./project_workspaces.js";
 export { executionWorkspaces } from "./execution_workspaces.js";
+export {
+  executionWorkspaceRestorePoints,
+  EXECUTION_WORKSPACE_RESTORE_POINT_STATUSES,
+  type ExecutionWorkspaceRestorePointStatus,
+} from "./execution_workspace_restore_points.js";
 export { executionWorkspaceRuntimeLeases } from "./execution_workspace_runtime_leases.js";
 export { environments } from "./environments.js";
 export { environmentLeases } from "./environment_leases.js";
