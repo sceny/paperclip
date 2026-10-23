@@ -7,7 +7,9 @@ import { assertExecutionWorkspaceRecordAccess, assertTaskWorkspaceExecutionAcces
 import { verifiedRecordedIsolatedRemoteSource, withIsolatedRepositorySourceLock } from "./isolated-remote-workspace-source.js";
 import { expireReconstructableGitWorkspace, gitWorkspaceLastActivityAt, hasPendingGitExpiration } from "./git-workspace-expiration.js";
 import type { StorageService } from "../storage/types.js";
-import { readGitCacheRestoration, restoreGitCacheBase, recoverGitCacheExpirationLocks, GitCacheRestorationFailure } from "./git-workspace-restoration.js";
+import { readGitCacheRestoration, restoreGitCacheBase, recoverGitCacheExpirationLocks, GitCacheRestorationFailure, gitRestorePointExpired } from "./git-workspace-restoration.js";
+
+export const GIT_RESTORE_POINT_EXPIRED_WARNING = "The saved state of this workspace expired, so it was reopened as a fresh workspace on its branch. Unpushed and uncommitted work from before it was cleaned up is no longer available.";
 import { parseObject } from "../adapters/utils.js";
 import { resolveCoreTrustPreset } from "./trust-preset-resolver.js";
 import { CONTROLLER_PROVISION_COPY_ONLY, workspaceRequiresCopyOnlyProvisioning } from "./workspace-host-provision.js";
@@ -290,7 +292,7 @@ export type ReopenClosedIsolatedExecutionWorkspaceResult =
   // `generation` is the lifecycle generation the reopen published the active row
   // at. It owns the reopen-pending flag. A later clear must present this same
   // generation, so a stale actor never clears a newer reopen's fence.
-  | { ok: true; workspace: ExecutionWorkspace; reopened: true; generation: number }
+  | { ok: true; workspace: ExecutionWorkspace; reopened: true; generation: number; warning?: string }
   | { ok: true; workspace: ExecutionWorkspace; reopened: false; generation: number }
   | { ok: false; code: "not_reopenable" | "rebuild_failed"; message: string };
 
@@ -3847,6 +3849,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       let recipe: ReturnType<typeof readGitCacheRestoration>;
       try { recipe = readGitCacheRestoration(snapshot); }
       catch { return { ok: false, code: "rebuild_failed", message: new GitCacheRestorationFailure().message }; }
+      const freshStart = recipe !== null && isClosedExecutionWorkspaceStatus(snapshot.status) && gitRestorePointExpired(recipe);
       const gitAuth = createGitRemoteAuthProvider(db, snapshot.companyId, { issueId: issue.id });
       const [
         { ensurePersistedExecutionWorkspaceAvailable },
@@ -3877,7 +3880,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       let resolvedBaseCwd: string | null;
       try {
         resolvedBaseCwd = recipe && isClosedExecutionWorkspaceStatus(snapshot.status)
-          ? await restoreGitCacheBase(snapshot, recipe, gitAuth)
+          ? await restoreGitCacheBase(snapshot, recipe, gitAuth, undefined, { freshStart })
           : await verifiedRecordedIsolatedRemoteSource(snapshot) ?? projectWorkspace?.cwd ?? null;
       } catch {
         return { ok: false, code: "rebuild_failed", message: recipe
@@ -3996,6 +3999,27 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           row.metadata as Record<string, unknown> | null,
         );
         delete nextMetadata.gitCacheExpiration;
+        const rebuildMetadata = { ...(row.metadata as Record<string, unknown> | null ?? {}) };
+        if (freshStart) {
+          delete rebuildMetadata.gitCacheRestoration;
+          delete rebuildMetadata.gitCacheExpiration;
+        }
+        const freshCheckouts = freshStart && Boolean(row.projectId) && (recipe?.contents?.checkouts.length ?? 0) > 0;
+        const prepareFreshProjectRepositories = async (targetCwd: string) => {
+          const { prepareProjectRepositoryWorkspaces } = await import("./heartbeat/workspaces.js");
+          const repositoryRows = await tx.select().from(projectWorkspaces).where(and(
+            eq(projectWorkspaces.companyId, row.companyId), eq(projectWorkspaces.projectId, row.projectId!),
+          )).orderBy(asc(projectWorkspaces.createdAt), asc(projectWorkspaces.id));
+          await prepareProjectRepositoryWorkspaces({ cwd: targetCwd, anchorRepoUrl: row.repoUrl, workspaces: repositoryRows,
+            resolveGitAuth: gitAuth,
+            prepareLocalSource: async sourceCwd => {
+              const sourceIdentity = await fs.realpath(sourceCwd);
+              return async () => {
+                if (await fs.realpath(sourceCwd) !== sourceIdentity) throw forbidden("Execution workspace copy identity changed during reopen");
+                await assertTaskWorkspaceExecutionAccess(tx, input.authorizationActor, issue.companyId, { issueId: issue.id, workspaceId: row.id });
+              };
+            } });
+        };
         const recorder = workspaceOperationService(db).createRecorder({
           companyId: row.companyId,
           executionWorkspaceId: row.id,
@@ -4069,7 +4093,10 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
             },
             skipHostProvision: trust.kind === "low_trust_review" || copyOnlyProvisioning,
             beforeSourceCopy: verifyCopyIdentity,
-            afterSourceCopy: verifyCopyIdentity,
+            afterSourceCopy: freshCheckouts ? async (sourceCwd: string, targetCwd: string) => {
+              await verifyCopyIdentity?.(sourceCwd, targetCwd);
+              await prepareFreshProjectRepositories(targetCwd);
+            } : verifyCopyIdentity,
             base: {
               baseCwd: resolvedBaseCwd ?? row.cwd ?? "",
               source: "task_session",
@@ -4089,7 +4116,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
               repoUrl: row.repoUrl,
               baseRef: row.baseRef,
               branchName: row.branchName,
-              metadata: row.metadata as Record<string, unknown> | null,
+              metadata: freshStart ? rebuildMetadata : row.metadata as Record<string, unknown> | null,
               config: {
                 ...config,
                 provisionCommand:
@@ -4173,7 +4200,8 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         // Keep the refresh guard after reopening so normal preparation cannot
         // advance the saved checkout to upstream HEAD. Its intact branch may now
         // receive newer task commits; the next expiration records a fresh recipe.
-        if (recipe) nextMetadata.gitCacheRestoration = { ...nextMetadata.gitCacheRestoration as Record<string, unknown>, restoredAt: now().toISOString() };
+        if (freshStart) delete nextMetadata.gitCacheRestoration;
+        else if (recipe) nextMetadata.gitCacheRestoration = { ...nextMetadata.gitCacheRestoration as Record<string, unknown>, restoredAt: now().toISOString() };
         const activeMetadata = setMetadataReopenPendingConsumption(nextMetadata, now());
         await measureRunPhase("workspace.notification", () => notifyTerminalWorkspaceWork(tx, `workspace:${row.id}`));
         const activeRow = await tx
@@ -4218,9 +4246,15 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
             issueId: issue.id,
             outcome: "reopened",
             generation: nextGeneration,
+            ...(freshStart ? { restorePointExpired: true, warning: GIT_RESTORE_POINT_EXPIRED_WARNING } : {}),
           },
         });
-        return { ok: true, reopened: true, workspace: toExecutionWorkspace(activeRow), generation: nextGeneration };
+        if (freshStart) {
+          const { issueService } = await import("./issues.js");
+          await issueService(db).addComment(issue.id, GIT_RESTORE_POINT_EXPIRED_WARNING, {}, { authorType: "system" }, tx);
+        }
+        return { ok: true, reopened: true, workspace: toExecutionWorkspace(activeRow), generation: nextGeneration,
+          ...(freshStart ? { warning: GIT_RESTORE_POINT_EXPIRED_WARNING } : {}) };
       }).catch((error): ReopenClosedIsolatedExecutionWorkspaceResult => {
         logger.warn({ error, executionWorkspaceId: snapshot.id }, "Execution workspace reopen failed");
         return { ok: false, code: "rebuild_failed", message: recipe ? new GitCacheRestorationFailure().message : "Failed to rebuild the execution workspace" };
