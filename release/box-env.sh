@@ -8,4 +8,4 @@ export REBUILD_GATE_RUNNER="/home/jca/paperclip-wt-fork-tools/release/box-gate-r
 export GIT_CONFIG_COUNT=2
 export GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0=
 export GIT_CONFIG_KEY_1=credential.helper
-export GIT_CONFIG_VALUE_1='!/home/jca/.local/share/mise/installs/gh/latest/gh_2.102.0_linux_amd64/bin/gh auth git-credential'
+export GIT_CONFIG_VALUE_1='!/home/jca/.local/share/mise/installs/gh/latest/gh_*/bin/gh auth git-credential'

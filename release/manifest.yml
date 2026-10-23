@@ -26,3 +26,11 @@ branches:
     kind: upstream-request
     parent: PAP-59
     pr:
+  # Beta port: fix/claude-login-refresh (the request branch, on newer upstream) conflicts with
+  # fix/ai-reconnect-missing-credential in server/src/services/ai-connections.ts when picked onto the beta.
+  # Same 3 commits, context adapted to the beta. The pull request stays on fix/claude-login-refresh.
+  - branch: beta-port/fix/claude-login-refresh
+    kind: upstream-request
+    parent: PAP-85
+    pr:
+    dependsOn: [fix/ai-reconnect-missing-credential]
