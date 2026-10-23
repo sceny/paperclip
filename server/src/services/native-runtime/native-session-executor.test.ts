@@ -79,7 +79,7 @@ import {
 import { nativeRuntimeContextFixture } from "./runtime-context.test-fixture.js";
 import { nativeToolContractFingerprintForTarget } from "./native-session-resume.js";
 import * as nativeSessionResume from "./native-session-resume.js";
-import { buildNativeHeartbeatPreparationSpans } from "./native-run-trace.js";
+import { buildNativeHeartbeatPreparationSpans, createNativeRunTrace } from "./native-run-trace.js";
 import { NativeRunnerOwnershipUnverifiedError } from "./native-runner-ownership.js";
 import type { AdapterRuntimeEvent } from "../../adapters/index.js";
 import type { AdapterUsageCheckpoint } from "@paperclipai/adapter-utils";
@@ -3503,6 +3503,8 @@ describe("retained native cleanup activation", () => {
     "legacy_bad_proof",
     "legacy_extra_attempt",
     "legacy_activation",
+    "released_identity",
+    "released_identity_unproven",
   ])("preserves exact original evidence for %s", async (mode) => {
     const directory = await mkdtemp(
       join(tmpdir(), "paperclip-maintenance-activation-"),
@@ -3745,8 +3747,17 @@ describe("retained native cleanup activation", () => {
       nativeSessionId: identity.normalizedSessionId,
       runnerInstanceId: identity.runnerInstanceId,
       finishedAt: new Date(),
-      processPid: mode.endsWith("live_owner") ? process.pid : 99_999_999,
-      processGroupId: mode.endsWith("live_owner") ? process.pid : 99_999_999,
+      processPid: mode.startsWith("released_identity")
+        ? null
+        : mode.endsWith("live_owner")
+          ? process.pid
+          : 99_999_999,
+      processGroupId: mode.startsWith("released_identity")
+        ? null
+        : mode.endsWith("live_owner")
+          ? process.pid
+          : 99_999_999,
+      processStartedAt: null,
       completionContractId: "contract",
       completionContractSha256: "sha",
       errorCode: mode === "provider_transport_failed" ? "provider_transport_failed" : "adapter_failed",
@@ -3770,6 +3781,7 @@ describe("retained native cleanup activation", () => {
       recoveryHistory: [],
     };
     let transactionOpen = false;
+    let stopReceiptRead = false;
     let releaseCommit!: () => void;
     const commitGate = new Promise<void>((release) => {
       releaseCommit = release;
@@ -3788,11 +3800,25 @@ describe("retained native cleanup activation", () => {
                 : table === nativeRunResults
                   ? [accepted]
                   : table === heartbeatRunEvents
-                    ? [identityRow]
+                    ? mode.startsWith("released_identity") && !stopReceiptRead
+                      ? ((stopReceiptRead = true),
+                        mode === "released_identity"
+                          ? [
+                              {
+                                eventType: "native.local_process_stopped",
+                                payload: {
+                                  processPid: 99_999_999,
+                                  processGroupId: 99_999_999,
+                                },
+                              },
+                            ]
+                          : [])
+                      : [identityRow]
                     : [];
           const query = {
             where: () => query,
             for: () => query,
+            orderBy: () => query,
             limit: async () => rows,
           };
           return query;
@@ -4603,6 +4629,7 @@ describe("retained native cleanup activation", () => {
         "bad_identity_hash",
         "foreign_semantic_scope",
         "wrong_provider_account",
+        "released_identity_unproven",
       ].includes(mode);
       const succeeds = [
         "digest_only_command",
@@ -4620,6 +4647,7 @@ describe("retained native cleanup activation", () => {
         "activation_commit_stalled",
         "empty_root",
         "distinct_provider_account",
+        "released_identity",
       ].includes(mode);
       expect(outcome.status).toBe(
         succeeds
@@ -11817,6 +11845,8 @@ describe("runnerd provider runtime wiring", () => {
     "live runner",
     "live group",
     "missing process identity",
+    "released process identity",
+    "released identity without stop receipt",
     "active prior run",
     "wrong checkpoint",
     "active goal",
@@ -11937,13 +11967,34 @@ describe("runnerd provider runtime wiring", () => {
                           }
                         : profile,
                     processPid:
-                      scenario === "missing process identity" ? null : 90000001,
-                    processGroupId: 90000001,
+                      scenario === "missing process identity" ||
+                      scenario.startsWith("released")
+                        ? null
+                        : 90000001,
+                    processGroupId: scenario.startsWith("released")
+                      ? null
+                      : 90000001,
                     contextSnapshot: {
                       paperclipEnvironment: { driver: "local" },
                     },
                   },
                 ]),
+              orderBy: () => ({
+                limit: () =>
+                  Promise.resolve(
+                    scenario === "released process identity"
+                      ? [
+                          {
+                            eventType: "native.local_process_stopped",
+                            payload: {
+                              processPid: 90000001,
+                              processGroupId: 90000001,
+                            },
+                          },
+                        ]
+                      : [],
+                  ),
+              }),
             }),
           }),
         }),
@@ -12043,6 +12094,7 @@ describe("runnerd provider runtime wiring", () => {
         state.createTransport.mockClear();
         const shouldRecover = [
           "quarantined",
+          "released process identity",
           "large control plane",
           "empty retry shell",
           "unsuspended current",
@@ -13231,8 +13283,10 @@ describe("runnerd provider runtime wiring", () => {
     }
   });
 
-  it.each(["fresh", "existing_state", "symlink_parent", "wrong_identity", "connected", "pending_turn", "remote_probe_failed", "backup_present"])(
-    "bootstraps only an untouched provider session in a resumed workspace lease: %s", async (scenario) => {
+  it.each(["resumed", "replacement"].flatMap((outcome) =>
+    ["fresh", "existing_state", "symlink_parent", "wrong_identity", "wrong_runner", "wrong_lease", "missing_control_plane", "connected", "committed_event", "committed_command", "pending_turn", "remote_probe_failed", "backup_present"]
+      .map((scenario) => ({ outcome, scenario }))))(
+    "bootstraps only an untouched provider session in a $outcome workspace lease: $scenario", async ({ outcome, scenario }) => {
     const remoteCwd = join(isolatedStateDirectory, "remote");
     const runtimeRoot = join(remoteCwd, ".paperclip-runtime", "paperclip-runner");
     await mkdir(runtimeRoot, { recursive: true });
@@ -13269,14 +13323,16 @@ describe("runnerd provider runtime wiring", () => {
     });
     const runtimeContext = nativeRuntimeContextFixture();
     const executionWithContext = { ...execution, runtimeContext };
+    const onTraceEvent = vi.fn(async (_event: AdapterRuntimeEvent) => undefined);
     const backend = await createRunnerdBackend({
       db: leaseDb(execution), execution: executionWithContext, runnerInstanceId: "runner-new-in-retained-workspace",
+      trace: createNativeRunTrace({ runId: execution.binding.runId, onEvent: onTraceEvent }),
       runnerIngressAuthorized: true,
       runnerExecutionTarget: {
         kind: "remote", transport: "sandbox", remoteCwd, environmentId: "environment",
         leaseId: "lease-resumed", providerKey: "daytona",
         effectiveCapabilities: { runnerWebSocketIngress: true },
-        sandboxLeaseAcquisition: { outcome: "resumed", providerLeaseId: "sandbox-retained" },
+        sandboxLeaseAcquisition: { outcome, providerLeaseId: "sandbox-acquired", reason: outcome === "replacement" ? "not_found" : undefined },
         runner: { execute: remoteExecute, syncIn },
       } as never,
     });
@@ -13289,16 +13345,30 @@ describe("runnerd provider runtime wiring", () => {
     await mkdir(join(options.stateDirectory!, "control-plane"), { recursive: true });
     await writeFile(join(options.stateDirectory!, "control-plane", "control-plane-state.json"), JSON.stringify({
       schema: "paperclip.runner.durable.control-plane-state.v1",
-      identity: { ...options.prpIdentity, ...(scenario === "wrong_identity" ? { runId: "other-run" } : {}) },
-      connectionCount: scenario === "connected" ? 1 : 0, committedEvents: [],
-      commands: [{ type: "run.prepare", status: "pending" }, { type: scenario === "pending_turn" ? "turn.start" : "session.open", status: "pending" }],
+      identity: { ...options.prpIdentity,
+        ...(scenario === "wrong_identity" ? { runId: "other-run" } : {}),
+        ...(scenario === "wrong_runner" ? { runnerInstanceId: "other-runner" } : {}),
+        ...(scenario === "wrong_lease" ? { environmentLeaseId: "other-lease" } : {}) },
+      connectionCount: scenario === "connected" ? 1 : 0,
+      committedEvents: scenario === "committed_event" ? [{ type: "session.opened" }] : [],
+      commands: [{ type: "run.prepare", status: scenario === "committed_command" ? "committed" : "pending" },
+        { type: scenario === "pending_turn" ? "turn.start" : "session.open", status: "pending" }],
     }));
+    if (scenario === "missing_control_plane") {
+      await rm(join(options.stateDirectory!, "control-plane", "control-plane-state.json"));
+    }
     if (scenario === "backup_present") {
       await mkdir(join(options.stateDirectory!, "failover-backups", "current"), { recursive: true });
       await writeFile(join(options.stateDirectory!, "failover-backups", "current", "manifest.json"), "{}");
     }
     if (scenario === "fresh") {
       await expect(options.prepareExternalRunnerState()).resolves.toBeUndefined();
+      expect(onTraceEvent).toHaveBeenCalledWith(expect.objectContaining({
+        payload: expect.objectContaining({
+          span: "sandbox.lease.acquisition",
+          stateSource: outcome === "replacement" ? "new_sandbox" : "sandbox_filesystem",
+        }),
+      }));
       expect(remoteExecute.mock.calls.some(([command]) => command.args?.[1]?.includes("install -d"))).toBe(false);
       expect(syncIn).not.toHaveBeenCalled();
       const claimCommand = remoteExecute.mock.calls.find(([command]) => command.args?.[2] === "paperclip-runner-claim-unstarted-session")![0];
@@ -13332,8 +13402,11 @@ describe("runnerd provider runtime wiring", () => {
       })]);
       expect(remoteExecute.mock.calls.filter(([command]) => command.args?.[2] === "paperclip-runner-claim-unstarted-session")).toHaveLength(1);
     } else {
-      await expect(options.prepareExternalRunnerState()).rejects.toThrow("runner_harness_state_mismatch");
+      await expect(options.prepareExternalRunnerState()).rejects.toThrow(
+        outcome === "replacement" ? "runner_harness_backup_unavailable" : "runner_harness_state_mismatch",
+      );
       expect(remoteExecute.mock.calls.some(([command]) => command.args?.[1]?.includes("install -d"))).toBe(false);
+      expect(syncIn).not.toHaveBeenCalled();
     }
   });
 
