@@ -146,8 +146,8 @@ returned when present. Percentages remain provider percentages: 0.5 means 0.5%,
 99.99 stays below exhaustion, and values above 100 remain visible.
 
 Capability means the provider has a probe implementation, not that every token
-has permission to read it. Claude `setup-token` credentials characterized in
-this repo request only `user:inference`; the provider can require `user:profile`
+has permission to read it. Claude `setup-token` credentials request only
+`user:inference`; the provider can require `user:profile`
 for [usage access](https://github.com/anthropics/claude-code/issues/13724).
 A 403 returns `permission_denied` with no limits, distinct from expired
 authentication or exhausted capacity. Minting another inference-only token
@@ -413,6 +413,22 @@ operator's existing login: copying a rotating refresh token would
 allow managed runs to invalidate credentials still used by legacy agents or the
 operator's terminal. The user completes browser sign-in, then clicks Connect.
 Grok retains its terminal sign-in flow until it has a local browser login runner.
+
+Claude sign-in runs `claude auth login`, not `claude setup-token`. A setup token is a
+single access token that expires after about eight hours and cannot be renewed. The
+login file instead holds an access token, a refresh token, an expiry, and the full
+scope set. Connect stores that document as the connection's `ai.credential` secret, and
+a run still receives only the access token (`CLAUDE_CODE_OAUTH_TOKEN`). When the access
+token is within two hours of expiry, the next credential read exchanges the refresh
+token on the server, under the company credential mutation lock and the same
+journal-before-save protocol Codex quota refresh uses, because the provider rotates the
+refresh token. The vault copy is the only copy: the attempt home is removed after
+Connect, so no CLI process competes for the rotating token. If the exchange fails
+transiently and the access token has not expired, the run proceeds with it. If the
+provider refuses the refresh token and the access token has expired, the grant becomes
+`needs_reauthorization` and the normal sign-in repair card appears. Connections saved
+before this change hold a plain token, keep working unchanged, and are renewed only by
+reconnecting. A macOS Keychain login also stores a plain token, so it is not renewable.
 
 Attempts reuse `adapter_auth_sessions`, binding company, owner, provider, access
 intent, reconnect target, and a 30-minute expiry. Validation and completion are
@@ -763,7 +779,7 @@ edits. Ending or excluding tracking does not cancel the provider subscription.
 Disconnecting a connection also does not prove that billing stopped, so the fee
 continues until explicitly ended or excluded.
 
-Claude setup tokens can lack profile permission. Grok plan observations currently
+Claude connections that hold a plain setup token can lack profile permission. Grok plan observations currently
 do not supply a verified billing identity. Such connections retain an unconfirmed
 identity and may need manual linking after a credential change. An unconfirmed
 identity requires a user-supplied price before contributing a monthly fee, so
