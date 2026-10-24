@@ -222,8 +222,9 @@ Git worktree of one shared clone per company, project and repository URL: the ma
 project checkout for that URL under the instance's `projects/` directory (the same clone
 that main task worktrees use when the repository is a task's primary source). Objects are
 stored once in that clone, so a new task adds only its working files. Repositories with a
-configured local folder are still seeded as independent copies, and existing standalone
-nested clones keep working unchanged; they are not migrated.
+configured local folder are still seeded as independent copies. Existing standalone
+nested clones keep working unchanged until the optional conversion below turns them into
+worktrees of the shared clone.
 
 Each nested worktree checks out its own branch, `paperclip/<id>/<branch>`, where `<id>`
 derives from the worktree path and `<branch>` is the remote's current default branch
@@ -258,6 +259,92 @@ registration of each of its nested worktrees and deletes their branches only whe
 commit is on a remote-tracking ref; an unpushed branch stays in the shared clone. Moving a
 nested worktree to `.paperclip-runtime/detached-repositories/` when its repository leaves
 the project repairs its registration.
+
+### Converting existing standalone nested clones
+
+Tasks prepared before nested worktrees existed still hold a full standalone clone in each
+`.paperclip-repositories/<name>-<key>` checkout, often of the same large repository many
+times over. With `PAPERCLIP_NESTED_CLONE_MIGRATION_ENABLED=true`, the terminal workspace
+reaper converts each such checkout in an open task into a worktree of the project's shared
+clone and deletes the standalone clone. It holds the source lock and workspace lifecycle
+lock that git cache expiration holds, the per-shared-clone lock that nested worktree
+creation holds, and the expiration lock files (`index.lock`, `HEAD.lock` and the current
+branch's ref lock) in the clone, so no run,
+expiration, reopen, restore or other conversion against the same shared clone can
+interleave. A checkout is converted only when:
+
+- no run, native finalization, environment lease or runtime service is still live for the
+  workspace, and it is not waiting for a reopen to be consumed (the issue may be open);
+- its name is the managed checkout name of one of the project's repository workspaces
+  (`unknown_managed_checkout` otherwise), that repository has no configured local folder
+  (`local_source_checkout`), and the clone's `origin` is exactly the repository URL
+  (`foreign_origin`);
+- the project has a verified shared clone for that URL (`no_shared_base`,
+  `shared_base_repo_mismatch`) whose local config runs no filters or commands
+  (`unsupported_base_git_config`);
+- the clone holds only branches, tags and `origin` remote-tracking refs, no stash
+  (`nested_clone_has_stash`; stashes are not converted, because `refs/stash` would be shared
+  by every worktree of the shared clone), no worktrees of its own, no custom hooks, no local
+  config beyond the stock keys, `origin` and branch tracking, no `info/exclude` pattern the
+  shared clone lacks (`unsupported_info_exclude`), no in-progress merge, rebase or similar
+  state, no hidden index flags, and no commit that only another branch's reflog holds
+  (`unique_branch_reflog_commits`);
+- nothing a restore point refuses (submodules, filtered paths, special files, untracked
+  nested repositories, oversized contents or history).
+
+The conversion fetches the shared clone, then brings the clone's history in under the
+checkout's own prefix: the current branch becomes `paperclip/<id>/<branch>` at the same
+commit, tracking `origin/<branch>` (or the branch's configured `origin` upstream); every
+other local branch whose tip the shared clone's remote-tracking refs do not contain becomes
+`paperclip/<id>/<branch>`, every such tag becomes `paperclip/<id>/tags/<tag>` at the
+tagged commit, and every such `origin` remote-tracking ref (for example one whose branch was
+deleted or force-pushed upstream) becomes `paperclip/<id>/remotes/origin/<branch>`. `<id>` derives from the final checkout path, so later expiration and release
+treat those branches exactly like a nested worktree's own branches: they block expiration
+until pushed or saved and are never deleted while unpushed. A restore point of the clone,
+captured against commits both repositories share and preserving those branch tips, its
+`HEAD` reflog and `ORIG_HEAD`, is imported into the shared clone. Other tasks' branches and
+worktrees are never touched; a name that already exists in the shared clone skips the
+checkout (`nested_clone_ref_conflict`).
+
+The new worktree is added at `<name>.clone-migrating` beside the clone, the restore point
+is applied (index, worktree changes, untracked and ignored files, file modes), the `HEAD`
+reflog and `ORIG_HEAD` are copied, and regenerable directories, untracked `.env` files and
+`.claude/settings.local.json` are moved in by rename. The two must then match exactly
+(HEAD, index, worktree, ignored files, modes, reflog, branch and every created ref). Any
+difference or failure before the swap moves the items back, removes the new worktree and
+the created branches, and leaves the clone untouched. The swap renames the clone to
+`<name>.clone-standalone`, moves the new worktree into `<name>` with `git worktree move`
+and runs `git worktree repair` in the shared clone. Then one database update records the
+worktree in a saved restoration recipe that lists the checkout, and the old clone is
+renamed to `<name>.clone-trash` and deleted.
+
+Before it changes the shared clone, the conversion records
+`nestedCloneMigrationPending.<name>` in workspace metadata (shared clone, HEAD, created
+refs, moved items and phase). The next pass uses it after a crash: before the swap it moves
+items back, removes the new worktree and the created branches, then converts again; once
+the clone has been renamed aside it finishes the swap and deletes the old clone, so work done
+in the converted checkout after a crash is kept. A state that matches neither (for example a
+new checkout created at `<name>` while the clone was aside) is left alone with
+`nested_migration_recovery_conflict`. The reaper also finishes a pending record after the
+workspace is archived; if the task worktree is already gone, it forgets the record, removes
+the stale registrations and deletes only created branches whose commits are on the remote.
+Expiration treats the `.clone-` names as unexplained
+files and keeps the workspace until the conversion settles. A dry run reports a pending
+record without acting on it.
+
+Each attempt logs `event: "execution_workspace.nested_clone_migration"` with the checkout
+name, outcome (`migrated`, `recovered`, `rolled_back`, `dry_run` or `skipped`), skip reason,
+new branch, candidate bytes (the clone's `.git`) and reclaimed bytes. A workspace is
+inspected again at most hourly, and a retry deadline it registered survives later sweeps
+during that hour. A retry deadline is registered only while a pending record
+exists or the skip comes from a live consumer, a busy lock or a changed workspace row; other
+skips, including a change caught by verification, wait for a later sweep. The reaper looks
+only at checkouts named after the project's configured repositories (plus pending records),
+never at arbitrary directories, and attempts at most 8 per workspace per sweep. Pending
+recoveries go first, and the rest rotate across sweeps. While a rotation has not yet visited
+every checkout it registers a retry deadline; after a full rotation without progress it waits
+for a later sweep, until a conversion succeeds or the set of candidate checkouts changes. `PAPERCLIP_NESTED_CLONE_MIGRATION_DRY_RUN=true` reports candidates
+without changing anything and registers no deadlines.
 
 Reopening the issue, or the next run that recreates the worktree, imports the bundle,
 re-adds the worktree at the saved commit, applies the restore point and verifies the

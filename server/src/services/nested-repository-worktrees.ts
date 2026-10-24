@@ -147,7 +147,7 @@ export async function withNestedRepositoryBaseLock<T>(base: string, action: () =
   }
 }
 
-async function removeStaleRegistrations(base: string, checkout: string) {
+export async function removeStaleNestedRegistrations(base: string, checkout: string) {
   const expected = path.join(checkout, ".git");
   const root = path.join(base, ".git", "worktrees");
   for (const admin of await fs.readdir(root).catch(() => [] as string[])) {
@@ -204,7 +204,7 @@ export async function addNestedRepositoryWorktree(input: {
       const { branch, start } = await resolveStartPoint(input.base, input.repoRef);
       if (!start) throw new Error("Repository has no commit to check out");
       const cwd = await canonicalPath(input.cwd);
-      await removeStaleRegistrations(input.base, cwd);
+      await removeStaleNestedRegistrations(input.base, cwd);
       await input.beforeAdd?.().catch((error: unknown) => { throw new NestedWorktreeAuthorizationFailure(error); });
       if (!branch) {
         await git(input.base, ["worktree", "add", "--quiet", "--detach", cwd, start], { timeout: NESTED_WORKTREE_GIT_TIMEOUT_MS });
@@ -241,7 +241,7 @@ export async function restoreNestedRepositoryWorktree(input: {
     const cwd = await canonicalPath(input.cwd);
     const prefix = await nestedWorktreeBranchPrefix(cwd);
     if (input.branchName && !input.branchName.startsWith(prefix)) throw new Error("unowned_nested_worktree_branch");
-    await removeStaleRegistrations(input.base, cwd);
+    await removeStaleNestedRegistrations(input.base, cwd);
     const existing = input.branchName
       ? (await git(input.base, ["rev-parse", "--verify", "-q", `refs/heads/${input.branchName}`]).catch(() => "")).trim() : "";
     if (existing && existing !== input.commit) throw new Error("nested_worktree_branch_moved");
@@ -262,7 +262,7 @@ export async function restoreNestedRepositoryWorktree(input: {
       await input.afterAdd(cwd);
     } catch (error) {
       await git(input.base, ["worktree", "remove", "--force", cwd]).catch(() => undefined);
-      await removeStaleRegistrations(input.base, cwd).catch(() => undefined);
+      await removeStaleNestedRegistrations(input.base, cwd).catch(() => undefined);
       if (input.branchName && !existing) {
         await git(input.base, ["update-ref", "-d", `refs/heads/${input.branchName}`, input.commit]).catch(() => undefined);
       }
@@ -310,7 +310,7 @@ export async function releaseNestedRepositoryWorktrees(worktrees: LinkedNestedCh
     try {
       await withNestedRepositoryBaseLock(worktree.base, async () => {
         if (!await missing(worktree.checkout)) return;
-        await removeStaleRegistrations(worktree.base, worktree.checkout);
+        await removeStaleNestedRegistrations(worktree.base, worktree.checkout);
         const refs = (await git(worktree.base, ["for-each-ref", "--format=%(objectname) %(refname)", `refs/heads/${worktree.branchPrefix}`]))
           .split("\n").map(line => line.trim().split(" ")).filter(([sha, ref]) => /^[a-f0-9]{40}$/.test(sha ?? "") && ref);
         const held = await checkedOutBranches(worktree.base);
@@ -330,4 +330,16 @@ export async function releaseNestedRepositoryWorktrees(worktrees: LinkedNestedCh
 
 export async function repairMovedNestedRepositoryWorktree(base: string, moved: string) {
   await withNestedRepositoryBaseLock(base, () => git(base, ["worktree", "repair", moved]));
+}
+
+export async function moveNestedRepositoryWorktree(base: string, from: string, to: string) {
+  await withNestedRepositoryBaseLock(base, async () => {
+    await git(base, ["worktree", "move", from, to], { timeout: NESTED_WORKTREE_GIT_TIMEOUT_MS });
+    await git(base, ["worktree", "repair", to]);
+  });
+}
+
+export async function trackNestedWorktreeUpstream(base: string, branchName: string, upstream: string | null) {
+  if (!upstream || !(await git(base, ["rev-parse", "--verify", "-q", `refs/remotes/origin/${upstream}^{commit}`]).catch(() => "")).trim()) return;
+  await git(base, ["branch", "--quiet", `--set-upstream-to=origin/${upstream}`, branchName]);
 }

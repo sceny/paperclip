@@ -2885,6 +2885,10 @@ Sandbox-provider driver lookup filters plugin manifests by driver key and kind
 in Postgres before returning rows. Install order, status and worker checks still
 select the provider. Each lookup reads current registry state without a cache.
 
+Run-to-issue links authorize through `getRunReadAccess`, which reads only the run
+ID, company ID, scope kind, and issue ID. The existing visibility policy then
+filters linked issues without loading the run's prompt, output, or result.
+
 Run the deterministic native event replay with the normal server test runner:
 
 ```sh
@@ -3071,6 +3075,20 @@ anything. Each attempt logs `execution_workspace.isolated_source_rehome` with it
 outcome, skip reason and reclaimed bytes. See
 [recoverable disk cleanup](recoverable-disk-cleanup.md#isolated-repository-sources)
 for the conditions and the verification it performs.
+
+### Nested clone migration
+
+Tasks prepared before nested project repositories became worktrees of a shared
+clone still hold a full standalone clone in each `.paperclip-repositories/`
+checkout. Enable `PAPERCLIP_NESTED_CLONE_MIGRATION_ENABLED=true` (default off) to
+let the terminal workspace reaper convert those checkouts in open tasks into
+worktrees of the project's shared clone, keeping their exact state and local
+history, and delete the standalone clones. Set
+`PAPERCLIP_NESTED_CLONE_MIGRATION_DRY_RUN=true` to log candidates without changing
+anything. Each attempt logs `execution_workspace.nested_clone_migration` with its
+outcome, skip reason and reclaimed bytes. See
+[recoverable disk cleanup](recoverable-disk-cleanup.md#converting-existing-standalone-nested-clones)
+for the conditions, verification and crash recovery.
 
 ### Terminal workspace compaction
 
