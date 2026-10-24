@@ -178,6 +178,17 @@ Automated: [live run routes](../../server/src/__tests__/agent-live-run-routes.te
 
 Manual: Start a disposable task, open its running transcript, and follow it to a terminal outcome. Reload and compare task/run IDs, status, output, and cost. Verify a failed run remains distinguishable from a completed run with useful output.
 
+For Legacy OpenCode on a disposable Linux sandbox, run a Bash tool that reads
+`/proc/self/oom_score_adj` and its parent's score. The tool should report `1000`;
+OpenCode should retain its original score. Repeat with an operator `BASH_ENV`
+and confirm that it takes precedence. Repeat with a linked operator plugins
+directory; it must remain unchanged, and the uploaded runtime must contain a
+real plugins directory with the guard and existing plugins. Under controlled memory pressure, record
+the cgroup OOM counters and verify that a killed tool can return an error while
+the agent continues. Local and SSH execution must keep their original shell
+environment. See the [adapter contract](../../docs/adapters/overview.md#opencode-sandbox-memory-pressure).
+These controls do not guarantee that every memory exhaustion preserves the agent.
+
 An explicit runner change starts a configuration revision and invalidates the
 eligible session. Active runs, restart recovery and historical transcript parsing
 retain their recorded execution configuration; do not infer their runner from a

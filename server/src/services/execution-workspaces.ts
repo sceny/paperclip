@@ -2910,10 +2910,13 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       return null;
     },
 
-    getStoredById: async (companyId: string, id: string) => {
+    getStoredById: async (companyId: string, id: string, options?: { includeRuntimeServices: boolean }) => {
       const [row] = await db.select().from(executionWorkspaces).where(eq(executionWorkspaces.id, id));
       if (row && row.companyId !== companyId) throw forbidden("Task workspace access is no longer available");
-      return row ? toExecutionWorkspace(row) : null;
+      if (!row) return null;
+      const runtimeServices = options?.includeRuntimeServices
+        ? await loadEffectiveRuntimeServicesByExecutionWorkspace(db, companyId, [row]) : null;
+      return toExecutionWorkspace(row, (runtimeServices?.get(row.id) ?? []).map(toRuntimeService));
     },
 
     getById: async (id: string) => {
