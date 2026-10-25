@@ -568,7 +568,7 @@ export async function recordNativeFinalizationFailure(input: {
   });
 }
 
-async function resolveCommittedFinalizationRecovery(db: Db, run: typeof heartbeatRuns.$inferSelect, issueId: string) {
+async function resolveCommittedFinalizationRecovery(db: Db, run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId">, issueId: string) {
   const actions = await db.select().from(issueRecoveryActions).where(and(
     eq(issueRecoveryActions.companyId, run.companyId), eq(issueRecoveryActions.sourceIssueId, issueId),
     eq(issueRecoveryActions.kind, "active_run_watchdog"), inArray(issueRecoveryActions.status, ["active", "escalated"]),
@@ -596,7 +596,7 @@ function recoveredExecutionFailureMetadata() {
 
 async function projectCommittedRun(input: {
   db: Db;
-  run: typeof heartbeatRuns.$inferSelect;
+  run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "companyId" | "status" | "finishedAt" | "runtimeMode" | "nativePhase">;
   coordinator: typeof nativeRunFinalizations.$inferSelect;
 }) {
   if (!input.coordinator.resultId) return;
@@ -704,7 +704,8 @@ async function projectCommittedRun(input: {
 async function materializeCommittedReviewResponse(db: Db, runId: string) {
   try {
     const [run] = await db
-      .select()
+      .select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId,
+        nativeIssueId: heartbeatRuns.nativeIssueId, resultJson: heartbeatRuns.resultJson })
       .from(heartbeatRuns)
       .where(eq(heartbeatRuns.id, runId))
       .limit(1);
@@ -764,7 +765,9 @@ async function materializeCommittedReviewResponse(db: Db, runId: string) {
 
 async function acceptedResponseDigestMatches(
   db: Db,
-  run: typeof heartbeatRuns.$inferSelect,
+  run: Pick<typeof heartbeatRuns.$inferSelect,
+    "id" | "companyId" | "agentId" | "nativeIssueId" | "nativeSessionId" |
+    "completionContractId" | "completionContractSha256" | "runnerInstanceId">,
   accepted: typeof nativeRunResults.$inferSelect,
 ): Promise<boolean> {
   const envelope = record(accepted.resultJson);
@@ -842,7 +845,30 @@ export async function repairCommittedNativeChatResponse(
         .for("update");
       if (!issue) return false;
       const [run] = await tx
-        .select()
+        .select({
+          id: heartbeatRuns.id,
+          companyId: heartbeatRuns.companyId,
+          agentId: heartbeatRuns.agentId,
+          nativeIssueId: heartbeatRuns.nativeIssueId,
+          nativeSessionId: heartbeatRuns.nativeSessionId,
+          completionContractId: heartbeatRuns.completionContractId,
+          completionContractSha256: heartbeatRuns.completionContractSha256,
+          runnerInstanceId: heartbeatRuns.runnerInstanceId,
+          runtimeMode: heartbeatRuns.runtimeMode,
+          status: heartbeatRuns.status,
+          errorCode: heartbeatRuns.errorCode,
+          nativePhase: heartbeatRuns.nativePhase,
+          finishedAt: heartbeatRuns.finishedAt,
+          resultJson: heartbeatRuns.resultJson,
+          contextSnapshot: sql<Record<string, unknown> | null>`case when ${heartbeatRuns.contextSnapshot} is null then null
+            else jsonb_build_object(
+              'skipIssueComment', ${heartbeatRuns.contextSnapshot}->'skipIssueComment',
+              'source', ${heartbeatRuns.contextSnapshot}->'source',
+              'externalChatContinuation', ${heartbeatRuns.contextSnapshot}->'externalChatContinuation',
+              'paperclipWake', jsonb_build_object('externalInteractionContinuation',
+                ${heartbeatRuns.contextSnapshot} #> '{paperclipWake,externalInteractionContinuation}')
+            ) end`,
+        })
         .from(heartbeatRuns)
         .where(
           and(
@@ -1121,13 +1147,15 @@ export async function finalizeNativeRun(input: {
   preserveProviderAttempt?: boolean;
   failpoint?: NativeStatusCommitFailpoint;
 }) {
-  const run = await input.db
-    .select()
+  const admittedRun = await input.db
+    .select({ id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId,
+      runtimeMode: heartbeatRuns.runtimeMode, status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode,
+      nativePhase: heartbeatRuns.nativePhase, finishedAt: heartbeatRuns.finishedAt })
     .from(heartbeatRuns)
     .where(eq(heartbeatRuns.id, input.runId))
     .limit(1)
     .then((rows) => rows[0] ?? null);
-  if (!run || run.runtimeMode !== "native")
+  if (!admittedRun || admittedRun.runtimeMode !== "native")
     throw new Error("native_finalization_run_missing");
   const claim = await claimCoordinator({
     db: input.db,
@@ -1136,12 +1164,12 @@ export async function finalizeNativeRun(input: {
   });
   const coordinator = claim.coordinator;
   if (!claim.leaseOwner && coordinator.phase === "committed") {
-    if (isNativeRunnerOwnershipHeld(run)) return coordinator;
+    if (isNativeRunnerOwnershipHeld(admittedRun)) return coordinator;
     const presentationAlreadyMaterialized = coordinator.decisionId
       ? await hasMaterializedNativeReviewResponse(input.db, {
-          companyId: run.companyId,
+          companyId: admittedRun.companyId,
           issueId: coordinator.issueId,
-          runId: run.id,
+          runId: admittedRun.id,
           decisionId: coordinator.decisionId,
         })
       : false;
@@ -1153,9 +1181,9 @@ export async function finalizeNativeRun(input: {
     ) {
       await input.db.transaction((tx) =>
         restoreNativeChatReviewPresentationInTransaction(tx as unknown as Db, {
-          companyId: run.companyId,
+          companyId: admittedRun.companyId,
           issueId: coordinator.issueId,
-          runId: run.id,
+          runId: admittedRun.id,
           decisionId: coordinator.decisionId!,
           resultId: coordinator.resultId!,
           assessmentId: coordinator.assessmentId!,
@@ -1163,27 +1191,45 @@ export async function finalizeNativeRun(input: {
       );
     }
     if (input.projectRunStatus)
-      await projectCommittedRun({ db: input.db, run, coordinator });
+      await projectCommittedRun({ db: input.db, run: admittedRun, coordinator });
     if (input.projectRunStatus && !presentationAlreadyMaterialized)
       await materializeCommittedReviewResponse(input.db, input.runId);
     if (input.projectRunStatus)
       await repairCommittedNativeChatResponse(input.db, {
-        companyId: run.companyId,
+        companyId: admittedRun.companyId,
         issueId: coordinator.issueId,
-        runId: run.id,
+        runId: admittedRun.id,
       });
     if (input.projectRunStatus) {
-      await settleExternalConversation(input.db, run.companyId, coordinator.issueId).catch((err) => {
-        logger.warn({ err, runId: run.id }, "Slack conversation settlement deferred to reconciliation");
+      await settleExternalConversation(input.db, admittedRun.companyId, coordinator.issueId).catch((err) => {
+        logger.warn({ err, runId: admittedRun.id }, "Slack conversation settlement deferred to reconciliation");
       });
     }
-    await resolveCommittedFinalizationRecovery(input.db, run, coordinator.issueId);
+    await resolveCommittedFinalizationRecovery(input.db, admittedRun, coordinator.issueId);
     if (input.projectRunStatus) {
-      const [projectedRun] = await input.db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+      const [projectedRun] = await input.db.select({
+        id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId,
+        runtimeMode: heartbeatRuns.runtimeMode, status: heartbeatRuns.status,
+        runnerProfileJson: sql<Record<string, unknown> | null>`case when ${heartbeatRuns.runnerProfileJson} is null then null
+          else jsonb_build_object('nativeExecutionInput', jsonb_build_object(
+            'schema', ${heartbeatRuns.runnerProfileJson} #> '{nativeExecutionInput,schema}',
+            'provider', jsonb_build_object(
+              'kind', ${heartbeatRuns.runnerProfileJson} #> '{nativeExecutionInput,provider,kind}',
+              'binding', jsonb_build_object(
+                'companyId', ${heartbeatRuns.runnerProfileJson} #> '{nativeExecutionInput,provider,binding,companyId}',
+                'agentId', ${heartbeatRuns.runnerProfileJson} #> '{nativeExecutionInput,provider,binding,agentId}',
+                'bindingId', ${heartbeatRuns.runnerProfileJson} #> '{nativeExecutionInput,provider,binding,bindingId}'
+              )
+            )
+          )) end`,
+      }).from(heartbeatRuns).where(eq(heartbeatRuns.id, admittedRun.id));
       if (projectedRun) await reconcileMuseNativeTerminalRun(input.db, projectedRun);
     }
     return coordinator;
   }
+  const run = await input.db.select().from(heartbeatRuns)
+    .where(eq(heartbeatRuns.id, input.runId)).limit(1).then(rows => rows[0] ?? null);
+  if (!run || run.runtimeMode !== "native") throw new Error("native_finalization_run_missing");
   const [resultRow, contractRow] = await Promise.all([
     input.db
       .select()

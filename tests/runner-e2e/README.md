@@ -1,5 +1,9 @@
 # Paid runner full-stack E2E
 
+The explicit-only [GitHub review bot journey](GITHUB-REVIEW-JOURNEY.md) tests
+attended bot setup and an automatic PR review against an attached deployment.
+Private account bindings and setup receipts live in the private eval repository.
+
 ## Dependable-work qualification checkpoint
 
 `dependable-qualification.ts` defines the six everyday journeys across Codie
@@ -71,8 +75,10 @@ hard stops. The conversion journey creates a real legacy agent and selects
 Paperclip Runner through the public agent update API. It checks retained
 configuration, encrypted secret references, environment, instructions, and
 corresponding permission policy before submitting work through the browser.
-The disposable legacy profile starts without optional CLI-only extra arguments or turn limits;
-the journey does not remove settings from an existing user agent. For either
+The disposable legacy profile starts without optional CLI-only extra arguments.
+Claude retains its saved `maxTurnsPerRun: 1000` to verify that conversion ignores
+the obsolete option without blocking the task. The journey does not remove
+settings from an existing user agent. For either
 provider, Daytona's public environment probe must save platform qualification
 before the same agent selects Runner. Probe leases and uncertain probe accounting
 remain included in attempt evidence and cleanup.
@@ -231,6 +237,11 @@ The explicit [deployment-targeted Product journeys](PRODUCT-JOURNEYS.md) reuse
 browser actions across managed self-hosted and Cloud targets. They include a
 model-free task-properties story, fresh Cloud onboarding, credential-free
 previews, private evidence, and prerequisite reuse; `--all` is unchanged.
+Cloud onboarding may retain a versioned `onboardingConnect` receipt for the
+Connect action: its last checkpoint, validation/hire response state and HTTP
+status, known adapters, and allowlisted outcome/check/server codes. The case
+report renders these fields explicitly; older results without the receipt remain
+valid. This diagnostic does not change the journey grade or qualify a live run.
 
 ## Live provider connection journeys
 

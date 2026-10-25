@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { createDatabaseResponseCapture, installDatabaseResponseCapture } from "@paperclipai/db/response-capture";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -86,6 +87,9 @@ describe("heartbeat run state module", () => {
     expect(projectedSql(utf8.columns[0].resultJson)).toContain("pg_column_size");
     await asciiState.getRun("evidence", { includeExecutionEvidence: true });
     expect(projectedSql(ascii.columns[2].resultJson)).toContain("startupPreparationSettledAt");
+    await asciiState.getRunWorkspaceSettlement("settlement");
+    expect(projectedSql(ascii.columns[3].error)).toBe("NULL");
+    expect(ascii.execute).toHaveBeenCalledTimes(1);
     const raw = readingDatabase("SQL_ASCII");
     await extracted.createHeartbeatRunState(raw.db).getRun("raw", { unsafeFullResultJson: true });
     expect(raw.execute).not.toHaveBeenCalled();
@@ -153,6 +157,59 @@ describePostgres("heartbeat run state database wiring", () => {
     const [issue] = await db.insert(issues).values({ companyId, title: "Session task", assigneeAgentId: agent.id }).returning();
     return { companyId, agent, issue, state: extracted.createHeartbeatRunState(db) };
   }
+
+  it("reads cleanup and workspace settlement without transferring saved input or changing the run", async () => {
+    const { companyId, agent, issue, state } = await fixture();
+    const bulk = "cleanup-saved-input-sentinel🙂".repeat(40_000);
+    const sync = { schema: "paperclip.native-workspace-sync.v1", state: "prepared", resourceDisposition: "destroy" };
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId, agentId: agent.id, issueId: issue.id, runtimeMode: "native", status: "failed",
+      errorCode: "provider_transport_failed", error: "Retain saved files", nativePhase: "terminal_failure",
+      runnerProfileJson: { nativeWorkspaceSync: sync, savedInput: bulk },
+      resultJson: { workspaceExportRetry: { requestId: "retry-source" }, stdout: bulk },
+      contextSnapshot: { timerClaimWasFirstHeartbeat: true, savedInput: bulk },
+      stdoutExcerpt: bulk, stderrExcerpt: bulk,
+    }).returning();
+    await state.getRunWorkspaceSettlement(run.id);
+    const events: Array<Record<string, unknown>> = [];
+    const now = Date.now();
+    const capture = createDatabaseResponseCapture({ start: now - 100, end: now + 59_000 }, event => events.push(event));
+    installDatabaseResponseCapture(db, { heartbeatRuns }, capture);
+    expect(await state.getRunCleanupState(run.id)).toEqual({
+      id: run.id, companyId, agentId: agent.id, runtimeMode: run.runtimeMode,
+      status: run.status, errorCode: run.errorCode, nativePhase: run.nativePhase,
+    });
+    expect(await state.getRunWorkspaceSettlement(run.id)).toEqual({
+      id: run.id, status: run.status, error: run.error,
+      runnerProfileJson: { nativeWorkspaceSync: sync },
+      resultJson: { workspaceExportRetry: { requestId: "retry-source" } },
+      contextSnapshot: { timerClaimWasFirstHeartbeat: true },
+    });
+    capture.flush();
+    const summary = events.find(event => event.event === "paperclip.db_response_capture.summary.v1")!;
+    expect(summary.completedQueries).toBe(2);
+    expect(summary.responseValueBytes).toBeLessThan(2000);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)))[0]).toEqual(run);
+    expect(JSON.stringify(events)).not.toContain("cleanup-saved-input-sentinel");
+    expect(await state.getRunCleanupState(randomUUID())).toBeNull();
+    expect(await state.getRunWorkspaceSettlement(randomUUID())).toBeNull();
+  });
+
+  it("preserves JSON types in workspace settlement decisions", async () => {
+    const { companyId, agent, state } = await fixture();
+    for (const value of [null, false, true, "true", 0, [], { future: [1, "retained"] }]) {
+      const [run] = await db.insert(heartbeatRuns).values({
+        companyId, agentId: agent.id,
+        runnerProfileJson: { nativeWorkspaceSync: value },
+        resultJson: { workspaceExportRetry: value },
+        contextSnapshot: { timerClaimWasFirstHeartbeat: value },
+      }).returning({ id: heartbeatRuns.id });
+      const actual = await state.getRunWorkspaceSettlement(run.id);
+      expect(actual?.runnerProfileJson?.nativeWorkspaceSync).toEqual(value);
+      expect(actual?.resultJson?.workspaceExportRetry).toEqual(value);
+      expect(actual?.contextSnapshot?.timerClaimWasFirstHeartbeat).toEqual(value);
+    }
+  });
 
   it("retains the consumed queue identity in issue polling summaries", async () => {
     const { companyId, agent, issue, state } = await fixture();
