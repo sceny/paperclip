@@ -107,6 +107,25 @@ describe("Claude subscription token renewal", () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
+  it("does not hold the company secret lock while the provider is slow", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const request = providerSequence([async () => { await gate; return granted(1)(); }]);
+    const row = await connect(document(0, T0 + 1 * HOUR));
+    const renewal = service.credential(row);
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    const unrelated = await Promise.race([
+      connect("sk-ant-oat01-unrelated").then(() => "saved"),
+      new Promise<string>(resolve => setTimeout(() => resolve("waited"), 5000)),
+    ]);
+    expect(unrelated).toBe("saved");
+    release();
+    expect(await renewal).toBe("access-1");
+    expect(await stored(row)).toMatchObject({ refreshToken: "refresh-1" });
+  });
+
   it("saves a journaled replacement instead of spending the old refresh token again", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(T0);

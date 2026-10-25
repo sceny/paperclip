@@ -62,6 +62,17 @@ function canUseCredential(
   );
 }
 
+const claudeGrantExchanges = new Map<string, Promise<unknown>>();
+/** Runs one Claude token exchange at a time per grant; the provider rotates the refresh token. */
+function withClaudeGrantExchange<T>(grantId: string, task: () => Promise<T>): Promise<T> {
+  const previous = claudeGrantExchanges.get(grantId) ?? Promise.resolve();
+  const run = previous.catch(() => undefined).then(task);
+  const tail = run.catch(() => undefined);
+  claudeGrantExchanges.set(grantId, tail);
+  void tail.then(() => { if (claudeGrantExchanges.get(grantId) === tail) claudeGrantExchanges.delete(grantId); });
+  return run;
+}
+
 export function aiConnectionService(db: Db) {
   const secrets = secretService(db);
   async function membership(companyId: string, userId: string | null) {
@@ -543,59 +554,56 @@ export function aiConnectionService(db: Db) {
     if (!claudeRefreshDue(stored)) return stored.accessToken;
     return refreshClaudeCredential(row, stored);
   }
-  /** Renew the vaulted Claude sign-in. The provider rotates the refresh token, so the replacement is journaled before it is saved. */
+  /**
+   * Renew the vaulted Claude sign-in. The provider rotates the refresh token, so the exchange is serialized per
+   * grant and the replacement is journaled before it is saved. The company-wide secret lock is held only for the
+   * short save, never during the network request.
+   */
   async function refreshClaudeCredential(row: Parameters<typeof credentialRaw>[0], observed: StoredClaudeOauth): Promise<string> {
     const companyId = row.connection.companyId;
     const recovery = quotaCredentialRecovery(companyId, row.grant.id);
     let savingReplacement = false;
     let rejected = false;
     let unavailable = false;
-    const save = () => db.transaction(async (tx) => {
-      const [grant] = await tx.select().from(connectionGrants).where(and(
+    const missing = () => unprocessable("Reconnect this AI account", { code: "ai_connection_credential_missing" });
+    const read = async (client: Db, lock: boolean) => {
+      const query = client.select().from(connectionGrants).where(and(
         eq(connectionGrants.id, row.grant.id), eq(connectionGrants.companyId, companyId),
         eq(connectionGrants.connectionId, row.connection.id),
-      )).for("update", { noWait: true });
-      if (!grant || grant.status !== "active") throw unprocessable("Reconnect this AI account", { code: "ai_connection_credential_missing" });
+      ));
+      const [grant] = lock ? await query.for("update", { noWait: true }) : await query;
+      if (!grant || grant.status !== "active") throw missing();
       const ref = grant.credentialSecretRefs.find(candidate => candidate.configPath === "ai.credential");
-      if (!ref) throw unprocessable("Reconnect this AI account", { code: "ai_connection_credential_missing" });
-      await tx.select({ id: companySecrets.id }).from(companySecrets).where(and(
-        eq(companySecrets.id, ref.secretId), eq(companySecrets.companyId, companyId),
-      )).for("update", { noWait: true });
-      const current = await aiConnectionService(tx as unknown as Db).credentialRaw({ connection: row.connection, grant });
-      const stored = parseStoredClaudeOauth(current);
-      let pending = await recovery.read();
-      if (pending && (pending.secretId !== ref.secretId || pending.connectionId !== row.connection.id || pending.baseHash !== quotaCredentialHash(current))) {
-        await recovery.clear();
-        pending = null;
+      if (!ref) throw missing();
+      if (lock) {
+        await client.select({ id: companySecrets.id }).from(companySecrets).where(and(
+          eq(companySecrets.id, ref.secretId), eq(companySecrets.companyId, companyId),
+        )).for("update", { noWait: true });
       }
-      // Another run, or a reconnect, may have renewed it while this one waited.
-      if (!pending && (!stored || !claudeRefreshDue(stored))) return current;
-      let refreshed = pending?.value;
-      if (!refreshed) {
-        await recovery.prepare();
-        try { refreshed = await refreshClaudeOauth(stored!); }
-        catch (error) {
-          if (!(error instanceof ClaudeOauthRefreshError)) throw error;
-          // The access token is still good for part of the margin; use it
-          // rather than failing a run over a renewal that can be retried.
-          if (stored!.expiresAt > Date.now() + 60_000) {
-            logger.warn({ grantId: grant.id, rejected: error.rejected }, "Claude token renewal failed; using the current access token");
-            return current;
-          }
-          if (!error.rejected) { unavailable = true; return current; }
-          rejected = true;
-          await tx.update(connectionGrants).set({ status: "needs_reauthorization", updatedAt: new Date() })
-            .where(eq(connectionGrants.id, grant.id));
-          await tx.update(toolConnections).set({ healthStatus: "error", healthMessage: "Sign in again to restore this AI connection.", updatedAt: new Date() })
-            .where(eq(toolConnections.id, row.connection.id));
-          await logActivity(tx as unknown as Db, {
-            companyId, actorType: "system", actorId: "credential_refresh", action: "ai_connection.authentication_failed",
-            entityType: "tool_connection", entityId: row.connection.id, details: { provider: "anthropic", grantId: grant.id },
-          });
-          return current;
-        }
-        await recovery.write({ companyId, grantId: grant.id, connectionId: row.connection.id,
-          secretId: ref.secretId, baseHash: quotaCredentialHash(current), value: refreshed });
+      const current = await aiConnectionService(client).credentialRaw({ connection: row.connection, grant });
+      return { grant, ref, current };
+    };
+    const markReauthorization = (baseHash: string) => withAccountHomeSecretMutationLock(undefined, companyId, () => db.transaction(async (tx) => {
+      const { grant, current } = await read(tx as unknown as Db, true);
+      // A reconnect during the exchange already replaced the refused token.
+      if (quotaCredentialHash(current) !== baseHash) return current;
+      rejected = true;
+      await tx.update(connectionGrants).set({ status: "needs_reauthorization", updatedAt: new Date() })
+        .where(eq(connectionGrants.id, grant.id));
+      await tx.update(toolConnections).set({ healthStatus: "error", healthMessage: "Sign in again to restore this AI connection.", updatedAt: new Date() })
+        .where(eq(toolConnections.id, row.connection.id));
+      await logActivity(tx as unknown as Db, {
+        companyId, actorType: "system", actorId: "credential_refresh", action: "ai_connection.authentication_failed",
+        entityType: "tool_connection", entityId: row.connection.id, details: { provider: "anthropic", grantId: grant.id },
+      });
+      return current;
+    }));
+    const save = (baseHash: string, refreshed: string) => db.transaction(async (tx) => {
+      const { grant, ref, current } = await read(tx as unknown as Db, true);
+      if (quotaCredentialHash(current) !== baseHash) {
+        // A reconnect during the exchange saved a new login; keep it and drop the superseded replacement.
+        await recovery.clear();
+        return current;
       }
       savingReplacement = true;
       await secretService(tx).rotate(ref.secretId, { value: refreshed, preserveAiSessionEpoch: true }, { userId: grant.subjectUserId });
@@ -606,20 +614,50 @@ export function aiConnectionService(db: Db) {
     });
     const busy = () => unprocessable("AI credentials are being updated. Retry shortly.", { code: "ai_connection_busy" });
     try {
-      const value = await withAccountHomeSecretMutationLock(undefined, companyId, async () => {
-        for (let attempt = 0; ; attempt++) {
-          try {
-            const saved = await save();
-            if (!rejected && !unavailable) {
-              await recovery.clear().catch(error => logger.warn({ err: error, grantId: row.grant.id }, "Saved Claude credential recovery cleanup pending"));
-            }
-            return saved;
-          } catch (error) {
-            if (!savingReplacement || attempt >= 2) throw error;
-          }
+      const value = await withClaudeGrantExchange(row.grant.id, async () => {
+        // Another run, or a reconnect, may have renewed it while this one waited.
+        const { grant, ref, current } = await read(db, false);
+        const stored = parseStoredClaudeOauth(current);
+        const baseHash = quotaCredentialHash(current);
+        let pending = await recovery.read();
+        if (pending && (pending.secretId !== ref.secretId || pending.connectionId !== row.connection.id || pending.baseHash !== baseHash)) {
+          await recovery.clear();
+          pending = null;
         }
+        if (!pending && (!stored || !claudeRefreshDue(stored))) return current;
+        let refreshed = pending?.value;
+        if (!refreshed) {
+          await recovery.prepare();
+          try { refreshed = await refreshClaudeOauth(stored!); }
+          catch (error) {
+            if (!(error instanceof ClaudeOauthRefreshError)) throw error;
+            // The access token is still good for part of the margin; use it
+            // rather than failing a run over a renewal that can be retried.
+            if (stored!.expiresAt > Date.now() + 60_000) {
+              logger.warn({ grantId: grant.id, rejected: error.rejected }, "Claude token renewal failed; using the current access token");
+              await recovery.clear().catch(clearError => logger.warn({ err: clearError, grantId: grant.id }, "Saved Claude credential recovery cleanup pending"));
+              return current;
+            }
+            if (!error.rejected) { unavailable = true; return current; }
+            return markReauthorization(baseHash);
+          }
+          await recovery.write({ companyId, grantId: grant.id, connectionId: row.connection.id,
+            secretId: ref.secretId, baseHash, value: refreshed });
+        }
+        const replacement = refreshed;
+        return withAccountHomeSecretMutationLock(undefined, companyId, async () => {
+          for (let attempt = 0; ; attempt++) {
+            try {
+              const saved = await save(baseHash, replacement);
+              await recovery.clear().catch(error => logger.warn({ err: error, grantId: row.grant.id }, "Saved Claude credential recovery cleanup pending"));
+              return saved;
+            } catch (error) {
+              if (!savingReplacement || attempt >= 2) throw error;
+            }
+          }
+        });
       });
-      if (rejected) throw unprocessable("Reconnect this AI account", { code: "ai_connection_credential_missing" });
+      if (rejected) throw missing();
       if (unavailable) throw busy();
       return claudeAccessTokenOf(value);
     } catch (error) {
