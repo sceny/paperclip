@@ -492,6 +492,9 @@ binding, and chat source fields under the existing nonblocking share lock.
 It excludes saved execution input, runner profiles, and log excerpts. Actual
 retry admission still reads the complete run and its recovery evidence. These
 reads preserve stored run data, source revocation checks, and JSON value types.
+External review-wait discovery selects only chat authorization context fields.
+It keeps the current endpoint, membership, resource, and question-receipt checks;
+saved prompts remain stored and do not cross this discovery query.
 
 Legacy continuation recovery rejects native runs before it loads their saved
 execution input. The persisted disposition check reads only the task binding

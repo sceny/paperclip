@@ -394,6 +394,7 @@ import {
   verifyNativeHarnessBackup,
   shouldRestoreNativeHarnessBackupIntoSandbox,
 } from "./native-session-executor.js";
+import { onNativeRunnerEvidence } from "./native-runner-evidence-signal.js";
 
 beforeEach(() => {
   usageRecorder.capture.mockReset().mockImplementation(async receipt => receipt);
@@ -1880,13 +1881,35 @@ describe("native harness persistence profiles", () => {
     });
   });
 
-  it("excludes only nested Codex launch state from ACPX recovery", () => {
+  it("excludes per-launch OpenCode homes and re-installable plugins from OpenCode recovery", () => {
+    const opencode = resolveNativeHarnessPersistenceProfile({
+      provider: { kind: "opencode" },
+      session: {
+        driverKind: "opencode_server",
+        normalizedSessionId: "company:agent/session 1",
+        protocolVersion: 1,
+        lifecyclePolicy: { mode: "per_turn", idleTimeoutMs: null },
+      },
+    } as unknown as NativeExecutionInputV1);
+    expect(
+      opencode.directories.find((directory) => directory.name === "opencode"),
+    ).toMatchObject({
+      excludeEntries: [
+        "company_agent_session_1/homes",
+        "company_agent_session_1/config/opencode/node_modules",
+      ],
+    });
+  });
+
+  it("excludes only nested Codex launch state and package caches from ACPX recovery", () => {
     const acpx = profile({ kind: "acpx", agent: "codex" }, "acpx_runtime");
     const sessionDirectory = acpxRuntimeSessionDirectoryName("session");
     expect(
       acpx.directories.find((directory) => directory.name === "acpx"),
     ).toMatchObject({
       excludeEntries: [
+        `acpx/${sessionDirectory}/home/.npm`,
+        `acpx/${sessionDirectory}/data/pnpm/store`,
         `acpx/${sessionDirectory}/codex-home/tmp`,
         `acpx/${sessionDirectory}/codex-home/.tmp`,
         `acpx/${sessionDirectory}/codex-home/auth.json`,
@@ -1907,7 +1930,12 @@ describe("native harness persistence profiles", () => {
         { kind: "acpx", agent: "claude" },
         "acpx_runtime",
       ).directories.find((directory) => directory.name === "acpx"),
-    ).toMatchObject({ excludeEntries: [] });
+    ).toMatchObject({
+      excludeEntries: [
+        `acpx/${sessionDirectory}/home/.npm`,
+        `acpx/${sessionDirectory}/data/pnpm/store`,
+      ],
+    });
   });
 });
 
@@ -2623,6 +2651,100 @@ describe("remote provider checkpoint snapshots", () => {
       expect(await readFile(join(home, "logs", "unified.jsonl"), "utf8")).toBe("AUTH_SENTINEL");
     } finally { await rm(root, { recursive: true, force: true }); }
   });
+  it.each<{
+    name: string;
+    provider: Record<string, unknown>;
+    driverKind: string;
+    directory: string;
+    sessionPath: string;
+    kept: Record<string, string>;
+    omitted: Record<string, string>;
+  }>([
+    {
+      name: "OpenCode",
+      provider: { kind: "opencode" },
+      driverKind: "opencode_server",
+      directory: "opencode",
+      sessionPath: "company_agent_session_1",
+      kept: {
+        "workspace": "/workspace\n",
+        "data/opencode/opencode.db": "history",
+        "config/opencode/opencode.json": "{}",
+        "config/opencode/package.json": "{}",
+        "home-legacy/.local/state/opencode/locks/lock": "legacy",
+      },
+      omitted: {
+        "homes/home-AbC123/.npm/_cacache/index": "npm-cache",
+        "homes/home-AbC123/.claude/skills/assigned/SKILL.md": "skill",
+        "config/opencode/node_modules/@opencode-ai/plugin/package.json": "plugin",
+      },
+    },
+    {
+      name: "ACPX",
+      provider: { kind: "acpx", agent: "pi" },
+      driverKind: "acpx_runtime",
+      directory: "acpx",
+      sessionPath: `acpx/${acpxRuntimeSessionDirectoryName("company:agent/session 1")}`,
+      kept: {
+        "workspace": "/workspace\n",
+        "pi-home/sessions/session.jsonl": "history",
+        "data/pnpm/config.json": "{}",
+        "home/.profile": "profile",
+      },
+      omitted: {
+        "home/.npm/_cacache/index": "npm-cache",
+        "data/pnpm/store/v10/files/00/blob": "pnpm-store",
+      },
+    },
+  ])("omits disposable $name package caches from the checkpoint and restores the session without them", async ({
+    provider, driverKind, directory, sessionPath, kept, omitted,
+  }) => {
+    const root = await mkdtemp(join(tmpdir(), "provider-cache-checkpoint-"));
+    try {
+      const live = join(root, "live", directory);
+      const backup = join(root, "backup", directory);
+      const replacement = join(root, "replacement", directory);
+      const files: Record<string, string> = { ...kept, ...omitted };
+      for (const [path, contents] of Object.entries(files)) {
+        await mkdir(join(live, sessionPath, path, ".."), { recursive: true });
+        await writeFile(join(live, sessionPath, path), contents);
+      }
+      const persistence = resolveNativeHarnessPersistenceProfile({
+        provider,
+        session: { normalizedSessionId: "company:agent/session 1", driverKind },
+      } as unknown as NativeExecutionInputV1);
+      const excludeEntries = persistence.directories.find(entry => entry.name === directory)!.excludeEntries;
+      const execute = async ({ command, args }: { command: string; args: string[] }) => ({
+        exitCode: 0, timedOut: false, stdout: execFileSync(command, args, { encoding: "utf8" }), stderr: "",
+      });
+      const copy = async (operations: Array<{ files: Array<{ sourcePath: string; targetPath: string }> }>) => {
+        for (const operation of operations) for (const file of operation.files)
+          await cp(file.sourcePath, file.targetPath, { recursive: true });
+      };
+      await syncRemoteRunnerDirectoryOut({ runner: { execute, syncOut: copy } as never,
+        sourcePath: live, targetPath: backup, mode: 0o700, excludeEntries });
+      for (const [path, contents] of Object.entries(kept))
+        expect(await readFile(join(backup, sessionPath, path), "utf8")).toBe(contents);
+      for (const path of Object.keys(omitted))
+        await expect(access(join(backup, sessionPath, path))).rejects.toMatchObject({ code: "ENOENT" });
+      for (const [path, contents] of Object.entries(omitted))
+        expect(await readFile(join(live, sessionPath, path), "utf8")).toBe(contents);
+
+      await stageRemoteRunnerDirectory({
+        target: { kind: "remote", transport: "provider", remoteCwd: root, runner: { syncIn: copy } } as never,
+        runner: { syncIn: copy } as never,
+        sourcePath: backup,
+        targetPath: replacement,
+        mode: 0o700,
+        excludeEntries,
+      });
+      for (const [path, contents] of Object.entries(kept))
+        expect(await readFile(join(replacement, sessionPath, path), "utf8")).toBe(contents);
+      for (const path of Object.keys(omitted))
+        await expect(access(join(replacement, sessionPath, path))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it("keeps Codex session state while omitting re-downloadable remote plugins from the checkpoint", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-plugin-checkpoint-"));
     try {
@@ -12321,6 +12443,8 @@ describe("runnerd provider runtime wiring", () => {
     await writeRunnerAuthority(legacyRoot, identity, "ready");
     state.createBackend.mockClear();
     state.createTransport.mockClear();
+    const evidence: number[] = [];
+    const stopEvidence = onNativeRunnerEvidence((writtenAt) => evidence.push(writtenAt));
 
     await expect(
       createRunnerdBackend({
@@ -12328,11 +12452,12 @@ describe("runnerd provider runtime wiring", () => {
         execution: currentExecution,
         runnerInstanceId: "runner-after-legacy-terminal-unsuspended",
       }),
-    ).rejects.toThrow("runner_state_identity_mismatch");
+    ).rejects.toThrow("runner_state_identity_mismatch").finally(stopEvidence);
     await expect(access(legacyRoot)).rejects.toThrow();
     const quarantineEntries = await readdir(join(stateBase, "quarantine"));
     expect(quarantineEntries).toHaveLength(1);
     expect(quarantineEntries[0]).toContain(".identity_indeterminate.");
+    expect(evidence).toEqual([Number(quarantineEntries[0]!.split(".")[2])]);
     expect(state.createBackend).not.toHaveBeenCalled();
     expect(state.createTransport).not.toHaveBeenCalled();
   });

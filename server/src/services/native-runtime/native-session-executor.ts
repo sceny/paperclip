@@ -109,6 +109,8 @@ import {
   completeRetainedNativeSessionCleanup,
   completeTerminatedLocalNativeSessionCleanup,
   acpxRuntimeSessionDirectoryName,
+  OPENCODE_ISOLATED_HOMES_DIRECTORY,
+  opencodeRuntimeSessionDirectoryName,
   createNativeSessionBackend,
   createRunnerdCodexTransport,
   executeNativeSession,
@@ -207,6 +209,7 @@ import {
   type NativeRunTrace,
 } from "./native-run-trace.js";
 import { createNativeHarnessBackupStamp } from "./native-harness-backup-stamp.js";
+import { noteNativeRunnerEvidence } from "./native-runner-evidence-signal.js";
 import { removeNativeHarnessBackup } from "./native-harness-backup-cleanup.js";
 import { registerLiveRunnerGoalController } from "../runner-goal-control-broker.js";
 import { applyRunnerGoalPrpEvent } from "../runner-goals.js";
@@ -409,6 +412,14 @@ const CODEX_HOME_REDOWNLOADABLE_ENTRIES = [
 const CODEX_HOME_CHECKPOINT_EXCLUDED_ENTRIES = [
   ...CODEX_HOME_NON_PERSISTENT_ENTRIES,
   ...CODEX_HOME_REDOWNLOADABLE_ENTRIES,
+] as const;
+const OPENCODE_RUNTIME_CHECKPOINT_EXCLUDED_ENTRIES = [
+  OPENCODE_ISOLATED_HOMES_DIRECTORY,
+  "config/opencode/node_modules",
+] as const;
+const ACPX_RUNTIME_CHECKPOINT_EXCLUDED_ENTRIES = [
+  "home/.npm",
+  "data/pnpm/store",
 ] as const;
 const RUNNERD_CONTROL_PLANE_STATE_SCHEMA =
   "paperclip.runner.durable.control-plane-state.v1";
@@ -1942,11 +1953,13 @@ function quarantineRunnerdStateRoot(
   if (!isSafeNativeStateDirectory(quarantineRoot)) {
     throw new Error("runner_state_directory_unsafe");
   }
+  const quarantinedAt = Date.now();
   const destination = resolve(
     quarantineRoot,
-    `${stateKey}.${reason}.${Date.now()}.${process.pid}.${randomUUID()}`,
+    `${stateKey}.${reason}.${quarantinedAt}.${process.pid}.${randomUUID()}`,
   );
   renameSync(resolvedRoot, destination);
+  noteNativeRunnerEvidence(quarantinedAt);
   return destination;
 }
 
@@ -5646,7 +5659,10 @@ export function resolveNativeHarnessPersistenceProfile(
         ? {
             name: "opencode",
             location: "filesystem",
-            excludeEntries: [],
+            excludeEntries: OPENCODE_RUNTIME_CHECKPOINT_EXCLUDED_ENTRIES.map(
+              (entry) =>
+                `${opencodeRuntimeSessionDirectoryName(nativeSessionKey(execution))}/${entry}`,
+            ),
           }
         : execution.provider.kind === "acpx"
           ? {
@@ -5658,8 +5674,10 @@ export function resolveNativeHarnessPersistenceProfile(
               // nor necessary to restore. Credentials and launch-time config
               // are also re-materialized in the replacement sandbox. Grok
               // diagnostics can contain auth fields and are not session state.
-              excludeEntries:
-                execution.provider.agent === "grok"
+              excludeEntries: [
+                ...ACPX_RUNTIME_CHECKPOINT_EXCLUDED_ENTRIES.map((entry) =>
+                  `acpx/${acpxRuntimeSessionDirectoryName(nativeSessionKey(execution))}/${entry}`),
+                ...(execution.provider.agent === "grok"
                   ? ["auth.json", "auth-refresh.json", "auth-refresh.json.tmp", "config.toml", "logs"].map((entry) =>
                     `acpx/${acpxRuntimeSessionDirectoryName(nativeSessionKey(execution))}/grok-home/${entry}`)
                   : execution.provider.agent === "codex"
@@ -5667,7 +5685,8 @@ export function resolveNativeHarnessPersistenceProfile(
                       (entry) =>
                         `acpx/${acpxRuntimeSessionDirectoryName(nativeSessionKey(execution))}/codex-home/${entry}`,
                     )
-                  : [],
+                  : []),
+              ],
             }
           : null;
   return {
@@ -11999,7 +12018,8 @@ async function createRunnerdBackendWithinSessionClaim(
           claudeEffort: "claudeEffort" in provider ? provider.claudeEffort : undefined,
           acpxPermissionModePinned: true } : {}),
         ...(provider.kind === "opencode" ? { opencodePermissionMode: provider.permissionMode } : {}),
-        runnerReconnectGraceMs: 120_000, lifecyclePolicy: input.execution.session.lifecyclePolicy,
+        runnerReconnectGraceMs: 120_000, runnerProcessReconnectGraceMs: null,
+        lifecyclePolicy: input.execution.session.lifecyclePolicy,
         runtimeContext: "runtimeContext" in input.execution ? input.execution.runtimeContext : null,
         externallySandboxed: true, baseInstructions: recovery?.baseInstructions,
         resumeDynamicTools: dynamicTools, resumeCompletionContract: { revision: input.execution.completionContract.contract.revision,
@@ -13259,9 +13279,11 @@ async function createRunnerdBackendWithinSessionClaim(
     if (hasRetainedWarmTransitionEvidence(root)) {
       throw new Error("native_runner_warm_transition_recovery_unproven");
     }
-    const archiveToken = `${Date.now()}-${randomUUID()}`;
+    const archivedAt = Date.now();
+    const archiveToken = `${archivedAt}-${randomUUID()}`;
     const archiveRoot = resolve(root, "continuity-breaks", archiveToken);
     mkdirSync(archiveRoot, { recursive: true, mode: 0o700 });
+    noteNativeRunnerEvidence(archivedAt);
     for (const name of [
       "control-plane",
       "runner",
@@ -13494,6 +13516,10 @@ async function createRunnerdBackendWithinSessionClaim(
           ? resolveSourceCodexHome(resolveNativeProviderEnvironment(input.execution.provider, runnerEnvironment))
           : undefined,
         runnerReconnectGraceMs: remoteTarget ? 120_000 : undefined,
+        // A controller's bounded reconnect attempt is not the remote owner's
+        // lifetime. Retain it through restarts until its authenticated lease
+        // expires or explicit Stop/suspension proves that execution ended.
+        runnerProcessReconnectGraceMs: remoteTarget ? null : undefined,
         environment: effectiveRunnerEnvironment,
         observability: input.observability,
         onDiagnostic: (message) => {

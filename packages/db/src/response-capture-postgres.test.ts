@@ -182,6 +182,8 @@ describe.skipIf(!support.supported)("database response capture PostgreSQL behavi
     expect(await withDedicatedDbConnection(db, async dedicated => dedicated.execute(sql`select ${"dedicated-value"}::text as value`)))
       .toEqual([{ value: "dedicated-value" }]);
     capture.flush();
+    await vi.waitFor(() => expect(logs.some(line => JSON.parse(line).event === "paperclip.db_response_capture.summary.v1")).toBe(true),
+      { timeout: 1_000, interval: 5 });
     const events = logs.map(line => JSON.parse(line) as Record<string, unknown>);
     expect(summary(events)).toMatchObject({ startedQueries: 1, completedQueries: 1 });
     expect(logs.join("\n")).not.toContain("dedicated-value");

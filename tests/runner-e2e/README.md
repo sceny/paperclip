@@ -1,5 +1,15 @@
 # Paid runner full-stack E2E
 
+The explicit-only `daytona-restart-continuity` suite runs the existing
+`recover-controller` journey with the recorded Codex and Claude staging models
+on fresh Daytona fixtures. After a completed task tool in an active revision
+turn, it keeps the owned development controller offline for 125 seconds, beyond
+the controller's two-minute reconnect budget. The existing independent oracle
+requires the original process, native session, sandbox lease and receipt prefix,
+one completion and successful workspace finalization, plus verified downloaded
+work. It permits one attempt per cell and retains failed evidence. This is
+development API-key acceptance, distinct from staging subscription recovery.
+
 The explicit-only [GitHub review bot journey](GITHUB-REVIEW-JOURNEY.md) tests
 attended bot setup and an automatic PR review against an attached deployment.
 Private account bindings and setup receipts live in the private eval repository.

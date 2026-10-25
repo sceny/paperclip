@@ -165,7 +165,7 @@ async function withBudgetStopDelivery<T>(db: Db, work: () => Promise<T>): Promis
 
 /** Cancellation shares executor ownership and delegates lifecycle and admission effects. */
 export interface HeartbeatRunControlDependencies extends Pick<ReturnType<typeof createHeartbeatRunState>,
-  "getRun" | "getAgent" | "getRunCleanupState">,
+  "getRun" | "getAgent" | "getRunCleanupState" | "getRunExecutionWait">,
   Pick<ReturnType<typeof createHeartbeatLifecycle>,
     "mergeRunStopMetadataForAgent" | "setRunStatusFromLive" | "setRunStatus" | "setWakeupStatus" | "appendRunEvent">,
   Pick<HeartbeatRetryDependencies, "finalizeAgentStatus"> {
@@ -326,6 +326,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
   const {
     getRun,
     getRunCleanupState,
+    getRunExecutionWait,
     options,
     envOrchestrator,
     activeRunExecutions,
@@ -509,7 +510,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     }
   }
 
-  async function resumeRemoteStopComments(run: typeof heartbeatRuns.$inferSelect, requestId?: string) {
+  async function resumeRemoteStopComments(run: NonNullable<Awaited<ReturnType<typeof getRunExecutionWait>>>, requestId?: string) {
     if (!isHeartbeatRunTerminalStatus(run.status) || adapterExecutionControls.has(run.id)) return;
     const [preparationCoordinator] = run.runtimeMode === "legacy" && run.status === "cancelled" && !run.runtimeModeResolvedAt
       ? await db.select().from(nativeRunFinalizations).where(and(
@@ -536,7 +537,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       await acknowledgedNativeStopExecutionHasStopped(db, currentRun) &&
       !(await getExecutionBlocker(db, run.companyId, issueId));
     const legacyContinuation = run.runtimeMode === "legacy" &&
-      hasConversationContinuationPolicy((await getRun(run.id, { includeExecutionEvidence: true }))?.resultJson) &&
+      hasConversationContinuationPolicy((await getRunExecutionWait(run.companyId, run.id))?.resultJson) &&
       !(await getExecutionBlocker(db, run.companyId, issueId));
     if (run.runtimeMode !== "native" && run.runtimeMode !== "legacy") return;
     const pending = await db.select().from(agentWakeupRequests).where(and(
@@ -803,7 +804,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       const blocker = await getExecutionBlocker(db, wake.companyId, issueId);
       const sourceId = blocker?.runId;
       if (!sourceId || !isUuidLike(sourceId)) continue;
-      const run = await getRun(sourceId, { includeExecutionEvidence: true });
+      const run = await getRunExecutionWait(wake.companyId, sourceId);
       if (!run || run.companyId !== wake.companyId || run.agentId !== wake.agentId) continue;
       if (canContinueCancelledRun(run)) {
         await resumeSavedLegacyComments(wake.companyId, wake.id).catch(err => {

@@ -10,7 +10,7 @@ import {
   userSecretDefinitions,
   type Db,
 } from "@paperclipai/db";
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { isGitHubDotCom } from "./github-fetch.js";
 import { secretService } from "./secrets.js";
 import { toolAccessService } from "./tool-access.js";
@@ -324,6 +324,10 @@ export async function resolveManagedGitHubIdentitySelection(
 }> {
   const connections = await db.select().from(toolConnections).where(and(
     eq(toolConnections.companyId, companyId),
+    or(
+      sql`${toolConnections.config}->'sourceTemplateKey' = '"github"'::jsonb`,
+      sql`${toolConnections.transportConfig}->'sourceTemplateKey' = '"github"'::jsonb`,
+    ),
   ));
   const githubConnections = connections.filter((connection) => {
     const config = connection.config && typeof connection.config === "object" ? connection.config as Record<string, unknown> : {};

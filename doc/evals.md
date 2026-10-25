@@ -1,5 +1,11 @@
 # Paperclip evaluation guide
 
+The explicit-only [Daytona restart continuity journey](../tests/runner-e2e/README.md)
+extends the existing native restart oracle to a 125-second controller outage,
+using the recorded Claude and Codex models in disposable development fixtures.
+It requires same-process adoption, saved files and finalization without replay;
+local regression checks and catalog discovery are separate from live acceptance.
+
 The explicit-only [GitHub review bot journey](../tests/runner-e2e/GITHUB-REVIEW-JOURNEY.md)
 converts the Ponytail walkthrough into attended App setup, scoped installation,
 automatic PR review, and independent two-service checks. It supports attached

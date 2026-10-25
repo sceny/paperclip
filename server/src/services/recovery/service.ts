@@ -106,6 +106,7 @@ import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { hasUnverifiedNativeWorkspaceFinalizationOwner } from "../native-runtime/native-workspace-finalization-recovery-state.js";
 import {
   legacyExecutionNeedsReconciliationWithEvidence,
+  legacyReconciliationRunFields,
   terminalizeLegacyExecution,
 } from "../legacy-execution-recovery.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
@@ -2010,7 +2011,7 @@ export function recoveryService(
   }) {
     if (input.retryOfRunId) {
       const [predecessor] = await db
-        .select()
+        .select(legacyReconciliationRunFields)
         .from(heartbeatRuns)
         .where(
           and(
@@ -4809,7 +4810,7 @@ export function recoveryService(
         )
       ) {
         const [source] = await db
-          .select()
+          .select(legacyReconciliationRunFields)
           .from(heartbeatRuns)
           .where(
             and(

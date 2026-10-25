@@ -219,7 +219,8 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
       executionCancellation: { state: "acknowledged" }, executionRecovery: { kind: "interrupted", providerStopped: true },
       configurationIncomplete: { reason: "workspace_unavailable" }, unknownFutureReceipt: { retained: true } };
     await db.update(heartbeatRuns).set({ runtimeMode,
-      ...(runtimeMode === "native" ? { runnerProfileJson: { savedInput: payload }, stdoutExcerpt: payload, stderrExcerpt: payload } : {}),
+      ...(runtimeMode === "native" ? { runnerProfileJson: { savedInput: payload }, stdoutExcerpt: payload, stderrExcerpt: payload,
+        contextSnapshot: { issueId, paperclipWake: { savedTask: payload }, paperclipTaskMarkdown: payload } } : {}),
       resultJson: { ...evidence, stdout: payload.repeat(3), stderr: payload } }).where(eq(heartbeatRuns.id, runId));
     await db.update(issues).set({ executionRunId: runId, checkoutRunId: runId }).where(eq(issues.id, issueId));
     const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
@@ -233,7 +234,9 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     expect(result.outcome.kind).toBe("released");
     expect(rows).toHaveLength(1);
     expect(rows[0]).toEqual([{ ...run, resultJson: evidence,
-      ...(runtimeMode === "native" ? { runnerProfileJson: null, stdoutExcerpt: null, stderrExcerpt: null } : {}) }]);
+      ...(runtimeMode === "native" ? { runnerProfileJson: null, stdoutExcerpt: null, stderrExcerpt: null,
+        contextSnapshot: { issueId } } : {}) }]);
+    expect(result.run.contextSnapshot).toEqual({ issueId });
     expect(Buffer.byteLength(JSON.stringify(rows))).toBeLessThan(8 * 1024);
     expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0]).toEqual(run);
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toEqual(issue);

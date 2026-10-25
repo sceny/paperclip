@@ -13,6 +13,7 @@ import {
   NATIVE_HARNESS_BACKUP_EXPIRATION_STARTUP_DELAY_MS,
   nativeHarnessBackupExpirationService,
 } from "./services/native-runtime/native-harness-backup-expiration.js";
+import { onNativeRunnerEvidence } from "./services/native-runtime/native-runner-evidence-signal.js";
 import { gitRestorePointRetentionService, registerGitRestorePointWork } from "./services/git-restore-point-ledger.js";
 import {
   nativeWorkspaceSyncRetentionService,
@@ -1269,8 +1270,10 @@ async function startServerWithDatabaseTeardown(
   const nativeHarnessBackupExpiration = nativeHarnessBackupExpirationService(db as any, {
     dryRun: config.nativeHarnessBackupExpirationDryRun,
     closedForDays: config.nativeHarnessBackupExpirationDays,
+    evidenceRetentionDays: config.nativeRunnerEvidenceRetentionDays,
     shouldContinue: () => !heartbeatSchedulerStopped && !isIdleTaskDrainActive() && !isWarmStandby(),
   });
+  const unsubscribeNativeRunnerEvidence = onNativeRunnerEvidence(nativeHarnessBackupExpiration.noteEvidence);
   let nativeHarnessBackupExpirationInFlight = false;
   let nativeHarnessBackupExpirationContinuation: ReturnType<typeof setTimeout> | undefined;
   const sweepNativeHarnessBackups = () => {
@@ -1278,7 +1281,7 @@ async function startServerWithDatabaseTeardown(
     nativeHarnessBackupExpirationInFlight = true;
     trackHeartbeatSchedulerWork(nativeHarnessBackupExpiration.tick()
       .then((result) => {
-        if (result.candidates > 0 || result.failed > 0) {
+        if (result.candidates > 0 || result.evidenceCandidates > 0 || result.failed > 0) {
           logger.info({ ...result, dryRun: config.nativeHarnessBackupExpirationDryRun }, "native harness backup expiration");
         }
         if (result.truncated && !heartbeatSchedulerStopped) {
@@ -2095,6 +2098,7 @@ async function startServerWithDatabaseTeardown(
     clearInterval(nativeHarnessBackupExpirationInterval);
     clearTimeout(nativeHarnessBackupExpirationStartup);
     clearTimeout(nativeHarnessBackupExpirationContinuation);
+    unsubscribeNativeRunnerEvidence();
     await skillVersionRetention.dispose();
     await skillSourceSync.stop();
     unsubscribeChatCompletions();

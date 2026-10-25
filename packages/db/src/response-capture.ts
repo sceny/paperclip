@@ -143,12 +143,35 @@ export function createDatabaseResponseCapture(
 
 type Capture = ReturnType<typeof createDatabaseResponseCapture>;
 let environmentCapture: { key: string; capture: Capture } | undefined;
+
+function pacedCaptureLogger() {
+  const pending: Event[] = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const drain = () => {
+    timer = undefined;
+    for (const event of pending.splice(0, 64)) {
+      try { console.info(JSON.stringify(event)); } catch {}
+    }
+    if (pending.length) {
+      timer = setTimeout(drain, 1_000);
+      timer.unref();
+    }
+  };
+  return (event: Event) => {
+    pending.push(event);
+    if (!timer) {
+      timer = setTimeout(drain, 0);
+      timer.unref();
+    }
+  };
+}
+
 export function databaseResponseCaptureFromEnv(env: NodeJS.ProcessEnv = process.env): Capture | undefined {
   const key = env.PAPERCLIP_DB_RESPONSE_CAPTURE_WINDOW;
   const window = responseCaptureWindow(key);
   if (!key || !window) return;
   if (environmentCapture?.key === key) return environmentCapture.capture;
-  const capture = createDatabaseResponseCapture(window, event => console.info(JSON.stringify(event)));
+  const capture = createDatabaseResponseCapture(window, pacedCaptureLogger());
   environmentCapture = { key, capture };
   return capture;
 }

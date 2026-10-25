@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { and, eq, ne, sql } from "drizzle-orm";
+import { createDatabaseResponseCapture, installDatabaseResponseCapture } from "@paperclipai/db/response-capture";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agentWakeupRequests,
@@ -71,6 +72,7 @@ import { voiceCredentialFingerprint } from "../voice/voice-session-store.js";
 import { nativeSha256 } from "./canonical.js";
 import { questionResponseDeliveryValues } from "../question-response-delivery.js";
 import { resolveExternalChatQuestionResponse } from "./external-chat-question-response.js";
+import { listExternalReviewWaits } from "./external-review-wait.js";
 import { materializeExternalChatQuestionResponseInput } from "./external-chat-question-response-input.js";
 import * as nativeInteractionBridge from "./native-interaction-bridge.js";
 import { defaultGitHubReviewPolicy, type AskUserQuestionsInteraction } from "@paperclipai/shared";
@@ -865,6 +867,50 @@ describe("native external-chat response wait", () => {
       wakeId,
     };
   }
+
+  it.each(["telegram", "github", "github_board_answer", "slack_board_answer"] as const)(
+    "reads small current external review waits without saved prompts (%s)", async source => {
+      const fixture = await (async () => {
+        if (source === "github_board_answer" || source === "slack_board_answer") {
+          const answered = await seedBoardAnsweredTurn(true, source === "github_board_answer" ? "github" : "slack");
+          await attestAnswer(answered);
+          return answered;
+        }
+        return seedWaitTurn(source);
+      })();
+      const finalized = await finalizeNativeRun({ db, runId: fixture.runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true });
+      expect(finalized.phase).toBe("committed");
+      await db.update(statusDecisions).set({ toStatus: "in_review" }).where(eq(statusDecisions.id, finalized.decisionId!));
+      await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, fixture.issueId));
+      const [decision] = await db.select({ reason: statusDecisions.reasonCode, state: statusDecisions.applicationState })
+        .from(statusDecisions).where(eq(statusDecisions.id, finalized.decisionId!));
+      const governed = source === "github_board_answer" || source === "slack_board_answer";
+      expect(decision).toEqual({ reason: governed ? "governed_response_waiting" : "external_chat_response_waiting", state: "applied" });
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, fixture.runId));
+      expect(run!.status).toBe("succeeded");
+      const contextSnapshot = { ...run!.contextSnapshot, savedPrompt: "external-wait-saved-input🙂".repeat(30_000) };
+      await db.update(heartbeatRuns).set({ contextSnapshot }).where(eq(heartbeatRuns.id, fixture.runId));
+      await authorizeChatConversationForBoundRun(db, fixture, contextSnapshot, "read");
+      const observed = createDb(temporary?.connectionString ?? externalTestDatabaseUrl!);
+      const events: Array<Record<string, unknown>> = [], now = Date.now();
+      const capture = createDatabaseResponseCapture({ start: now - 100, end: now + 59_000 }, event => events.push(event));
+      installDatabaseResponseCapture(observed, { issues, heartbeatRuns }, capture);
+      try {
+        expect(await listExternalReviewWaits(observed, fixture.companyId, [fixture.issueId])).toEqual(governed ? [] : [
+          expect.objectContaining({ companyId: fixture.companyId, issueId: fixture.issueId }),
+        ]);
+        capture.flush();
+        const reads = events.filter(event => event.table === "issues" && event.operation === "select");
+        expect(reads.length).toBeGreaterThan(0);
+        expect(reads.reduce((bytes, event) => bytes + Number(event.responseValueBytes), 0)).toBeLessThan(4096);
+        expect(await listExternalReviewWaits(observed, randomUUID(), [fixture.issueId])).toEqual([]);
+        expect(await listExternalReviewWaits(observed, fixture.companyId, [])).toEqual([]);
+        await db.update(companyMemberships).set({ status: "suspended" }).where(eq(companyMemberships.companyId, fixture.companyId));
+        expect(await listExternalReviewWaits(observed, fixture.companyId, [fixture.issueId])).toEqual([]);
+        expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, fixture.runId)))[0]?.contextSnapshot).toEqual(contextSnapshot);
+      } finally { capture.flush(); await observed.$client.end(); }
+    },
+  );
 
   it("resumes an oversized Slack multi-select answered through its Paperclip handoff", async () => {
     const fixture = await seedBoardAnsweredTurn(true, "slack", true);

@@ -1676,6 +1676,30 @@ waiting for provider startup. An abrupt controller exit during session opening
 can then recover through the same exact process-identity checks as an active turn.
 
 Both graceful and hot restarts detach the old controller from native sessions.
+Remote Runner processes use their authenticated connection lease as the bound
+on disconnected lifetime. The controller's shorter connection-recovery budget
+limits its own attempt; it must not terminate the remote owner while another
+controller is starting or classifying runs. Lease expiry still shuts down the
+provider, and exact identity, authentication, Stop and revocation checks remain
+required before any recovery or new execution.
+Native ACPX semantic tool calls wait on their durable PRP invocation across a
+controller outage. Their provider-side MCP bridge does not impose a separate
+request deadline that could make the provider retry an already queued write.
+Runner lease expiry, turn cancellation and bridge closure still end those waits.
+Ordinary bridge callers retain their request deadline. Repeating the same call
+identity returns its one retained result; it does not execute the operation again.
+The native Claude sidecar also sets its HTTP MCP client budget to one hour,
+matching the Runner connection lease budget. This prevents Claude's default
+60-second HTTP deadline from aborting an otherwise pending durable request.
+The setting applies to that native Claude session's MCP client; other provider
+sessions and ordinary bridge deadlines remain unchanged. Explicit cancellation
+and Runner shutdown still take precedence over that client budget.
+An adopted transport can receive authenticated queued semantic calls before
+the driver publishes its recovered session and tool handler. It holds those
+calls until the handler is installed, then rechecks the original authority and
+turn epoch before dispatch. Transport failure, close or controller detachment
+ends that wait without invoking a late handler. Missing startup wiring is not
+reported to the provider as the result of an external operation.
 If shutdown begins while a provider session is opening, its eventual publication
 honors the pending detachment before dispatching a turn. Once detached, an old
 execution finalizer cannot suspend or signal the durable runner: the next

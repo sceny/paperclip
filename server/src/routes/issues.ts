@@ -7247,18 +7247,20 @@ export function issueRoutes(
     id: string;
     assigneeAgentId: string | null;
     executionRunId?: string | null;
-  }) {
+  }, options?: { queueStateOnly: true }) {
     let runToInterrupt = issue.executionRunId
-      ? await heartbeat.getRun(issue.executionRunId)
+      ? options?.queueStateOnly
+        ? await heartbeat.getRunIssueControl(issue.executionRunId)
+        : await heartbeat.getRun(issue.executionRunId)
       : null;
 
     if (
       (!runToInterrupt || runToInterrupt.status !== "running") &&
       issue.assigneeAgentId
     ) {
-      const activeRun = await heartbeat.getActiveRunForAgent(
-        issue.assigneeAgentId,
-      );
+      const activeRun = options?.queueStateOnly
+        ? await heartbeat.getActiveRunIssueControlForAgent(issue.assigneeAgentId)
+        : await heartbeat.getActiveRunForAgent(issue.assigneeAgentId);
       const activeIssueId =
         activeRun &&
         activeRun.contextSnapshot &&
@@ -7285,9 +7287,9 @@ export function issueRoutes(
   type IssueQueueWake = typeof agentWakeupRequests.$inferSelect;
   type IssueQueueRun = typeof heartbeatRuns.$inferSelect;
   type IssueQueueState = {
-    wake: IssueQueueWake;
+    wake: Pick<IssueQueueWake, "id" | "companyId" | "payload" | "status" | "runId">;
     state: "deferred" | "queued";
-    queueRun: IssueQueueRun | null;
+    queueRun: Pick<IssueQueueRun, "runtimeMode"> | null;
   };
 
   async function findQueuedCommentWake(
@@ -7296,12 +7298,29 @@ export function issueRoutes(
   ): Promise<IssueQueueState | null> {
     if (!issue.assigneeAgentId) return null;
     const rows = await executor
-      .select()
+      .select({
+        id: agentWakeupRequests.id, companyId: agentWakeupRequests.companyId,
+        status: agentWakeupRequests.status, runId: agentWakeupRequests.runId,
+        payload: sql<Record<string, unknown>>`jsonb_build_object(
+          'issueId', ${agentWakeupRequests.payload}->'issueId',
+          'mutation', ${agentWakeupRequests.payload}->'mutation',
+          'interactionId', ${agentWakeupRequests.payload}->'interactionId',
+          'interactionStatus', ${agentWakeupRequests.payload}->'interactionStatus',
+          'externalChatContinuation', ${agentWakeupRequests.payload}->'externalChatContinuation',
+          'executionWait', jsonb_build_object(
+            'reason', ${agentWakeupRequests.payload}->'executionWait'->'reason',
+            'message', ${agentWakeupRequests.payload}->'executionWait'->'message'),
+          '_paperclipWakeContext', jsonb_build_object(
+            'wakeCommentIds', ${agentWakeupRequests.payload}->'_paperclipWakeContext'->'wakeCommentIds',
+            'forceFreshSession', ${agentWakeupRequests.payload}->'_paperclipWakeContext'->'forceFreshSession')
+        )`,
+      })
       .from(agentWakeupRequests)
       .where(
         and(
           eq(agentWakeupRequests.companyId, issue.companyId),
           eq(agentWakeupRequests.agentId, issue.assigneeAgentId),
+          sql`${agentWakeupRequests.payload}->'issueId' = to_jsonb(${issue.id}::text)`,
           inArray(agentWakeupRequests.status, [
             "deferred_issue_execution",
             "queued",
@@ -7321,7 +7340,7 @@ export function issueRoutes(
       }
       if (!wake.runId) continue;
       const queueRun = await executor
-        .select()
+        .select({ runtimeMode: heartbeatRuns.runtimeMode })
         .from(heartbeatRuns)
         .where(
           and(
@@ -7342,7 +7361,7 @@ export function issueRoutes(
   async function queueCommentsForWake(
     executor: IssueQueueDb,
     issueId: string,
-    wake: IssueQueueWake | null,
+    wake: Pick<IssueQueueWake, "companyId" | "payload"> | null,
   ) {
     if (wake && queuedInteractionId(wake.payload)) {
       const response = await readQueuedInteractionResponse(executor as Db, wake.companyId, issueId, wake.payload);
@@ -16343,7 +16362,7 @@ export function issueRoutes(
     const queue = await buildQueuedCommentQueue({
       executor: db,
       issue,
-      activeRun: await resolveActiveIssueRun(issue),
+      activeRun: await resolveActiveIssueRun(issue, { queueStateOnly: true }),
       actor: getActorInfo(req),
     });
     res.json(

@@ -28,6 +28,11 @@ const blockerProfileColumn = sql<Record<string, unknown> | null>`case
   when ${heartbeatRuns.runnerProfileJson} is null then null else (
     select coalesce(jsonb_object_agg(field.key, case field.key
       when 'adapterDispatch' then jsonb_build_object('adapterType', field.value->'adapterType')
+      when 'nativeExecutionInput' then case when jsonb_typeof(field.value) = 'object' then (
+        select coalesce(jsonb_object_agg(input_field.key, input_field.value), '{}'::jsonb)
+        from jsonb_each(field.value) as input_field(key, value)
+        where input_field.key in ('schema', 'binding', 'provider', 'workspace')
+      ) else field.value end
       else field.value end), '{}'::jsonb)
     from jsonb_each(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object'
       then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) as field(key, value)
