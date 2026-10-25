@@ -35,6 +35,7 @@ import { aiConnectionService } from "../services/ai-connections.js";
 import { connectionIntentService } from "../services/connection-intents.js";
 import { connectionIntentDeliveryService } from "../services/connection-intent-delivery.js";
 import type { heartbeatService } from "../services/heartbeat.js";
+import { logger } from "../middleware/logger.js";
 import { validate } from "../middleware/validate.js";
 import { probeCopilotConnection } from "../services/copilot-connection-probe.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
@@ -156,10 +157,15 @@ export function aiConnectionRoutes(
   // Without a heartbeat the delivery sweeper still wakes the tasks later.
   async function resumeTasksAfterReconnect(req: Request, companyId: string, userId: string, connectionId: string | undefined) {
     if (!connectionId) return;
-    const closed = await connectionIntentService(db).resolveAfterReconnect(companyId, userId, connectionId, {
-      bypassCurrentMembershipCheck: req.actor.source === "local_implicit" || req.actor.isInstanceAdmin === true,
-    });
-    if (heartbeat) for (const id of closed) await connectionIntentDeliveryService(db, heartbeat).tryDeliver(id);
+    // The reconnect is already saved, so a failure here must not turn the response into an error.
+    try {
+      const closed = await connectionIntentService(db).resolveAfterReconnect(companyId, userId, connectionId, {
+        bypassCurrentMembershipCheck: req.actor.source === "local_implicit" || req.actor.isInstanceAdmin === true,
+      });
+      if (heartbeat) for (const id of closed) await connectionIntentDeliveryService(db, heartbeat).tryDeliver(id);
+    } catch (err) {
+      logger.warn({ err, companyId, connectionId }, "AI connection reconnected; resuming tasks failed");
+    }
   }
   router.get("/companies/:companyId/ai-connection-pools", async (req, res) => {
     const companyId = req.params.companyId as string;

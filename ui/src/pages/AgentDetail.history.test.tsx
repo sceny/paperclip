@@ -33,7 +33,7 @@ it.each([
   const root = createRoot(element);
   try {
     await act(async () => root.render(<QueryClientProvider client={client}><MemoryRouter><PanelProvider><ToastProvider>
-      <Tab runs={[]} companyId="company-1" agentId="agent-1" agentRouteId="agent-1" selectedRunId="older-run" adapterType="codex_local" adapterConfig={{}} />
+      <Tab runs={[]} companyId="company-1" agentId="agent-1" agentRouteId="agent-1" selectedRunId="older-run" adapterType="codex_local" adapterConfig={{}} aiConnectionBound={false} />
     </ToastProvider></PanelProvider></MemoryRouter></QueryClientProvider>));
     await vi.waitFor(async () => { await act(async () => {}); expect(element.textContent).toContain("succeeded"); });
     expect(element.textContent).not.toContain("No runs yet.");

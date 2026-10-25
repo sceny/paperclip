@@ -5,6 +5,7 @@ import { grantConnectionAgentTools } from "./connection-agent-access.js";
 import { agentService } from "./agents.js";
 import { createHash } from "node:crypto";
 import { logActivity } from "./activity-log.js";
+import { logger } from "../middleware/logger.js";
 import { aiConnectionService } from "./ai-connections.js";
 import { aiConnectionBindingSchema, aiConnectionRouterBindingSchema } from "@paperclipai/shared";
 import { aiBindingForAuthRecovery, isAiAuthenticationFailure, isAiAuthenticationRepairable } from "./ai-auth-failure.js";
@@ -1222,7 +1223,9 @@ export function connectionIntentService(db: Db) {
       try {
         await complete(id, connectionId, userId, options);
         resolved.push(id);
-      } catch { /* leave the card pending */ }
+      } catch (err) {
+        logger.warn({ err, companyId, interactionId: id, connectionId }, "AI connection reconnected; sign-in card left pending");
+      }
     }
     return resolved;
   }
