@@ -84,6 +84,9 @@ export function getCachedIssueDetail(
 
   const cachedEntries = queryClient.getQueriesData<Issue>({ queryKey: ISSUE_DETAIL_QUERY_PREFIX });
   return cachedEntries
+    // Core reads share invalidation/mutation updates with detail, but cannot
+    // stand in for its related data or suppress the enrichment request.
+    .filter(([key]) => key.length === ISSUE_DETAIL_QUERY_PREFIX.length + 1)
     .map(([, cachedIssue]) => cachedIssue)
     .find((cachedIssue): cachedIssue is Issue =>
       isCompleteIssueSnapshot(cachedIssue) && matchesIssueRef(cachedIssue, refs)

@@ -11,6 +11,7 @@ import { agentWakeupRequests, agents, chatActions, chatConversations, chatDelive
 import { forbidden } from "../../../errors.js";
 import { resolveGitHubWakeAuthority, isGitHubAutomaticDelivery } from "../github/wake-authority.js";
 import { assertSlackWakeMention } from "../slack/wake-authority.js";
+import { githubTaskRetryRuntimeFence, githubTaskRetryDestinationMatches, createGitHubTaskRetryBatchAuthority, type TaskRetryWakeAuthority } from "../github/task-retry-authorization.js";
 import type { createChatInboundAuthority } from "./authorization.js";
 import type { createChatMessageLifecycle } from "./lifecycle.js";
 type WakeAuthorityOptions = {
@@ -41,7 +42,7 @@ export function createInboundWakeAuthority(db: Db, options: WakeAuthorityOptions
   async function authorizeInboundWakeup(
     tx: DbOrTransaction,
     action: typeof chatActions.$inferSelect,
-    notice?: { nonblocking: true; terminal: boolean },
+    notice?: { nonblocking: true; terminal: boolean; taskRetry?: TaskRetryWakeAuthority },
   ) {
     const payload = action.payload;
     const deny = () =>
@@ -106,6 +107,8 @@ export function createInboundWakeAuthority(db: Db, options: WakeAuthorityOptions
       .limit(1)
       .then((rows) => rows[0] ?? null);
     const fence = delivery ? lifecycleRuntimeFence(delivery) : null;
+    const currentFence = endpoint && delivery && notice?.taskRetry
+      ? await githubTaskRetryRuntimeFence(tx, endpoint, action, delivery, notice.taskRetry) : fence;
     if (
       !endpoint ||
       endpoint.assignedAgentId !== payload.agentId ||
@@ -114,8 +117,8 @@ export function createInboundWakeAuthority(db: Db, options: WakeAuthorityOptions
       delivery.endpointId !== endpoint.id ||
       delivery.conversationId !== action.conversationId ||
       delivery.principalId !== action.principalId ||
-      !fence ||
-      !(await runtimeCallbackEndpoint(tx as unknown as DbTransaction, endpoint.id, fence, [
+      !currentFence ||
+      !(await runtimeCallbackEndpoint(tx as unknown as DbTransaction, endpoint.id, currentFence, [
         "verifying",
         "active",
       ]))
@@ -160,6 +163,7 @@ export function createInboundWakeAuthority(db: Db, options: WakeAuthorityOptions
       endpoint,
       action.principalId,
     );
+    if (notice?.taskRetry && !githubTaskRetryDestinationMatches(delivery, conversation, resource)) throw deny();
     if (endpoint.provider === "github") {
       const automatic = await resolveGitHubWakeAuthority(tx, endpoint, delivery);
       if (automatic.kind === "denied") throw deny();
@@ -214,8 +218,11 @@ export function createInboundWakeAuthority(db: Db, options: WakeAuthorityOptions
       source.authorUserId !== expectedUserId
     )
       throw deny();
-    return { issue, delivery, endpoint, conversation };
+    return { issue, delivery, endpoint, conversation, resource,
+      ...(notice?.taskRetry && currentFence ? { retryRuntimeFence: currentFence } : {}) };
   }
+
+  const authorizeGitHubTaskRetryBatch = createGitHubTaskRetryBatchAuthority(authorizeInboundWakeup);
 
   async function authorizeInboundWorkStart(
     tx: DbOrTransaction,
@@ -241,5 +248,5 @@ export function createInboundWakeAuthority(db: Db, options: WakeAuthorityOptions
       attachments: normalized.message?.attachments?.map(a => `${a.name ?? "Attachment"} (${a.mimeType ?? "unknown type"})`)
     };
   }
-  return { authorizeInboundWakeup, authorizeInboundWorkStart, authorizeFastResponse };
+  return { authorizeInboundWakeup, authorizeGitHubTaskRetryBatch, authorizeInboundWorkStart, authorizeFastResponse };
 }

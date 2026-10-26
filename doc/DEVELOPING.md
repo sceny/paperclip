@@ -1983,6 +1983,14 @@ runs; immutable run descriptors remain readable. The **Paperclip Runner**
 experimental setting applies to other native providers. Native Codex, OpenCode,
 ACPX Claude, and ACPX Pi do not require it. Company access checks still apply.
 
+Native Codex preserves an explicit `adapterConfig.search: false` when converting
+or saving an agent. The disabled hosted-search policy is recorded in the native
+execution input and launch requirements, so prepared launches and recovery keep
+it. An absent setting retains the provider default; this does not add support
+for converting a Legacy agent with `search: true`. Authentication hello probes
+always disable hosted web search because they only verify the selected account
+and model.
+
 OpenCode requires an explicit `provider/model` before testing or finishing setup.
 An inactive setup draft can be saved before choosing a model. Automatic native
 selection uses `allow` permissions and a `per_turn` lifecycle. Native `ask` and

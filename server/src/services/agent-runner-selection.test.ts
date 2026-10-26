@@ -74,7 +74,7 @@ describe("server-owned Codex runner selection", () => {
     const input = { adapterType: "codex_local", target, adapterConfig: { model: "gpt-5.6-sol", modelReasoningEffort: "high", env: { OPENAI_API_KEY: { type: "secret_ref", secretId: "secret" } }, cwd: "/workspace", instructionsFilePath: "/workspace/AGENTS.md", workspaceStrategy: { type: "git_worktree" }, timeoutSec: 60, search: false, fastMode: false, dangerouslyBypassApprovalsAndSandbox: true } };
     const resolved = resolveNewAgentRunner(input);
     expect(resolved).toMatchObject({ adapterType: "paperclip_runner", adapterConfig: { provider: "codex", codexPermissionMode: "never", modelReasoningEffort: "high", env: input.adapterConfig.env, workspaceStrategy: input.adapterConfig.workspaceStrategy, timeoutSec: 60 } });
-    expect(resolved.adapterConfig).not.toHaveProperty("search");
+    expect(resolved.adapterConfig).toHaveProperty("search", false);
     expect(resolveNewAgentRunner(resolved)).toEqual(resolved);
     expect(input.adapterConfig).toHaveProperty("search", false);
   });

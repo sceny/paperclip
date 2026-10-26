@@ -9317,6 +9317,13 @@ export function issueRoutes(
     );
     if (!issue) return;
     if (!(await timing.time("authorization", () => assertIssueReadAllowed(req, res, issue, { allowBreakGlass: true })))) return;
+    // The cold-open read owns only the task row. Related objects and recovery
+    // projections retain their existing authorized detail path.
+    if (req.query.view === "core") {
+      res.setHeader("Server-Timing", timing.header());
+      res.json(issue);
+      return;
+    }
     const inboxArchiveFieldsPromise =
       req.actor.type === "board" && req.actor.userId
         ? timing.time("inbox", () => svc.getActiveInboxArchiveFields(issue, req.actor.userId!))
@@ -16272,6 +16279,24 @@ export function issueRoutes(
     });
 
     res.json(result);
+  });
+
+  router.get("/issues/:id/recent-comments", async (req, res) => {
+    const issue = await getAccessibleResource(req, res, getIssueById(req, req.params.id as string), "Issue not found");
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    const [recent, human, firstInstruction] = await Promise.all([
+      svc.listComments(issue.id, { order: "desc", limit: 5 }),
+      svc.listComments(issue.id, { order: "desc", limit: 1, humanOnly: true }),
+      issue.description?.trim()
+        ? Promise.resolve([])
+        : svc.listComments(issue.id, { order: "asc", limit: 1, humanOnly: true }),
+    ]);
+    const comments = [...new Map([...firstInstruction, ...human, ...recent.slice(0, 4)].map((comment) => [comment.id, comment])).values()];
+    res.json(await runRedactions.redactForIssue(issue.companyId, issue.id, {
+      comments,
+      latestCommentId: recent[0]?.id ?? null,
+      hasMore: recent.length > 4,
+    }));
   });
 
   router.get("/issues/:id/comments", async (req, res) => {

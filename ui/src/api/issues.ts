@@ -21,6 +21,7 @@ import type {
   IssueAttachment,
   IssueCostSummary,
   IssueComment,
+  IssueRecentComments,
   IssueQueuedCommentQueue,
   IssueDocument,
   IssueLabel,
@@ -247,6 +248,8 @@ export const issuesApi = {
   createLabel: (companyId: string, data: { name: string; color: string }) =>
     api.post<IssueLabel>(`/companies/${companyId}/labels`, data),
   deleteLabel: (id: string) => api.delete<IssueLabel>(`/labels/${id}`),
+  getCore: (id: string, options?: RequestOptions) => api.get<Issue>(`/issues/${id}?view=core`, options),
+  recentComments: (id: string, options?: RequestOptions) => api.get<IssueRecentComments>(`/issues/${id}/recent-comments`, options),
   get: (id: string, options?: RequestOptions) =>
     options
       ? api.get<Issue>(`/issues/${id}`, options)
@@ -394,6 +397,7 @@ export const issuesApi = {
       order?: "asc" | "desc";
       limit?: number;
     },
+    options?: RequestOptions,
   ) => {
     const params = new URLSearchParams();
     if (filters?.after) params.set("after", filters.after);
@@ -402,6 +406,7 @@ export const issuesApi = {
     const qs = params.toString();
     return api.get<IssueComment[]>(
       `/issues/${id}/comments${qs ? `?${qs}` : ""}`,
+      options,
     );
   },
   getQueuedComments: (id: string) =>

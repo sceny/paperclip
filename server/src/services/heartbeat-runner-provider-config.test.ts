@@ -7,6 +7,14 @@ import {
   resolvePaperclipRunnerNativeProviderInput,
 } from "./native-runtime/provider-profile.js";
 
+describe("native Codex hosted search policy", () => {
+  it.each([undefined, true, false])("preserves the saved search=%s choice", search => {
+    const input = resolvePaperclipRunnerNativeProviderInput({ backend: "codex_app_server", adapterConfig: { provider: "codex", model: "gpt-5.4-mini", ...(search === undefined ? {} : { search }) } });
+    if (search === false) expect(input).toHaveProperty("codexWebSearch", "disabled");
+    else expect(input).not.toHaveProperty("codexWebSearch");
+  });
+});
+
 describe("Paperclip Runner native provider configuration", () => {
   it.each([
     ["gpt-6.1-sol", "0.158.0", "gpt-6-sol"],

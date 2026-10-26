@@ -4017,7 +4017,7 @@ export function heartbeatService(
             logStore: string | null;
             logRef: string | null;
           },
-      opts?: { offset?: number; limitBytes?: number },
+      opts?: { offset?: number; limitBytes?: number; alignStartToRecord?: boolean; signal?: AbortSignal },
     ) => {
       const run =
         typeof runOrLookup === "string"

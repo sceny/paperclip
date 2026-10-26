@@ -270,7 +270,7 @@ function resolveAgentRunner(input: AgentRunnerSelection): { adapterType: string;
     incompatible(["env.PAPERCLIP_CODEX_ACP_NETWORK_ACCESS"]);
   }
   const effort = config.modelReasoningEffort ?? config.reasoningEffort ?? config.effort;
-  for (const key of ["engine", "command", "extraArgs", "args", "agentCommand", "mode", "nonInteractivePermissions", "stateDir", "warmHandleIdleMs", "dangerouslyBypassApprovalsAndSandbox", "dangerouslyBypassSandbox", "search", "fastMode", "reasoningEffort", "effort"]) delete config[key];
+  for (const key of ["engine", "command", "extraArgs", "args", "agentCommand", "mode", "nonInteractivePermissions", "stateDir", "warmHandleIdleMs", "dangerouslyBypassApprovalsAndSandbox", "dangerouslyBypassSandbox", "fastMode", "reasoningEffort", "effort"]) delete config[key];
   if (config.model !== undefined && typeof config.model !== "string") incompatible(["model"]);
   config = { ...config, provider: "codex", model: typeof config.model === "string" && config.model.trim() ? config.model.trim() : PAPERCLIP_RUNNER_DEFAULT_MODELS.codex, codexPermissionMode: config.codexPermissionMode ?? "never", lifecycleMode: config.lifecycleMode ?? "per_turn", ...(effort === undefined ? {} : { modelReasoningEffort: effort }) };
   try { resolvePaperclipRunnerNativeProviderInput({ backend: "codex_app_server", adapterConfig: config }); }

@@ -730,7 +730,16 @@ recovery path with the specific scan cause and an operator action. Generic
 stranded-work recovery must not grant another budget for these errors. This
 does not automatically replay historical generic `setup_failed` runs.
 
-### ACP startup handshake bound
+### Runner authentication and ACP startup handshake bounds
+
+The native Runner waits up to the ten-second connection setup budget for the
+authenticated welcome. The current execution or reconnect deadline can shorten
+that wait. Controller admission and durable lease persistence happen before the
+welcome, so a short internal response limit must not discard an otherwise valid
+bootstrap ticket during that work. A failed welcome still makes the one-use
+ticket unsafe to replay. Authentication proofs, credential expiry, and identity
+checks remain required. Steady-state reads return to their 250 ms polling bound
+after the welcome.
 
 An adapter-backed live path also requires that the ACP startup handshake itself cannot hang forever. The engine bounds the handshake with a fixed startup deadline and a poll of the duplex control-channel disposition. Either condition ends the handshake and reports a closed, typed code, so the issue can reach a settled disposition instead of staying `in_progress` with no observable next action.
 
@@ -1376,14 +1385,25 @@ accepted native result. A successful `workspace_recovery` operation and matching
 recovery record prove persistence; adapter output or a user repair note cannot.
 The failed run and unknown external effects remain historical facts.
 
-Startup and periodic recovery discover these obligations through the retained
-workspace index. Two background exports per server keep unrelated recovery
-responsive. Automatic file recovery has three total attempts with a 30-second
-delay. An idempotent board request through
+Startup and the retained-workspace sweep reconstruct these obligations through
+the retained workspace index. Committed Retry, recovery admission, and recovery
+progress writes wake a separate preservation worker. It follows the persisted
+retry deadline and becomes idle when no eligible recovery remains. Two background
+exports per server keep unrelated execution finalization responsive. A resolved
+exact-source files-only obligation remains eligible; unrelated resolved or
+cancelled recovery history does not keep this worker active. The persisted
+attempt budget applies across restarts. An idempotent board request through
 `POST /api/issues/:id/recovery-actions/recover-workspace` admits one additional
 attempt after a transient failure. It requires task mutation access, accepts no
 infrastructure certification, and grants no agent or provider execution authority.
-Restarts do not reset the attempt limit. Missing stop or descriptor proof keeps
+Each completed export frees its own slot and wakes the next scan. A slow export
+does not hold a free slot. Completed cleanup and saved-input obligations receive
+one bounded pass through unvisited sources. The pass stops at its tail so paused
+input does not keep the worker active; a committed change starts a fresh pass.
+Shutdown joins this worker's exports before closing the database. Repeated Retry
+during physical preservation binds the canonical intent
+without changing the attempt's generation or revision. Progress writes preserve
+that newer intent so its fenced completion can still commit. Missing stop or descriptor proof keeps
 the source allocated and exposes the specific service blocker.
 
 File recovery alone never requests another agent turn. Existing saved human
@@ -1993,6 +2013,25 @@ and during fresh discovery. A name with conflicting schemas, risk, or source
 bindings remains an error; distinct names retain separate tools. Discovery does
 not grant execution authority: calls still use the existing gateway policy,
 approval, revocation, and audit paths.
+
+
+Native OpenCode sessions use the server-owned assigned-tool relay for local and
+remote execution. The provider receives only bounded search and call schemas,
+even when its protocol can fit the full catalog. This bounds provider grammar
+compilation independently of the transport's tool-count and byte limits. Search
+returns pinned tool aliases and schemas, intersects fresh grants, and respects
+planning/ask restrictions. OpenCode discovery pages use a 32 KiB budget; larger
+schemas use 16K-character chunks so JSON escaping and the result envelope fit
+its HTTP MCP bridge. Other harnesses keep the existing PRP discovery budgets.
+Calls retain the original gateway binding and its
+argument validation, approvals, revocation, and audit rules; prompt arguments
+cannot choose a gateway or credential. Assigned gateway launch credentials stay
+on the controller. The MCP bridge preserves exact declared operation names,
+including names that start with `paperclip_`; only a catalog-bound transport
+prefix may resolve to that declared name. Shortened or unknown names do not
+gain authority. OpenCode sessions with the former direct catalog rotate their
+provider checkpoint before reuse; other providers retain their existing tool
+contract fingerprints.
 
 
 ### Use real connection requests (2026-09-14)

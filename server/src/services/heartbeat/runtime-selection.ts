@@ -971,6 +971,7 @@ export async function selectHeartbeatRuntime(db: Db, input: HeartbeatRuntimeSele
             nativeToolContractFingerprint:
               nativeToolContractFingerprintForTarget(
                 executionTarget?.kind ?? "local",
+                nativeExecution!.provider.kind,
               ),
             ...(lockedProfile.sessionCheckpoint != null
               ? { sessionCheckpoint: lockedProfile.sessionCheckpoint }

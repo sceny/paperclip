@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { agentWakeupRequests, chatActions, chatDeliveries, chatEndpoints, type Db } from "@paperclipai/db";
-import { and, eq, or, sql, type SQLWrapper } from "drizzle-orm";
+import { and, eq, inArray, or, sql, type SQLWrapper } from "drizzle-orm";
 import { HttpError } from "../errors.js";
 
 export interface CommittedChatResponseAuthorizationInput {
@@ -211,6 +211,7 @@ export interface DurableChatWakeupRequest {
   readonly idempotencyKey: string;
   readonly failedRunRetry?: { readonly failedRunId: string };
   readonly authorize: (tx: Db) => Promise<void>;
+  readonly onAdmitted?: (tx: Db, receipt: { runId: string | null }) => Promise<void>;
 }
 
 const trustedRequests = new WeakSet<object>();
@@ -288,6 +289,26 @@ export function assertDurableChatWakeupReceipt(
   ) {
     throw new Error("chat_inbound_wakeup_receipt_conflict");
   }
+}
+
+export function withDurableChatAdmission<T extends { kind: string; admitted?: boolean }>(request: DurableChatWakeupRequest | undefined,
+  admit: (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]) => Promise<T>) {
+  return async (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]) => {
+    const outcome = await admit(tx);
+    // An existing deferred receipt is not proof this transaction passed its
+    // gates. Only dispatch or an explicitly persisted wait admits the input.
+    if (request?.onAdmitted && (outcome.admitted === true || ["queued", "durable", "coalesced"].includes(outcome.kind))) {
+      const [receipt] = await tx.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, request.companyId), eq(agentWakeupRequests.id, request.id),
+        inArray(agentWakeupRequests.status, ["queued", "claimed", "deferred_issue_execution", "coalesced"]),
+      ));
+      if (receipt) {
+        assertDurableChatWakeupReceipt(request, receipt);
+        await request.onAdmitted(tx as unknown as Db, { runId: receipt.runId });
+      }
+    }
+    return outcome;
+  };
 }
 
 /** Work-start policy only: ongoing tool and publication authorization must not

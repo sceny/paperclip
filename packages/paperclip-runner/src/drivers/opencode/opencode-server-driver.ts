@@ -1026,7 +1026,9 @@ class OpenCodeHarnessSession implements HarnessSession {
     callId: string;
     arguments: unknown;
   }): Promise<unknown> {
-    const tool = canonicalOpenCodeMcpToolName(call.tool);
+    // The authenticated MCP bridge has resolved this against its closed
+    // declared catalog. A second prefix strip changes legitimate operation IDs.
+    const tool = call.tool;
     const turnId = this.#activeTurnId;
     if (turnId === null)
       throw new Error("OpenCode tool call is not bound to an active turn");

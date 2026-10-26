@@ -3,6 +3,8 @@ import { readTaskChatRetryIntent, taskChatRetryCanAwaitRecovery, taskChatRetryEx
 import { notifyChatActionWork, notifyChatPublicationWork } from "../chat-work-notifications.js";
 import { FAILED_RUN_RETRY_STALE_MS, dueChatAction } from "../chat-action-work.js";
 import { readChatAuthorizationRun } from "./authorization-run-read.js";
+import { selectTaskRetryInput, claimTaskRetryInput, settleTaskRetryInput, releaseUnadmittedTaskRetryInput, taskRetryInputSchema, type TaskRetryInput } from "./task-retry-input.js";
+import type { TaskRetryWakeAuthority } from "./github/task-retry-authorization.js";
 
 import {
   createHash,
@@ -93,14 +95,16 @@ type RetryRuntimeFence = { credentialFingerprint: string; generation: number };
 export type ChatFailedRetrySource = Awaited<ReturnType<ReturnType<typeof createChatFailedRunRetry>["failedChatRetrySource"]>>;
 
 type ChatFailedRunRetryOptions = {
+  authorizeGitHubTaskRetryBatch: ReturnType<typeof import("./inbound/wakeup-authorization.js").createInboundWakeAuthority>["authorizeGitHubTaskRetryBatch"];
   authorizeInboundWakeup: (
     database: DbOrTransaction,
     action: typeof chatActions.$inferSelect,
-    notice?: { nonblocking: true; terminal: boolean },
+    notice?: { nonblocking: true; terminal: boolean; taskRetry?: TaskRetryWakeAuthority },
   ) => Promise<{
     conversation: Pick<typeof chatConversations.$inferSelect, "sessionGeneration">;
     endpoint: Pick<typeof chatEndpoints.$inferSelect, "provider">;
     delivery: DeliveryRow;
+    retryRuntimeFence?: RetryRuntimeFence;
   }>;
   isExternalActionAuthorizationChange: (error: unknown) => boolean;
   inboundWakeScope: (action: typeof chatActions.$inferSelect) => string;
@@ -112,6 +116,7 @@ type ChatFailedRunRetryOptions = {
 export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOptions) {
   const {
     authorizeInboundWakeup,
+    authorizeGitHubTaskRetryBatch,
     isExternalActionAuthorizationChange,
     inboundWakeScope,
     lifecycleRuntimeFence,
@@ -131,14 +136,14 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
     }
   }
 
-  function retryCommentIds(context: Record<string, unknown>): string[] {
+  function retryCommentIds(context: Record<string, unknown>, taskRetryInput?: TaskRetryInput): string[] {
     const ids =
       context.wakeCommentIds ??
       (context.wakeCommentId ? [context.wakeCommentId] : []);
     if (
       !Array.isArray(ids) ||
       ids.length === 0 ||
-      ids.length > 50 ||
+      (!taskRetryInput && ids.length > 50) ||
       ids.some((id) => typeof id !== "string" || !isUuidLike(id)) ||
       new Set(ids).size !== ids.length ||
       (context.wakeCommentId !== undefined &&
@@ -168,6 +173,7 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
       failedRunId: string;
       sourceScopeSha256: string;
     }>;
+    taskRetryInput?: TaskRetryInput;
     sourceScopeSha256: string;
   };
   function hashFailedRetrySource(
@@ -651,6 +657,8 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
       runId?: string;
       publication?: boolean;
       taskRetryIntentId?: string;
+      taskRetryInput?: TaskRetryInput;
+      taskRetryReauthorization?: TaskRetryWakeAuthority;
       /** Internal selector for already committed output, never retry admission. */
       committedResponse?: {
         resultId: string;
@@ -734,7 +742,22 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
       (context.taskKey !== issue.identifier && context.taskKey !== issue.id)
     )
       throw failedChatRetryDenied();
-    const commentIds = retryCommentIds(context);
+    const selection = input.taskRetryInput && taskRetryInputSchema.safeParse(input.taskRetryInput);
+    if (selection && !selection.success) throw failedChatRetryDenied();
+    const selectedInput = selection?.success ? selection.data : undefined;
+    if (selectedInput && (!input.taskRetryIntentId || provider !== "github")) throw failedChatRetryDenied();
+    const reauthorization = input.taskRetryReauthorization ?? (selectedInput ? {
+      intentId: input.taskRetryIntentId!, sourceRunId: failedRun.id, runtimeFence: selectedInput.runtimeFence,
+    } : undefined);
+    const pendingSources = selectedInput?.sourceActionIds.length ? await tx.select().from(chatActions).where(and(
+      eq(chatActions.companyId, input.companyId), eq(chatActions.kind, "inbound_wakeup"),
+      sql`${chatActions.payload}->>'issueId' = ${issue.id}`,
+      inArray(chatActions.id, selectedInput.sourceActionIds),
+    )) : null;
+    if (pendingSources && pendingSources.length !== selectedInput!.sourceActionIds.length) throw failedChatRetryDenied();
+    const pendingById = new Map(pendingSources?.map(source => [source.id, source]));
+    const commentIds = pendingSources ? selectedInput!.sourceActionIds.map(id =>
+      String(pendingById.get(id)!.payload.commentId)) : retryCommentIds(context, selectedInput);
     const [accepted] = await tx
       .select()
       .from(nativeRunResults)
@@ -868,7 +891,7 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
       answerDelivery
     )
       throw failedChatRetryDenied();
-    if (context.chatFailedRunRetry) {
+    if (context.chatFailedRunRetry && !pendingSources) {
       const hint = context.chatFailedRunRetry as Record<string, unknown>;
       const [priorIntent] = await tx
         .select()
@@ -914,6 +937,9 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
           committedResponse: undefined,
           taskRetryIntentId: typeof priorIntent.payload.taskRetryIntentId === "string"
             ? priorIntent.payload.taskRetryIntentId : undefined,
+          taskRetryInput: priorIntent.payload.taskRetryInput as TaskRetryInput | undefined,
+          retryActionId: priorIntent.id,
+          taskRetryReauthorization: reauthorization,
         },
         ancestors,
       );
@@ -945,6 +971,7 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
       return hashFailedRetrySource({
         ...parentScope,
         failedRunId: failedRun.id,
+        ...(selectedInput ? { taskRetryInput: { ...selectedInput, runtimeFence: reauthorization?.runtimeFence } } : {}),
         retryAncestors: [
           ...parent.retryAncestors,
           {
@@ -958,20 +985,21 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
     // Include every receipt that fed this run, including a deferred owner's
     // coalesced children. A mutable latest-comment hint cannot drop a sibling.
     const admittedBatch =
-      await tx.execute(sql`select source.id, source.payload->>'commentId' as comment_id
+      pendingSources ? [] : await tx.execute(sql`select source.id, source.payload->>'commentId' as comment_id
       from agent_wakeup_requests receipt join chat_actions source on source.id = receipt.id
       where receipt.company_id = ${input.companyId}::uuid and receipt.agent_id = ${input.agentId}::uuid
         and (receipt.run_id = ${failedRun.id}::uuid or receipt.id = ${failedRun.wakeupRequestId}::uuid
           or receipt.payload->>'coalescedIntoWakeupRequestId' = ${failedRun.wakeupRequestId})
-        and source.company_id = ${input.companyId}::uuid and source.kind = 'inbound_wakeup' limit 51`);
+        and source.company_id = ${input.companyId}::uuid and source.kind = 'inbound_wakeup'
+        ${selectedInput ? sql`` : sql`limit 51`}`);
     if (
-      admittedBatch.length !== commentIds.length ||
+      !pendingSources && (admittedBatch.length !== commentIds.length ||
       admittedBatch.some(
         (entry) => !commentIds.includes(String(entry.comment_id)),
-      )
+      ))
     )
       throw failedChatRetryDenied();
-    const sources = await tx
+    const sources = pendingSources ?? await tx
       .select()
       .from(chatActions)
       .where(
@@ -986,8 +1014,9 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
         ),
       );
     if (sources.length !== commentIds.length) throw failedChatRetryDenied();
+    const sourcesByCommentId = new Map(sources.map(source => [source.payload.commentId, source]));
     const ordered = commentIds.map(
-      (id) => sources.find((action) => action.payload.commentId === id)!,
+      (id) => sourcesByCommentId.get(id)!,
     );
     const first = ordered[0]!;
     if (
@@ -1011,39 +1040,53 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
     );
     if (!identity[0]?.locked)
       throw new NativeChatReviewPresentationContentionError();
+    const actionIds = ordered.map(action => action.id);
+    const currentActions = await tx.select().from(chatActions).where(and(eq(chatActions.companyId, input.companyId),
+      inArray(chatActions.id, actionIds))).orderBy(asc(chatActions.id)).for("update", { noWait: true });
+    const deliveries = await tx.select().from(chatDeliveries).where(and(eq(chatDeliveries.companyId, input.companyId),
+      inArray(chatDeliveries.id, ordered.map(action => action.deliveryId!))))
+      .orderBy(asc(chatDeliveries.id)).for("update", { noWait: true });
+    const comments = await tx.select().from(issueComments).where(and(eq(issueComments.companyId, input.companyId),
+      eq(issueComments.issueId, issue.id), inArray(issueComments.id, commentIds)))
+      .orderBy(asc(issueComments.id)).for("share", { noWait: true });
+    const receipts = await tx.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, input.companyId),
+      inArray(agentWakeupRequests.id, [...actionIds, failedRun.wakeupRequestId!, ...(input.retryActionId ? [input.retryActionId] : [])])))
+      .orderBy(asc(agentWakeupRequests.id)).for("share", { noWait: true });
+    const actionsById = new Map(currentActions.map(action => [action.id, action]));
+    const deliveriesById = new Map(deliveries.map(delivery => [delivery.id, delivery]));
+    const commentsById = new Map(comments.map(comment => [comment.id, comment]));
+    const receiptsById = new Map(receipts.map(receipt => [receipt.id, receipt]));
+    const lifecycleRows = await tx.select({
+      target: sql<string>`${chatDeliveries.normalizedEvent}->'message'->>'targetProviderEventId'`,
+      context: sql<Record<string, unknown>>`${chatDeliveries.normalizedEvent}->'runtimeContext'`,
+    }).from(chatDeliveries).where(and(eq(chatDeliveries.companyId, input.companyId),
+      eq(chatDeliveries.endpointId, first.endpointId),
+      or(isNull(chatDeliveries.conversationId), eq(chatDeliveries.conversationId, first.conversationId)),
+      ne(chatDeliveries.state, "filtered"), inArray(chatDeliveries.eventKind, ["message_updated", "message_deleted", "message_restored"]),
+      inArray(sql<string>`${chatDeliveries.normalizedEvent}->'message'->>'targetProviderEventId'`, deliveries.map(delivery => delivery.providerEventId))));
+    const lifecycleKey = (target: string, context: Record<string, unknown> | null) =>
+      JSON.stringify([target, Object.entries(context ?? {}).sort(([left], [right]) => left.localeCompare(right))]);
+    const invalidated = new Set(lifecycleRows.map(row => lifecycleKey(row.target, row.context)));
+    const batch = reauthorization ? await authorizeGitHubTaskRetryBatch(tx, ordered, {
+      nonblocking: true, terminal: input.publication === true, taskRetry: reauthorization,
+    }).catch(error => { if (isExternalActionAuthorizationChange(error)) throw failedChatRetryDenied(); throw error; }) : null;
     const canonicalSources: Array<Record<string, unknown>> = [];
     let destination: Awaited<ReturnType<typeof authorizeInboundWakeup>> | null =
       null;
     for (const action of ordered) {
-      destination = await authorizeInboundWakeup(tx, action, {
+      destination = batch?.get(action.id) ?? await authorizeInboundWakeup(tx, action, {
         nonblocking: true,
         terminal: input.publication === true,
+        ...(reauthorization ? { taskRetry: reauthorization } : {}),
       }).catch((error) => {
         if (isExternalActionAuthorizationChange(error))
           throw failedChatRetryDenied();
         throw error;
       });
-      const [delivery] = await tx
-        .select()
-        .from(chatDeliveries)
-        .where(eq(chatDeliveries.id, action.deliveryId!))
-        .for("update", { noWait: true });
-      const [current] = await tx
-        .select()
-        .from(chatActions)
-        .where(eq(chatActions.id, action.id))
-        .for("update", { noWait: true });
-      const [comment] = await tx
-        .select()
-        .from(issueComments)
-        .where(
-          and(
-            eq(issueComments.id, String(action.payload.commentId)),
-            eq(issueComments.companyId, input.companyId),
-            eq(issueComments.issueId, issue.id),
-          ),
-        )
-        .for("share", { noWait: true });
+      if (reauthorization && !reauthorization.runtimeFence) reauthorization.runtimeFence = destination.retryRuntimeFence;
+      const delivery = deliveriesById.get(action.deliveryId!);
+      const current = actionsById.get(action.id);
+      const comment = commentsById.get(String(action.payload.commentId));
       if (
         !current ||
         current.status !== "processed" ||
@@ -1053,43 +1096,17 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
         !comment ||
         comment.deletedAt ||
         comment.updatedAt.getTime() !== comment.createdAt.getTime() ||
-        comment.updatedAt >
+        (!pendingSources && comment.updatedAt >
           (input.committedResponse
             ? accepted!.createdAt
-            : failedRun.finishedAt!) ||
+            : failedRun.finishedAt!)) ||
         destination.endpoint.provider !== provider ||
         JSON.stringify(lifecycleRuntimeFence(delivery)) !==
           JSON.stringify(lifecycleRuntimeFence(destination.delivery))
       )
         throw failedChatRetryDenied();
-      const [lifecycle] = await tx
-        .select({ id: chatDeliveries.id })
-        .from(chatDeliveries)
-        .where(
-          and(
-            eq(chatDeliveries.companyId, input.companyId),
-            eq(chatDeliveries.endpointId, first.endpointId),
-            or(
-              isNull(chatDeliveries.conversationId),
-              eq(chatDeliveries.conversationId, first.conversationId),
-            ),
-            ne(chatDeliveries.state, "filtered"),
-            sql`${chatDeliveries.normalizedEvent}->'runtimeContext' = ${JSON.stringify(lifecycleRuntimeFence(delivery))}::jsonb`,
-            inArray(chatDeliveries.eventKind, [
-              "message_updated",
-              "message_deleted",
-              "message_restored",
-            ]),
-            sql`${chatDeliveries.normalizedEvent}->'message'->>'targetProviderEventId' = ${delivery.providerEventId}`,
-          ),
-        )
-        .limit(1);
-      if (lifecycle) throw failedChatRetryDenied();
-      const [receipt] = await tx
-        .select()
-        .from(agentWakeupRequests)
-        .where(eq(agentWakeupRequests.id, action.id))
-        .for("share", { noWait: true });
+      if (invalidated.has(lifecycleKey(delivery.providerEventId, lifecycleRuntimeFence(delivery)))) throw failedChatRetryDenied();
+      const receipt = receiptsById.get(action.id);
       if (!receipt) throw failedChatRetryDenied();
       assertFailedRetryReceipt(
         createDurableChatWakeupRequest({
@@ -1107,6 +1124,17 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
         }),
         receipt,
       );
+      if (pendingSources) {
+        const direct = receipt.status === "deferred_issue_execution" && !receipt.runId
+          && receipt.payload?.coalescedIntoWakeupRequestId === undefined;
+        const owned = input.retryActionId && receipt.status === "coalesced"
+          && receipt.payload?.coalescedIntoWakeupRequestId === input.retryActionId;
+        if (!direct && !owned) throw failedChatRetryDenied();
+        if (owned && receipt.runId) {
+          const owner = receiptsById.get(input.retryActionId!);
+          if (owner?.runId !== receipt.runId) throw failedChatRetryDenied();
+        }
+      }
       let owner = receipt;
       const seen = new Set<string>();
       for (
@@ -1126,25 +1154,16 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
         )
           throw failedChatRetryDenied();
         seen.add(ownerId);
-        const [next] = await tx
-          .select()
-          .from(agentWakeupRequests)
-          .where(
-            and(
-              eq(agentWakeupRequests.id, ownerId),
-              eq(agentWakeupRequests.companyId, input.companyId),
-            ),
-          )
-          .for("share", { noWait: true });
+        const next = receiptsById.get(ownerId);
         if (!next) throw failedChatRetryDenied();
         owner = next;
       }
       if (
-        owner.id !== failedRun.wakeupRequestId ||
+        (!pendingSources && (owner.id !== failedRun.wakeupRequestId ||
         owner.runId !== failedRun.id ||
         owner.agentId !== input.agentId ||
         owner.requestedByActorType !== receipt.requestedByActorType ||
-        owner.requestedByActorId !== receipt.requestedByActorId ||
+        owner.requestedByActorId !== receipt.requestedByActorId)) ||
         ["skipped", "cancelled"].includes(receipt.status)
       )
         throw failedChatRetryDenied();
@@ -1158,7 +1177,7 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
         bodySha256: createHash("sha256").update(comment.body).digest("hex"),
         omissionReasons: action.payload.attachmentOmissionReasons ?? {},
         receiptId: receipt.id,
-        ownerId: owner.id,
+        ownerId: pendingSources ? action.id : owner.id,
       });
     }
     if (!destination) throw failedChatRetryDenied();
@@ -1204,6 +1223,8 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
         | "system",
       requestedByActorId: String(first.payload.requestedByActorId),
       retryAncestors: [],
+      ...(selectedInput ? { taskRetryInput: { ...selectedInput,
+        runtimeFence: selectedInput.runtimeFence ?? destination.retryRuntimeFence } } : {}),
     };
     return hashFailedRetrySource(scope);
   }
@@ -1240,7 +1261,8 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
       retryIntentId?: string;
     },
   ): Promise<{ actionId: string; issueId: string }> {
-    const source = await failedChatRetrySource(tx, { ...input, taskRetryIntentId: input.retryIntentId });
+    const taskRetryInput = input.retryIntentId ? await selectTaskRetryInput(tx, input) : undefined;
+    const source = await failedChatRetrySource(tx, { ...input, taskRetryIntentId: input.retryIntentId, taskRetryInput });
     const providerActionId = input.retryIntentId
       ? `task-retry:${input.retryIntentId}` : `failed-run-retry:${source.failedRunId}`;
     const [existing] = await tx
@@ -1351,6 +1373,7 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
       failedRunId: snapshot.payload.failedRunId,
       taskRetryIntentId: typeof snapshot.payload.taskRetryIntentId === "string"
         ? snapshot.payload.taskRetryIntentId : undefined,
+      taskRetryInput: snapshot.payload.taskRetryInput as TaskRetryInput | undefined,
     });
     if (typeof snapshot.payload.taskRetryIntentId === "string" && !await readTaskChatRetryIntent(tx as unknown as Db, {
       companyId: input.companyId, issueId: input.issueId, agentId: input.agentId,
@@ -1444,7 +1467,7 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
         context.source !== `chat:${source.provider}` ||
         context.taskKey !== source.taskKey ||
         context.retryOfRunId !== source.failedRunId ||
-        JSON.stringify(retryCommentIds(context)) !==
+        JSON.stringify(retryCommentIds(context, source.taskRetryInput)) !==
           JSON.stringify(source.commentIds) ||
         hint?.version !== 1 ||
         hint.actionId !== source.intent.id ||
@@ -1518,8 +1541,19 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
     };
   }
 
+  async function reconcileFailedTaskRetry(action: typeof chatActions.$inferSelect) {
+    if (!["failed", "cancelled"].includes(action.status) || !action.payload.taskRetryIntentId ||
+        action.result?.taskRetryInputReconciled === true) return action;
+    await releaseUnadmittedTaskRetryInput(db, { companyId: action.companyId, retryActionId: action.id });
+    const [settled] = await db.update(chatActions).set({
+      result: sql`coalesce(${chatActions.result}, '{}'::jsonb) || '{"taskRetryInputReconciled":true}'::jsonb`,
+    }).where(and(eq(chatActions.companyId, action.companyId), eq(chatActions.id, action.id),
+      inArray(chatActions.status, ["failed", "cancelled"]))).returning();
+    return settled ?? action;
+  }
+
   async function claimFailedChatRunRetry(actionId: string) {
-    const [candidate] = await db
+    const [snapshot] = await db
       .select()
       .from(chatActions)
       .where(
@@ -1528,7 +1562,10 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
           eq(chatActions.kind, "failed_run_retry"),
         ),
       );
-    if (!candidate) throw notFound("Chat retry request not found");
+    if (!snapshot) throw notFound("Chat retry request not found");
+    // Reconcile once at settlement; a crash before the marker is safely
+    // retried here. Status projection itself performs no writes or row locks.
+    const candidate = await reconcileFailedTaskRetry(snapshot);
     const now = new Date();
     if (
       isShuttingDown() ||
@@ -1571,7 +1608,7 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
           )
           .returning();
       });
-      return failedChatRetryReceipt(current ?? claimed);
+      return failedChatRetryReceipt(await reconcileFailedTaskRetry(current ?? claimed));
     };
     try {
       const scope = {
@@ -1644,6 +1681,12 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
                 true, // The durable wake callback validates admission; later phases recheck containment.
               );
             },
+            onAdmitted: async (tx, receipt) => {
+              if (!source.taskRetryInput) return;
+              await claimTaskRetryInput(tx, { companyId: claimed.companyId,
+                retryActionId: claimed.id, sourceActionIds: source.taskRetryInput.sourceActionIds });
+              await settleTaskRetryInput(tx, { companyId: claimed.companyId, retryActionId: claimed.id, runId: receipt.runId });
+            },
           }),
         });
       }
@@ -1652,6 +1695,7 @@ export function createChatFailedRunRetry(db: Db, options: ChatFailedRunRetryOpti
         .from(agentWakeupRequests)
         .where(eq(agentWakeupRequests.id, claimed.id));
       if (!receipt) throw new Error("chat_retry_receipt_not_committed");
+      await settleTaskRetryInput(db, { companyId: claimed.companyId, retryActionId: claimed.id, runId: receipt.runId });
       return settle(
         ["skipped", "failed", "cancelled"].includes(receipt.status)
           ? "failed"

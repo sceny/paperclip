@@ -175,6 +175,22 @@ The ACK means that every source event through sequence 9 is committed or
 deduplicated. The runner rejects an ACK that moves backward or beyond its
 produced source cursor. It removes only events at or below a valid ACK.
 
+The controller stages `item.delta` output snapshots with asynchronous file writes and file
+flushes. A slow volume does not block unrelated HTTP requests during those
+operations. The controller still publishes the snapshot atomically, flushes its
+directory, and waits for persistence before acknowledging an event.
+A newer command or authenticated connection can save the
+same event while staging is pending; the older snapshot cannot replace that
+newer durable state. A failed write fences further authority until reload.
+Lifecycle, control, authentication, and semantic tool events retain synchronous
+persistence before transport readers can observe their state. Semantic tool
+admission and dispatch cannot yield to a replacement connection between those operations.
+Controller replacement must still stop ingress and drain admitted processing
+before a successor reuses the journal. External control routes stop their
+reconnect loop before the controller joins admitted work. An incomplete drain
+cannot certify a reusable checkpoint. Snapshots use compact JSON; existing
+indented snapshots remain readable.
+
 For the lost-ACK fault, the mock commits an event, drops the ACK and socket, and
 reports the prior cursor once after reconnect. The runner sends the same bytes
 again. The mock increments delivery count, keeps one logical event, and sends

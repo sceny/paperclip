@@ -1720,3 +1720,10 @@ export interface IssueAttachment {
   openPath?: string;
   downloadPath?: string;
 }
+
+/** Bounded cold-open window; the complete chronological feed stays paginated. */
+export interface IssueRecentComments {
+  latestCommentId: string | null;
+  comments: IssueComment[];
+  hasMore: boolean;
+}

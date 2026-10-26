@@ -29,6 +29,7 @@ export function nativeRuntimeContractForProvider(
  */
 export function nativeToolContractFingerprintForTarget(
   executionTargetKind: NativeToolExecutionTargetKind,
+  providerKind?: NativeExecutionInput["provider"]["kind"],
 ): string {
   return `sha256:${createHash("sha256")
     .update(
@@ -47,6 +48,9 @@ export function nativeToolContractFingerprintForTarget(
           structuredHumanInput:
             "always_advertised_run_issue_agent_binding_gated_current_task_description.v2",
           semanticCompletion: "finish_accessible_deliverable_evidence.v4",
+          ...(providerKind === "opencode"
+            ? { opencodeAssignedMcpTools: "server_gateway_prp_on_demand_exact_names.v2" }
+            : {}),
           connectorTools: "assigned_resources_and_pinned_skill_bundle.v1",
           chatTaskTools: "durable_task_binding_and_accepted_origin.v1",
           githubResponses: "bound_working_comment_progress_and_final.v1",
@@ -482,7 +486,7 @@ export function rebindNativeSessionCheckpoint(input: {
   const previousProfile = record(input.previousRun.runnerProfileJson);
   if (
     previousProfile.nativeToolContractFingerprint !==
-    nativeToolContractFingerprintForTarget(input.executionTargetKind ?? "local")
+    nativeToolContractFingerprintForTarget(input.executionTargetKind ?? "local", input.currentExecution.provider.kind)
   ) {
     return null;
   }

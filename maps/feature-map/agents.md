@@ -128,6 +128,14 @@ from the hiring picker; API fixture creation does not prove this UI journey.
 
 Automated: [instruction service](../../server/src/__tests__/agent-instructions-service.test.ts) and [instruction revisions](../../server/src/__tests__/agent-instruction-revisions.test.ts) cover file/revision contracts.
 
+The [AI account field regression](../../ui/src/components/ai-connections/AiConnectionField.test.tsx)
+checks duplicate provider names, account identity in choices and adoption confirmation,
+the exact selected grant, and disabled unavailable accounts with authorized metadata fixtures.
+Manually compare a personal API key and shared subscription with the same name in
+Harness / Runtime. Confirm their method, scope and available identity before saving.
+Reload the saved choice and verify the next eligible task uses it; labels alone
+do not establish credential validity or change account access.
+
 Manual: Save a harmless instruction edit, reload, and verify its revision and effect in the next eligible run. Pause and resume the disposable agent; confirm pause prevents new work and does not erase previous runs.
 
 For failed setup, use an unavailable model or invalid command on a disposable agent.

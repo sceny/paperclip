@@ -2219,6 +2219,27 @@ describe("OpenCodeServerDriver", () => {
     } finally { await session.close({ reason: "monitor default test complete" }); }
   });
 
+  it("keeps assigned discovery operation IDs at the authenticated MCP and controller boundary", async () => {
+    await chmod(fixture, 0o755);
+    const root = await mkdtemp(join(tmpdir(), "paperclip-opencode-assigned-"));
+    const workspace = await mkdtemp(join(tmpdir(), "paperclip-opencode-workspace-"));
+    roots.push(root, workspace);
+    const calls: string[] = [];
+    const operation = "paperclip_search_assigned_tools";
+    const driver = new OpenCodeServerDriver({ model: "openrouter/deepseek/deepseek-v4.1-flash-1017", runtimeDirectory: root, command: fixture,
+      environment: { PATH: process.env.PATH, OPENROUTER_API_KEY: "fixture-key" },
+      dynamicTools: [{ name: operation, inputSchema: { type: "object" } }],
+      dynamicToolHandler: async call => { calls.push(call.tool); if (call.tool !== operation) throw new Error("unauthorized operation"); return { tools: [] }; },
+    });
+    const session = await driver.openSession({ runId: "assigned-name", normalizedSessionId: "assigned-name", workingDirectory: workspace });
+    try {
+      await session.startTurn({ message: { role: "user", text: "Discover assigned tools." } });
+      const events = await collectTurnEvents(session.events());
+      expect(calls).toEqual([operation]);
+      expect(events.some(event => event.eventType === "item.completed" && (event.payload as { item?: { is_error?: boolean } }).item?.is_error)).toBe(false);
+    } finally { await session.close({ reason: "assigned operation identity test" }); }
+  });
+
   it("normalizes a structured block result", async () => {
     await chmod(fixture, 0o755);
     const root = await mkdtemp(join(tmpdir(), "paperclip-opencode-driver-"));

@@ -719,6 +719,51 @@ describe("AgentConfigForm environment selector", () => {
     expect(result.onSave).toHaveBeenCalledWith({ name: "Renamed Cody" });
   });
 
+  it.each([
+    { harness: "claude_local", label: "Claude", profile: { provider: "acpx", acpxAgent: "claude" } },
+    { harness: "pi_local", label: "Pi", profile: { provider: "acpx", acpxAgent: "pi" } },
+    { harness: "codex_local", label: "Codex", profile: { provider: "codex" } },
+    { harness: "opencode_local", label: "OpenCode", profile: { provider: "opencode" } },
+  ])("uses only Harness to choose $label for new and saved native agents", async ({ harness, label, profile }) => {
+    mockAdaptersApi.list.mockResolvedValue([{ type: harness, supportedRunners: ["paperclip", "legacy"], defaultRunner: "paperclip" }]);
+    const created = await renderCreateForm([], { adapterType: harness, runner: "auto" });
+    roots.push(created.root);
+    expect(created.container.querySelector('[aria-label="ACP agent"]')).toBeNull();
+    if (harness === "pi_local") expect(created.container.querySelector('[aria-label="Pi thinking level"]')).not.toBeNull();
+
+    const edited = await renderForm([], { adapterType: "paperclip_runner", adapterConfig: profile }, { showAdapterTypeField: true });
+    roots.push(edited.root);
+    expect(edited.container.querySelector('[aria-label="Harness"]')?.textContent).toContain(label);
+    expect(edited.container.querySelector('[aria-label="ACP agent"]')).toBeNull();
+    if (harness === "pi_local") expect(edited.container.querySelector('[aria-label="Pi thinking level"]')).not.toBeNull();
+    await act(async () => setInputValue(edited.container.querySelector<HTMLInputElement>('[placeholder="Agent name"]')!, "Renamed agent"));
+    await flushReact();
+    await clickByText(edited.container, "Save");
+    expect(edited.onSave).toHaveBeenCalledWith({ name: "Renamed agent" });
+  });
+
+  it.each([
+    { adapterType: "process", label: "Process", adapterConfig: { command: "node", args: ["worker.js"] } },
+    { adapterType: "http", label: "HTTP", adapterConfig: { url: "https://example.com/agent" } },
+  ])("omits coming-soon options but preserves a saved $label agent", async ({ adapterType, label, adapterConfig }) => {
+    const result = await renderForm([], { adapterType, adapterConfig }, { showAdapterTypeField: true });
+    roots.push(result.root);
+    expect(result.container.querySelector('[aria-label="Harness"]')?.textContent).toContain(label);
+    await clickElement(result.container.querySelector('[aria-label="Harness"]'));
+    const options = document.querySelector('[role="listbox"][aria-label="Harness"]');
+    expect(options).not.toBeNull();
+    const values = Array.from(options!.querySelectorAll('[role="option"]'), option => option.getAttribute("data-value"));
+    expect(values).toEqual(expect.arrayContaining(["claude_local", "codex_local", "opencode_local", "pi_local"]));
+    expect(values).not.toContain("process");
+    expect(values).not.toContain("http");
+    expect(options!.textContent).not.toContain("Coming soon");
+    await clickElement(result.container.querySelector('[aria-label="Harness"]'));
+    await act(async () => setInputValue(result.container.querySelector<HTMLInputElement>('[placeholder="Agent name"]')!, "Renamed saved agent"));
+    await flushReact();
+    await clickByText(result.container, "Save");
+    expect(result.onSave).toHaveBeenCalledWith({ name: "Renamed saved agent" });
+  });
+
   it.each(["codex_local", "claude_local"])("upgrades a saved %s in one click with pending edits", async adapterType => {
     mockAdaptersApi.list.mockResolvedValueOnce([{ type: adapterType, supportedRunners: ["legacy", "paperclip"], defaultRunner: "paperclip" }]);
     const result = await renderForm([], { adapterType, adapterConfig: { model: "existing-model", effort: "high" } });

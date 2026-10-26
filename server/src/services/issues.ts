@@ -12342,6 +12342,7 @@ export function issueService(db: Db) {
         afterCommentId?: string | null;
         order?: "asc" | "desc";
         limit?: number | null;
+        humanOnly?: boolean;
       },
     ) => {
       const order = opts?.order === "asc" ? "asc" : "desc";
@@ -12352,6 +12353,10 @@ export function issueService(db: Db) {
           : null;
 
       const conditions = [eq(issueComments.issueId, issueId)];
+      if (opts?.humanOnly) conditions.push(or(
+        eq(issueComments.authorType, "user"),
+        and(isNull(issueComments.authorType), isNotNull(issueComments.authorUserId)),
+      )!);
       if (afterCommentId) {
         // Guard: reject non-UUID cursors before hitting the DB to avoid Postgres type errors.
         if (!isUuidLike(afterCommentId)) return [];

@@ -3877,7 +3877,7 @@ export function AdapterTypeDropdown({
     [...listAdapterOptions(type => adapterLabels[type] ?? getAdapterLabel(type)),
       ...(openAiDotEnabled ? [{ value: "openai_dot", label: "OpenAI Dot", experimental: true, comingSoon: false }] : []),
       ...(museEnabled ? [{ value: "muse", label: "Muse — Personal agent", experimental: true, comingSoon: false }] : []),
-    ].filter(item => (item.value !== "paperclip_runner" || nativeRunnerEnabled) && !disabledTypes.has(item.value))
+    ].filter(item => !item.comingSoon && (item.value !== "paperclip_runner" || nativeRunnerEnabled) && !disabledTypes.has(item.value))
       .sort((a, b) => Number(a.value === "paperclip_runner") - Number(b.value === "paperclip_runner")),
     [disabledTypes, openAiDotEnabled, nativeRunnerEnabled, museEnabled]);
   return <SelectPopover aria-label="Harness" value={value} onValueChange={onChange}
@@ -3886,10 +3886,9 @@ export function AdapterTypeDropdown({
       <span className="truncate">{adapterLabels[value] ?? getAdapterLabel(value)}</span>
       {selectedDisplay.experimental && <ExperimentalBadge />}
     </span>}
-    options={adapterList.map(item => ({ value: item.value, disabled: item.comingSoon,
+    options={adapterList.map(item => ({ value: item.value,
       group: item.value === "paperclip_runner" ? "Advanced" : undefined,
       label: <span className="inline-flex items-center gap-1.5"><span aria-hidden="true" className="inline-flex shrink-0"><AdapterMark type={item.value} className="size-4" /></span><span>{item.label}</span>{item.experimental && <ExperimentalBadge />}</span>,
-      suffix: item.comingSoon ? <span className="text-(length:--text-nano) text-muted-foreground">Coming soon</span> : undefined,
     }))} />;
 }
 

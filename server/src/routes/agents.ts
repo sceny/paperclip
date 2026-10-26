@@ -7558,7 +7558,11 @@ export function agentRoutes(
 
     const afterSeq = Number(req.query.afterSeq ?? 0);
     const limit = Number(req.query.limit ?? 200);
-    const events = await heartbeat.listEvents(runId, Number.isFinite(afterSeq) ? afterSeq : 0, Number.isFinite(limit) ? limit : 200);
+    const cursor = Number.isFinite(afterSeq) ? afterSeq : 0;
+    const pageLimit = Number.isFinite(limit) ? limit : 200;
+    const events = await (req.query.view === "conversation"
+      ? heartbeat.listEvents(runId, cursor, pageLimit, true)
+      : heartbeat.listEvents(runId, cursor, pageLimit));
     const currentUserRedactionOptions = await getCurrentUserRedactionOptions();
     const redactedEvents = events.map((event) =>
       redactCurrentUserValue({
@@ -7578,13 +7582,22 @@ export function agentRoutes(
 
     const offset = Number(req.query.offset ?? 0);
     const limitBytes = readRunLogLimitBytes(req.query.limitBytes);
-    const result = await heartbeat.readLog(run, {
-      offset: Number.isFinite(offset) ? offset : 0,
-      limitBytes,
-    });
+    const controller = new AbortController();
+    const cancelRead = () => controller.abort();
+    res.once("close", cancelRead);
+    try {
+      const result = await heartbeat.readLog(run, {
+        offset: Number.isFinite(offset) ? offset : 0,
+        limitBytes,
+        ...(req.query.alignStartToRecord === "true" ? { alignStartToRecord: true } : {}),
+        signal: controller.signal,
+      });
 
-    res.set("Cache-Control", "no-cache, no-store");
-    res.json(await runRedactions.redactForRun(run.companyId, run.id, result));
+      res.set("Cache-Control", "no-cache, no-store");
+      res.json(await runRedactions.redactForRun(run.companyId, run.id, result));
+    } finally {
+      res.off("close", cancelRead);
+    }
   });
 
   router.get("/heartbeat-runs/:runId/workspace-operations", async (req, res) => {

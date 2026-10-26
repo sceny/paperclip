@@ -1,3 +1,5 @@
+import { writeExecutionControl } from "./execution-control-notifications.js";
+import { DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
@@ -8,6 +10,20 @@ import { createSystemRecovery, readSystemRecovery } from "./system-recovery-stat
 import { updateSystemRecovery } from "./system-recovery.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { notifyChatActionWork } from "./chat-work-notifications.js";
+import { authorizationService } from "./authorization.js";
+
+export async function taskRetryMutationAllowed(db: Db, input: {
+  companyId: string; issueId: string; actorId: string; actorSource: TaskRetryIntent["actorSource"];
+}) {
+  const [issue] = await db.select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId,
+    assigneeUserId: issues.assigneeUserId }).from(issues).where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.issueId)));
+  if (!issue) return false;
+  const permission = await authorizationService(db).decide({
+    actor: { type: "board", userId: input.actorId, source: input.actorSource }, action: "issue:mutate",
+    resource: { type: "issue", companyId: input.companyId, issueId: input.issueId, ...issue },
+  });
+  return permission.allowed;
+}
 
 export async function assertTaskRetryConversationAllowed(
   db: Db,
@@ -59,7 +75,7 @@ export async function requestTaskRetry(input: {
   prepareChatRetry?: (tx: Db, scope: { companyId: string; issueId: string; agentId: string;
     failedRunId: string; initiatedByUserId: string; retryIntentId?: string }) => Promise<{ actionId: string }>;
 }) {
-  return input.db.transaction(async tx => {
+  return writeExecutionControl(input.db, DELIVERY_QUEUES.workspaceRecovery, async tx => {
     const db = tx as unknown as Db;
     const [issue] = await tx.select().from(issues).where(and(eq(issues.companyId, input.companyId),
       eq(issues.id, input.issueId))).for("update");
@@ -115,6 +131,7 @@ export async function requestTaskRetry(input: {
     const intent: TaskRetryIntent = { schema: "paperclip.task-retry.v1", generationId: active?.id ?? id,
       sourceRunId: latest.id, actorId: input.actorId,
       actorSource: taskRetryIntentSchema.shape.actorSource.parse(input.actorSource ?? "session"), strategy: "evaluate",
+      ...(active && activeIntent?.chatActionId ? { chatActionId: activeIntent.chatActionId } : {}),
       ...(active ? { canonicalIntentId: active.id } : {}) };
     // Preserve external chat authority through its existing admission owner.
     // Generic board Retry must never manufacture a chat-inbound request.
@@ -139,6 +156,11 @@ export async function requestTaskRetry(input: {
       for (const action of records) {
         const previous = readSystemRecovery(action.evidence);
         if (!previous || previous.state === "complete") continue;
+        if (previous.state === "running") {
+          await updateSystemRecovery(db, { companyId: issue.companyId, issueId: issue.id, runId: latest.id,
+            actionId: action.id }, previous, { ...previous, intentId: active?.id ?? id });
+          continue;
+        }
         // Active repair keeps its attempt and cooldown. An exhausted generation
         // gets a new budget only because this click is a new durable intent.
         const next = previous.state === "exhausted"
@@ -148,8 +170,7 @@ export async function requestTaskRetry(input: {
           : { ...previous, revision: previous.revision + 1, intentId: active?.id ?? id,
             // Retry may advance our backoff, never a provider's cooldown and
             // never an operation whose physical owner is still running.
-            nextAttemptAt: previous.state === "running" ? previous.nextAttemptAt
-              : Math.max(Date.now(), previous.providerCooldownAt ?? 0) };
+            nextAttemptAt: Math.max(Date.now(), previous.providerCooldownAt ?? 0) };
         if (next.generationId !== previous.generationId) await persistActivity(db, {
           companyId: issue.companyId, actorType: "system", actorId: "task-retry", entityType: "issue", entityId: issue.id,
           action: "issue.recovery_generation_replaced", runId: latest.id,

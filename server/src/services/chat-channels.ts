@@ -1,3 +1,4 @@
+import { credentialFingerprint } from "./chat-channels/credential-fingerprint.js";
 import { createChatSdkMessageReceiver } from "./chat-channels/runtime/sdk-messages.js";
 import { admitDiscordSdkMessage } from "./chat-channels/discord/messages.js";
 import { resolveInboundConversationBinding } from "./chat-channels/inbound/conversation-binding.js";
@@ -312,20 +313,6 @@ function runtimeGeneration(setup: ChatEndpointSetupState): number {
   return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
-function credentialFingerprint(refs: ToolCredentialSecretRef[]): string {
-  const stable = refs
-    .map((ref) => ({
-      configPath: ref.configPath,
-      secretId: ref.secretId,
-      versionSelector: ref.versionSelector ?? "latest",
-    }))
-    .sort((left, right) =>
-      `${left.configPath}:${left.secretId}:${left.versionSelector}`.localeCompare(
-        `${right.configPath}:${right.secretId}:${right.versionSelector}`,
-      ),
-    );
-  return createHash("sha256").update(JSON.stringify(stable)).digest("hex");
-}
 type ConversationRow = typeof chatConversations.$inferSelect;
 type DeliveryRow = typeof chatDeliveries.$inferSelect;
 
@@ -847,7 +834,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
   const { lockTelegramCallbackNoticeAuthority } = createTelegramCallbackNoticeAuthority({ nonDirectDestinationAllowed, lockCurrentPrincipalAuthorization });
   const { stageProviderEffect, processProviderEffect, processPendingProviderEffects } = createProviderEffects(db, { endpointRecord, runtimeCallbackEndpoint, withCredentialMutationLease, runtimeFor, invalidateRuntime, lockCurrentPrincipalAuthorization, redactError, MAX_ERROR_TEXT, nonDirectDestinationAllowed, lockTelegramCallbackNoticeAuthority });
   const { publicationFiles } = createOutboundAttachments(db, { get storage() { return options.storage; } });
-  const { authorizeInboundWakeup, authorizeInboundWorkStart, authorizeFastResponse } = createInboundWakeAuthority(db, { runtimeCallbackEndpoint, lockCurrentPrincipalAuthorization });
+  const { authorizeInboundWakeup, authorizeGitHubTaskRetryBatch, authorizeInboundWorkStart, authorizeFastResponse } = createInboundWakeAuthority(db, { runtimeCallbackEndpoint, lockCurrentPrincipalAuthorization });
   const { ingestAttachments, attachmentOmissionDetail } = createInboundAttachments(db, { authorizeInboundWakeup, lifecycleRuntimeFence, sanitizeFilename, issuesSvc, isExternalActionAuthorizationChange, redactError, get storage() { return options.storage; } });
   const { stageInboundWakeup, acceptInboundWakeup, settleRejectedInboundWakeups, processInboundWakeup } = createInboundWakeups(db, { authorizeInboundWakeup, authorizeInboundWorkStart, attachmentOmissionDetail, isExternalActionAuthorizationChange, redactError, fetchImpl, get heartbeat() { return options.heartbeat; } });
   const { settleTelegramAttachmentOnlyFailure } = createTelegramAttachmentFailure(db, {
@@ -1203,6 +1190,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     pendingFailedRetries,
   } = createChatFailedRunRetry(db, {
     authorizeInboundWakeup,
+    authorizeGitHubTaskRetryBatch,
     isExternalActionAuthorizationChange,
     inboundWakeScope,
     lifecycleRuntimeFence,

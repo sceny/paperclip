@@ -4,6 +4,13 @@ Product map: [Recovery](../feature-map/recovery.md).
 
 Feature ID: `recovery`.
 
+Ordinary board Retry can reauthorize saved GitHub input for the same App after
+reconnect. It pins current runtime authority and preserves sender, repository,
+conversation and task checks. Pending input takes precedence over the older
+failed request and transfers once to the retry owner. This grants no new agent
+Retry API or stale webhook authority. Local PostgreSQL and HTTP-route regressions
+cover these transitions; hosted execution and delivery remain separate acceptance.
+
 Source revision: `3bbc2104b65caf9f7763938a01260a5673e12f7a`.
 
 Review depth and executed proof are separate. The operation records enumerate the named behavior and access boundaries. Their evidence states describe the reviewed sources; run results and environment limits belong in the PR or verification artifacts. A listed API or source test does not establish a live authorized journey. Follow the [map contract](../README.md).
@@ -224,6 +231,13 @@ Gaps: An acknowledged retry can remain pending or fail; report actual useful res
 ## `workspace`
 
 Capability ID: `recovery/workspace`.
+
+Committed authorized Retry and workspace-recovery requests notify the internal
+preservation worker. Startup reconstructs its source-bound obligations and saved
+retry deadlines. A duplicate request during physical preservation does not
+replace the owner's generation or revision. Resolved files-only recovery retains
+its no-replay restriction. The local PostgreSQL regression checks the producer,
+worker, and physical source receipt; it is not deployed provider acceptance.
 
 The internal preservation resume path grants no board or agent execution API.
 It requires the exact source action, company, run, lease and environment, a

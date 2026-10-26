@@ -1471,6 +1471,7 @@ describe("remote provider pack manifest", () => {
     try {
       await createRunnerdBackend({ db: leaseDb(remoteExecution), execution: remoteExecution,
         runnerInstanceId: "bundled-image-runner", runnerIngressAuthorized: true,
+        ...(provider === "opencode" ? { runnerEnvironment: { PAPERCLIP_NATIVE_MCP_NAME: "assigned-fixture", PAPERCLIP_NATIVE_MCP_URL: "http://127.0.0.1/mcp/gateways/assigned-fixture", PAPERCLIP_NATIVE_MCP_TOKEN: "private-fixture" } } : {}),
         runnerExecutionTarget: { kind: "remote", transport: "sandbox", remoteCwd: "/workspace",
           environmentId: "environment", leaseId: "lease", providerKey: "daytona",
           effectiveCapabilities: { runnerWebSocketIngress: true }, runner: { execute, syncIn } } as never });
@@ -1478,8 +1479,13 @@ describe("remote provider pack manifest", () => {
       state.createBackend.mock.calls.at(-1)![1].codexTransportFactory!();
       const transport = state.createTransport.mock.calls.at(-1)![0] as RunnerTransportOptions & {
         controlPlaneRegistration: (authority: unknown) => Promise<unknown>;
+        environment?: NodeJS.ProcessEnv;
       };
       expect(transport.runnerBinary).toBe(state.bundledRunnerBinary);
+      if (provider === "opencode") {
+        expect(state.createAssignedMcpTools).toHaveBeenCalledWith(expect.objectContaining({ gatewayPublicId: "assigned-fixture", bearerToken: "private-fixture", delivery: "on_demand" }));
+        for (const name of ["PAPERCLIP_NATIVE_MCP_NAME", "PAPERCLIP_NATIVE_MCP_URL", "PAPERCLIP_NATIVE_MCP_TOKEN"]) expect(transport.environment?.[name]).toBeUndefined();
+      }
       if (claude) {
         expect(state.resolveRemoteRunnerBinary).toHaveBeenCalledWith(expect.objectContaining({ remoteCwd: "/workspace", configuredPath: undefined }));
         const { bundledRemoteProviderPackManifestPath } = await import("../../vendor/paperclip-runner/index.js");
@@ -7800,7 +7806,7 @@ describe("bounded stopped instruction collection", () => {
 describe("native warm session supervision", () => {
   it.each(["collect", "close-failure", "stopped", "destroyed", "missing-lease", "foreign-run", "foreign-environment", "deleted-environment", "claim-edit", "claim-add", "claim-remove", "claim-remove-entry", "claim-canonical", "claim-config", "claim-uncertain"])("composes remote warm ownership with real DB successor leases and current-run collection: %s", async ending => {
     const tables = await import("@paperclipai/db");
-    const { eq } = await import("drizzle-orm");
+    const { eq, sql } = await import("drizzle-orm");
     const { randomUUID } = await import("node:crypto");
     const { promisify } = await import("node:util");
     const { execFile } = await import("node:child_process");
@@ -7813,7 +7819,11 @@ describe("native warm session supervision", () => {
     const home = await realpath(await mkdtemp(join(tmpdir(), "warm-remote-db-")));
     const previousHome = process.env.PAPERCLIP_HOME;
     process.env.PAPERCLIP_HOME = home;
-    const database = await startEmbeddedPostgresTestDatabase("warm-remote-db-");
+    const { resolveExternalTestDatabaseUrl } = await import("../../__tests__/helpers/external-test-database.js");
+    const externalUrl = resolveExternalTestDatabaseUrl("PAPERCLIP_TEST_DATABASE_URL");
+    const database = externalUrl
+      ? { connectionString: externalUrl, cleanup: () => tables.closeRegisteredClients(externalUrl) }
+      : await startEmbeddedPostgresTestDatabase("warm-remote-db-");
     const db = tables.createDb(database.connectionString);
     const companyId = randomUUID(), agentId = randomUUID(), userId = randomUUID(), environmentId = randomUUID(), issueId = randomUUID();
     const { resolveManagedInstructionsRoot } = await import("../agent-instructions.js");
@@ -8049,6 +8059,9 @@ describe("native warm session supervision", () => {
     finally {
       const cleanupFailures: unknown[] = [];
       try { await closeWarmNativeSessionsForEnvironment({ environmentId, reason: "test cleanup" }); } catch (error) { cleanupFailures.push(error); }
+      if (externalUrl) {
+        try { await db.execute(sql`TRUNCATE TABLE ${tables.companies}, ${tables.environments}, ${tables.authUsers} CASCADE`); } catch (error) { cleanupFailures.push(error); }
+      }
       try { await database.cleanup(); } catch (error) { cleanupFailures.push(error); }
       if (previousHome === undefined) delete process.env.PAPERCLIP_HOME; else process.env.PAPERCLIP_HOME = previousHome;
       try {
@@ -11828,7 +11841,10 @@ describe("runnerd provider runtime wiring", () => {
     } finally {owner.mockRestore();await rm(home,{recursive:true,force:true});}
   });
 
-  it("keeps assigned MCP credentials on the control plane for remote Codex", async () => {
+  it.each(["codex", "opencode"] as const)("keeps assigned MCP credentials on the control plane for %s", async (providerKind) => {
+    const selectedExecution: NativeExecutionInput = providerKind === "opencode"
+      ? { ...execution, provider: { kind: "opencode", model: "openrouter/deepseek/deepseek-v4.1-flash-1017", permissionMode: "allow" } }
+      : execution;
     const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
     vi.stubEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.test");
     const exporter = new InMemorySpanExporter();
@@ -11841,13 +11857,13 @@ describe("runnerd provider runtime wiring", () => {
       state.createTransport.mockClear();
       state.toolAuthorityDefinitions.mockClear();
       await createRunnerdBackend({
-        db: leaseDb(execution), execution, runnerInstanceId: "runner-assigned-mcp",
+        db: leaseDb(selectedExecution), execution: selectedExecution, runnerInstanceId: "runner-assigned-mcp",
         runnerEnvironment: {
           PAPERCLIP_NATIVE_MCP_NAME: "paperclip-assigned",
           PAPERCLIP_NATIVE_MCP_URL: "http://127.0.0.1:3217/mcp/gateways/assigned-test",
           PAPERCLIP_NATIVE_MCP_TOKEN: "private-run-token",
         },
-        runnerExecutionTarget: {
+        runnerExecutionTarget: providerKind === "opencode" ? undefined : {
           kind: "remote", transport: "sandbox", providerKey: "daytona",
           leaseId: "lease-assigned-mcp", remoteCwd: "/home/daytona/paperclip-workspace",
           runner: { execute: vi.fn() },
@@ -11855,6 +11871,7 @@ describe("runnerd provider runtime wiring", () => {
       });
       expect(state.createAssignedMcpTools).toHaveBeenCalledWith(expect.objectContaining({
         gatewayPublicId: "assigned-test", bearerToken: "private-run-token",
+        ...(providerKind === "opencode" ? { delivery: "on_demand" } : {}),
       }));
       expect(state.toolAuthorityDefinitions).toHaveBeenCalledWith(expect.objectContaining({ assignedMcpTools }));
       state.createBackend.mock.calls[0]![1].codexTransportFactory!();

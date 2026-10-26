@@ -129,8 +129,12 @@ and account identifiers inside its JSON join the evidence redaction set. The
 subscription suite remains manual-only and never falls back to `XAI_API_KEY`.
 
 Create `runner-e2e-paid`, restrict deployments to the default branch, and put
-only `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`, and
-`DAYTONA_API_KEY` in it. `KIMI_MODEL_API_KEY` remains a local-only catalog name
+only provider credentials needed by the selected paid suites, including
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `XAI_API_KEY`,
+`COPILOT_GITHUB_TOKEN` and `DAYTONA_API_KEY` in it. Copilot is passed only to
+cells selecting `credentialName: COPILOT_GITHUB_TOKEN`, in the paid Product or
+direct-protocol execution step. Never expose it to ordinary PR, build, catalog,
+image or report jobs. `KIMI_MODEL_API_KEY` remains a local-only catalog name
 for pending explicit profiles and is intentionally absent from the workflow
 environment. Product E2E pending-profile admission remains gated separately.
 Do not duplicate these credentials as repository- or

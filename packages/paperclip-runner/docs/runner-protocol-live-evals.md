@@ -159,6 +159,84 @@ change the hosted matrix. The controller must enforce request admission,
 deadlines, and limits before forwarding traffic. A local fake-API probe only
 proves routing; it does not qualify live provider or Braintrust behavior.
 
+
+## Controlled request budgets
+
+The source-checkout controller is
+`packages/paperclip-runner/scripts/controlled-evals/run.mjs`. Runner/evals owns
+this orchestration. It reuses the existing eval request proxy and ledger from
+`tests/runner-e2e` through one import graph; it does not copy their reservation
+or provider-usage rules. It requires the workspace's installed `tsx` runtime.
+It is not a published Runner package entry point.
+
+The controller accepts the existing `--request` and `--output` contract. Set
+`PAPERCLIP_RUNNER_EVAL_CONTROL_MANIFEST` to an explicit reviewed manifest and
+supply the selected upstream credential only to this trusted controller. For
+Runner Evals, pass this controller path as `eval_program.py run --runner-cli`;
+the manifest identifies the actual built `eval-session.js`. The provider child
+receives only its temporary proxy credential and private home.
+
+The manifest schema is `paperclip.runner-eval.controller/v1`. It contains:
+
+- `campaignId`, `maxUsd`, `deadlineAt`, `pricingVerifiedAt`, and
+  `pricingExpiresAt`; admission must fit a current four-hour window.
+- `sourceRevision` and `definitionsRevision`, each an exact commit ID.
+  These are the trusted preparer's provenance declarations.
+- `runnerCli`, `runnerPackage`, and `runnerd`, each an absolute `path` and
+  content `sha256`. The controller checks the three files before launch.
+- An absolute durable `outputDirectory`, outside the disposable case workspace.
+- `route` (`direct` or `braintrust`), plus `projectId` for Braintrust.
+- `models`, using the existing exact-model price, request-limit, and reviewed
+  full-lifecycle `provisionalBound` contract.
+- `overhead`, using the existing four-component operating allowance with a
+  current full-lifecycle bound for every component. This is reserved once.
+- `attempts`, each with a unique `executionId` and `attemptId`,
+  `requestSha256`, `provider`, optional `acpxAgent`, exact `model`, `maxUsd`,
+  `maxRequests`, `maxConcurrent`, and `timeoutMs`. Native Codex and ACPX
+  Claude are supported. Each execution has one explicit attempt and no retry.
+
+Use `requestBindingSha256` from `controlled-evals/manifest.mjs` to bind the
+complete compiled request. It excludes only the temporary working directory
+and native executable path; the executable digest remains bound and its path
+is checked separately. The controller gives the child a retained copy of the
+validated request. Changing prompts, fixtures, models, limits, or attempts
+requires a new reviewed binding.
+
+The sum of every cell's allocation and the once-only operating allowance must
+fit `maxUsd` before any cell starts. A request reserves against its cell's
+ledger before forwarding. Cells cannot borrow unused allocations. Unknown
+requests keep their reservations, and failed or missing cell evidence keeps
+that cell's full allocation in the campaign report. An existing cell directory
+or output is never reset for a retry. Cancellation closes admission, drains
+upstream receipts within the proxy limit, and stops the owned CLI process
+group. Unverified provider cleanup remains explicit and retains the allocation.
+
+Each result retains `controllerAccounting` alongside the original provider
+outcome and usage. Retain the durable controller directory as private evidence:
+its admission, request, gateway descriptor, request receipts, ledger, original
+provider artifact, and final result are required for reconciliation. The
+private program's existing immutable attempt copy includes the result metadata;
+its current default history publisher does not archive this separate directory.
+Do not infer receipt retention from that metadata alone.
+
+```sh
+node packages/paperclip-runner/scripts/controlled-evals/report.mjs \
+  /private/path/controller-manifest.json > /private/path/controller-report.json
+```
+
+The report recomputes ledger costs, checks their attempt/manifest bindings, and
+preserves known partial charges. It reports operating costs as held and total
+costs as provisional when evidence is intact, or incomplete otherwise. It does
+not release historical holds or claim invoice
+settlement. Existing provider usage is retained separately; do not add the
+provider and controller cost observations as if they were separate charges.
+
+This local controller is not yet wired into the hosted matrix. Its durable
+attempt-directory guard applies to one shared filesystem, not independent
+GitHub workers. Hosted integration must bind unique cells to the prepared
+allocation, reject workflow/job reruns, and preserve the controller evidence
+before enabling paid work. Native OTLP routing, report integration, vendor
+metering bounds, and actual paid qualification remain separate gates.
 ## Controller-assigned native observability
 
 The same CLI accepts `--observability-config /absolute/path/observability.json`
@@ -197,6 +275,195 @@ and private receipt retention. This CLI option does not start a relay, set an
 operating allowance, or enable a paid campaign. The existing Product E2E relay
 and launch generator remain the integration owners; the hosted Runner workflow
 still needs its own qualified controller integration.
+
+
+## Controlled request budgets
+
+The source-checkout controller is
+`packages/paperclip-runner/scripts/controlled-evals/run.mjs`. Runner/evals owns
+this orchestration. It reuses the existing eval request proxy and ledger from
+`tests/runner-e2e` through one import graph; it does not copy their reservation
+or provider-usage rules. It requires the workspace's installed `tsx` runtime.
+It is not a published Runner package entry point.
+
+The controller accepts the existing `--request` and `--output` contract. Set
+`PAPERCLIP_RUNNER_EVAL_CONTROL_MANIFEST` to an explicit reviewed manifest and
+supply the selected upstream credential only to this trusted controller. For
+Runner Evals, pass this controller path as `eval_program.py run --runner-cli`;
+the manifest identifies the actual built `eval-session.js`. The provider child
+receives only its temporary proxy credential and private home.
+
+The manifest schema is `paperclip.runner-eval.controller/v1`. It contains:
+
+- `campaignId`, `maxUsd`, `deadlineAt`, `pricingVerifiedAt`, and
+  `pricingExpiresAt`; admission must fit a current four-hour window.
+- `sourceRevision` and `definitionsRevision`, each an exact commit ID.
+  These are the trusted preparer's provenance declarations.
+- `runnerCli`, `runnerPackage`, and `runnerd`, each an absolute `path` and
+  content `sha256`. The controller checks the three files before launch.
+- An absolute durable `outputDirectory`, outside the disposable case workspace.
+- `route` (`direct` or `braintrust`), plus `projectId` for Braintrust.
+- `models`, using the existing exact-model price, request-limit, and reviewed
+  full-lifecycle `provisionalBound` contract.
+- `overhead`, using the existing four-component operating allowance with a
+  current full-lifecycle bound for every component. This is reserved once.
+- `attempts`, each with a unique `executionId` and `attemptId`,
+  `requestSha256`, `provider`, optional `acpxAgent`, exact `model`, `maxUsd`,
+  `maxRequests`, `maxConcurrent`, and `timeoutMs`. Native Codex and ACPX
+  Claude are supported. Each execution has one explicit attempt and no retry.
+- Optional `observability`: an explicit `projectId`, four boolean `capture`
+  switches (`userPrompts`, `assistantResponses`, `toolDetails`, `toolContent`),
+  `nativeLimits`, and a reviewed full-lifecycle `provisionalBound`. When absent,
+  the controller starts no exporter or OTLP relay.
+
+Use `requestBindingSha256` from `controlled-evals/manifest.mjs` to bind the
+complete compiled request. It excludes only the temporary working directory
+and native executable path; the executable digest remains bound and its path
+is checked separately. The controller gives the child a retained copy of the
+validated request. Changing prompts, fixtures, models, limits, or attempts
+requires a new reviewed binding.
+
+The sum of every cell's allocation and the once-only operating allowance must
+fit `maxUsd` before any cell starts. A request reserves against its cell's
+ledger before forwarding. Cells cannot borrow unused allocations. Unknown
+requests keep their reservations, and failed or missing cell evidence keeps
+that cell's full allocation in the campaign report. An existing cell directory
+or output is never reset for a retry. Cancellation closes admission, drains
+upstream receipts within the proxy limit, and stops the owned CLI process
+group. If the CLI exits while its owned group survives, the controller closes
+admission, stops that group, bounds inherited output pipes, and records an
+incomplete attempt. Unverified provider cleanup remains explicit and retains
+the allocation.
+
+Each result retains `controllerAccounting` alongside the original provider
+outcome and usage. Retain the durable controller directory as private evidence:
+its admission, request, gateway descriptor, request receipts, ledger, original
+provider artifact, and final result are required for reconciliation. The
+private `controller-evidence.json` bundle can travel with the immutable attempt.
+Set `PAPERCLIP_RUNNER_EVAL_ARCHIVE_CLI` to the sibling `archive.mjs` when using a
+private eval program with controller retention support. That program validates
+the request before launch, captures the bundle before finalizing the attempt,
+and marks missing or incomplete capture as a non-retryable accounting failure.
+It must use zero infrastructure retries. Older private programs do not capture
+this bundle; result metadata alone is not proof of retention.
+
+```sh
+node packages/paperclip-runner/scripts/controlled-evals/report.mjs \
+  /private/path/controller-manifest.json > /private/path/controller-report.json
+```
+
+To retain or inspect the evidence independently of the original worker:
+
+```sh
+node packages/paperclip-runner/scripts/controlled-evals/archive.mjs pack \
+  /private/path/controller-manifest.json attempt-id \
+  /private/path/runs/attempt-id/controller-evidence.json
+node packages/paperclip-runner/scripts/controlled-evals/archive.mjs report-attempts \
+  /private/path/runs/attempt-id
+```
+
+`pack` is exclusive and never overwrites evidence. The private bundle contains
+the full manifest and exact bytes of the admission, request, gateway descriptor,
+ledger, receipts, provider artifact, result, and bounded stdout/stderr. It omits
+executables, private homes, and caches. Files carry byte lengths and SHA-256
+hashes. These detect corruption; they are not signatures or proof against a
+host that can rewrite all evidence. Known configured credential values are
+checked before encoding and after decoding. Keep bundles private.
+
+Controller post-child reads, archive creation, and durable reports use the same
+nonblocking, no-follow, byte-capped regular-file reader. Configured private/provider
+keys and credentials inside JSON configuration contents are checked in both raw
+and JSON-escaped form. Attempt IDs contain only letters, digits, `_`, `.`, and `-`
+so each retained attempt has one directory name.
+
+The reader accepts only bounded regular files and fixed evidence paths. A
+bundle is limited to 64 MiB of decoded content plus encoding overhead; this
+storage-format limit does not qualify a vendor charge or operating-cost bound.
+`report` accepts standalone bundle files; `report-attempts` additionally binds
+them to the surrounding immutable request and reconstructed controller output,
+including the provider outcome, usage, and complete accounting result. The
+private program may add provenance or a stricter non-retryable retention
+failure. Missing source proof remains incomplete. Both work after the
+original worker directory is gone, using the same hash-chain ledger verifier.
+They group attempts by manifest, count operating holds once, deduplicate exact
+copies, reject conflicting copies, and keep full allocations for missing
+selected attempts. They never consult old worker paths to fill archive gaps.
+
+The campaign collector preserves the bundle in private runs and returns its
+independently replayed totals as `controlledCosts`. For this collector, each
+manifest `executionId` must equal its catalog `cellId`, and the complete
+manifest selection, model, provider, agent profile, and driver must match the
+catalog, including cells with no retained result. Extra attempts are rejected.
+Existing `costs` remain
+legacy provider-usage observations; do not add them to `controlledCosts`.
+The public attempt projection omits bundles and raw `controllerAccounting`.
+Private reports label ledger-known amounts and conservative holds as provisional
+or incomplete; a missing verifier or invalid evidence cannot become a zero cost.
+
+The report recomputes ledger costs, checks their attempt/manifest bindings, and
+preserves known partial charges. It reports operating costs as held and total
+costs as provisional when evidence is intact, or incomplete otherwise. It does
+not release historical holds or claim invoice
+settlement. Existing provider usage is retained separately; do not add the
+provider and controller cost observations as if they were separate charges.
+
+This local controller is not yet wired into the hosted matrix. Its durable
+attempt-directory guard applies to one shared filesystem, not independent
+GitHub workers. Hosted integration must bind unique cells to the prepared
+allocation, reject workflow/job reruns, and preserve the controller evidence
+before enabling paid work. Hosted tracing, destination readback, vendor
+metering bounds, and actual paid qualification remain separate gates.
+## Controller tracing allocations and retained proof
+
+The opt-in controller uses the existing native launch generator and Product E2E
+OTLP relay. `nativeLimits` must explicitly provide `maxRequests`,
+`maxRequestBytes`, `maxTotalBytes`, `maxConcurrent`, `maxExpandedBytes`, and
+`maxRecords`, each within that relay's supported ceilings. These limits apply
+to each selected attempt, including failed attempts. Each attempt additionally
+reserves one controller root request, at most 16 KiB of source JSON, 64 KiB
+expanded source size, and one record. The root relay has its own credential;
+the provider cannot consume its allocation or change its parent.
+
+Use `observabilityBoundConfiguration(manifest)` from `manifest.mjs` as the
+configuration for the observability `provisionalBound`. It binds the complete
+attempt selection, compiled-request digests, revisions, project, capture,
+native and root capacities, deadline, and operating allowance. Its evidence
+SHA-256 must match the observability operating component's evidence. Changing
+these inputs invalidates the qualification. The reviewed evidence must cover
+the sum of all attempts' native and root capacities and full retention costs;
+source bytes and receiver acceptance do not themselves establish billed bytes,
+price, or a vendor spending cap. This declaration does not activate an allowance.
+
+The controller requires `BRAINTRUST_API_KEY` even when model traffic uses a
+direct provider key. Both upstream credentials stay on the controller. The
+provider receives only its attempt's model and native OTLP tokens. Native
+headers and any payload parent must match the exact assigned attempt parent,
+including when another parent belongs to the same project. Cancellation closes
+both relays, aborts pending forwarding, and retains uncertain outcomes without
+retrying them.
+
+Private archives retain `observability.json`, body-free `otlp-native.jsonl` and
+`otlp-controller.jsonl` receipts, and the metadata-only `otlp-root.json`.
+Offline replay validates allocation, parent, descriptor, payload digests,
+admission/outcome pairs, quotas, closure totals, and the root's identity and
+content after the worker is deleted. Missing, partial, quota-exhausted, poisoned,
+or unfinished export evidence keeps the attempt incomplete with its full model
+allocation held and known model charges preserved. Operating holds remain
+reserved once per campaign. OTLP usage is never added to the model ledger.
+
+`observability.status: "accepted"` requires accepted native log and trace
+records plus the controller root. It describes the retained requests only;
+`verification: "unverified"` remains until separate Braintrust readback.
+Neither field proves complete capture, semantic grading success, or invoice
+settlement. The root links revisions, the compiled request, execution, attempt,
+provider, model, and cleanup status. Native receipts are checked before the root
+is built. Its `controller_status_before_root_export` includes known native export
+failures; the final retained report remains authoritative for root-export failures
+or later cancellation. Cancellation stays connected through root finalization.
+Feedback persistence is explicitly
+unavailable in the Runner mock control plane; it does not report zero complaints
+or suggestions. Actual grading and provider failures remain in the immutable
+Runner artifact.
 
 ## Hosted campaign
 
@@ -455,3 +722,23 @@ checksum-verified Grok binary before packaging the portable runtime. Targets
 without the Grok package keep their existing build behavior. This protocol
 workflow uses the explicitly selected API key; subscription credentials are
 not delivered by it.
+
+The controlled Codex profile disables web search. The shared proxy accepts local
+function/custom tool namespaces and still rejects hosted tools, including any
+hidden inside a namespace. These routes do not qualify web-search charges.
+
+The controller stages the exact verified CLI and daemon bytes in its private
+attempt directory. A Node module-resolution hook keeps the CLI's relative
+imports pointed at the trusted source checkout; it does not reload the original
+entry file. Installed dependencies still belong to that trusted checkout. The
+staged copies are removed after verified process cleanup and kept if cleanup is
+incomplete. This path requires the repository's Node 24.11+ runtime.
+
+Campaign reports verify the retained request binding and the digest of every
+request receipt before reducing a cell's allocation. Missing admission, request,
+or receipt evidence preserves known ledger charges and holds the rest of the
+full allocation.
+
+On cancellation, the controller keeps the scheduled process-group SIGKILL until
+any remaining owned descendants receive it, even if the CLI exits first. A
+forced stop still leaves cleanup unverified and retains the full allocation.
