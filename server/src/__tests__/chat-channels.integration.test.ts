@@ -5,6 +5,8 @@ import { createSystemRecovery } from "../services/system-recovery-state.js";
 import { remoteTerminationReceipt } from "../services/remote-execution-termination.js";
 import { stageReceiptReactionRemovals } from "../services/chat-receipt-reactions.js";
 import type { Db } from "@paperclipai/db";
+import { createDatabaseResponseCapture, installDatabaseResponseCapture } from "@paperclipai/db/response-capture";
+import { githubResponseAuthorityFields } from "../services/chat-channels/github/response-authority-read.js";
 import * as activityLogModule from "../services/activity-log.js";
 import * as connectionCredentialBindings from "../services/connection-credential-bindings.js";
 import { chatSlackManagerGrants, chatSlackRegistrations, toolOauthStates } from "@paperclipai/db";
@@ -2583,6 +2585,81 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         .rejects.toMatchObject({ status: 403 });
       await expect(responses.hasWorkingResponseForRun({ ...input, issueId: randomUUID() }))
         .rejects.toMatchObject({ status: 403 });
+    });
+
+    it("bounds GitHub response authorization reads with large saved chat content", async () => {
+      const f = await toolReplyFixture();
+      const [delivery] = await db.select().from(chatDeliveries).where(eq(chatDeliveries.endpointId, f.endpoint.id));
+      const [resource] = await db.select().from(chatEndpointResources).where(eq(chatEndpointResources.id, f.conversation.resourceId!));
+      const [configuration] = await db.select().from(chatGitHubConfigurations).where(eq(chatGitHubConfigurations.endpointId, f.endpoint.id));
+      const bulk = "unused-content-for-response-authorization".repeat(8_192);
+      const setup = { ...f.endpoint.setup, unusedContent: bulk };
+      await db.update(chatEndpoints).set({ communicationInstructions: bulk, setup }).where(eq(chatEndpoints.id, f.endpoint.id));
+      await db.update(chatConversations).set({ communicationGuidance: bulk }).where(eq(chatConversations.id, f.conversation.id));
+      await db.update(chatEndpointResources).set({ metadata: { ...resource.metadata, unusedContent: bulk } })
+        .where(eq(chatEndpointResources.id, resource.id));
+      await db.update(chatGitHubConfigurations).set({ configuration: { ...configuration.configuration,
+        defaults: { ...configuration.configuration.defaults, instructions: bulk } } })
+        .where(eq(chatGitHubConfigurations.endpointId, f.endpoint.id));
+      const normalizedEvent = { ...delivery.normalizedEvent, unusedContent: bulk };
+      await db.update(chatDeliveries).set({ normalizedEvent }).where(eq(chatDeliveries.id, delivery.id));
+      const events: Array<Record<string, unknown>> = [], now = Date.now();
+      const capture = createDatabaseResponseCapture({ start: now - 100, end: now + 59_000 }, event => events.push(event));
+      installDatabaseResponseCapture(db, { chatMessageLinks, chatDeliveries, chatEndpoints, chatConversations,
+        chatEndpointResources, chatGitHubConfigurations, chatExternalPrincipals, chatIdentityLinks,
+        companyMemberships, chatActions, heartbeatRuns }, capture);
+      try {
+        const receipt = await githubResponseCommentService(db, f.providerFetch).tryAcknowledge(delivery.id);
+        expect(receipt?.id).toBeTruthy();
+      } finally { capture.flush(); }
+      expect(Number(events.at(-1)?.responseValueBytes)).toBeLessThan(24_000);
+      expect(events.filter(event => event.table === "chat_message_links").length).toBeGreaterThan(0);
+      expect((await db.select({ normalizedEvent: chatDeliveries.normalizedEvent }).from(chatDeliveries)
+        .where(eq(chatDeliveries.id, delivery.id)))[0].normalizedEvent).toEqual(normalizedEvent);
+      expect((await db.select({ setup: chatEndpoints.setup }).from(chatEndpoints)
+        .where(eq(chatEndpoints.id, f.endpoint.id)))[0].setup).toEqual(setup);
+    });
+
+    it.each(["githubAutomatic", "githubIssue"])("preserves %s policy context while omitting body content", async key => {
+      const f = await toolReplyFixture();
+      const [delivery] = await db.select().from(chatDeliveries).where(eq(chatDeliveries.endpointId, f.endpoint.id));
+      const context = { event: key === "githubIssue" ? "issue_opened" : "opened", repositoryId: "418", repository: "acme/repo",
+        author: { id: "42", login: "octocat", isBot: false }, sender: { id: "42", login: "octocat" },
+        labels: ["review"], draft: false, baseBranch: "master", headSha: "a".repeat(40),
+        body: "unused-body".repeat(32_768), title: "unused-title".repeat(8_192) };
+      const normalizedEvent = { text: "unrelated message text", [key]: { context, revision: 42,
+        policy: { instructions: "unused-policy-instructions".repeat(32_768),
+          prompts: { opened: "unused-policy-prompt".repeat(32_768) } },
+      } };
+      await db.update(chatDeliveries).set({ normalizedEvent }).where(eq(chatDeliveries.id, delivery.id));
+      const events: Array<Record<string, unknown>> = [], now = Date.now();
+      const capture = createDatabaseResponseCapture({ start: now - 100, end: now + 59_000 }, event => events.push(event));
+      installDatabaseResponseCapture(db, { chatDeliveries }, capture);
+      let projected: { event: Record<string, unknown> };
+      try {
+        [projected] = await db.select({ event: githubResponseAuthorityFields.delivery.normalizedEvent })
+          .from(chatDeliveries).where(eq(chatDeliveries.id, delivery.id));
+      } finally { capture.flush(); }
+      const { body: _body, title: _title, ...policy } = context;
+      expect(Number(events.at(-1)?.responseValueBytes)).toBeLessThan(2_048);
+      expect(projected.event).toEqual({ [key]: { context: policy } });
+      expect((await db.select({ event: chatDeliveries.normalizedEvent }).from(chatDeliveries)
+        .where(eq(chatDeliveries.id, delivery.id)))[0].event).toEqual(normalizedEvent);
+    });
+
+    it.each([null, false, 7, "invalid-event", []])("preserves malformed GitHub authority input %j", async value => {
+      const f = await toolReplyFixture();
+      const [delivery] = await db.select().from(chatDeliveries).where(eq(chatDeliveries.endpointId, f.endpoint.id));
+      await db.update(chatDeliveries).set({ normalizedEvent: sql`${JSON.stringify(value)}::jsonb` })
+        .where(eq(chatDeliveries.id, delivery.id));
+      await db.update(chatEndpoints).set({ setup: sql`${JSON.stringify(value)}::jsonb` })
+        .where(eq(chatEndpoints.id, f.endpoint.id));
+      const [projected] = await db.select({ event: githubResponseAuthorityFields.delivery.normalizedEvent })
+        .from(chatDeliveries).where(eq(chatDeliveries.id, delivery.id));
+      const [endpoint] = await db.select({ setup: githubResponseAuthorityFields.endpoint.setup })
+        .from(chatEndpoints).where(eq(chatEndpoints.id, f.endpoint.id));
+      expect(projected.event).toEqual(value);
+      expect(endpoint.setup).toEqual(value);
     });
 
     async function publicationRetryFixture() {
