@@ -40,7 +40,7 @@ import {
 } from "@paperclipai/shared";
 import { forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import {
-  claudeAccessTokenOf, claudeRefreshDue, ClaudeOauthRefreshError, parseStoredClaudeOauth, refreshClaudeOauth, type StoredClaudeOauth,
+  CLAUDE_PROACTIVE_REFRESH_MARGIN_MS, claudeAccessTokenOf, claudeRefreshDue, ClaudeOauthRefreshError, parseStoredClaudeOauth, refreshClaudeOauth, type StoredClaudeOauth,
 } from "./claude-oauth-credential.js";
 import { aiConnectionConfigurationFailure, aiConnectionCredentialNotSharedFailure } from "./ai-connection-configuration-failure.js";
 import { quotaCredentialRecovery, quotaCredentialHash } from "./quota-credential-recovery.js";
@@ -61,6 +61,12 @@ function canUseCredential(
     audience.length === 0 || audience.some((member) => member.subjectType === "user" && member.subjectId === userId)
   );
 }
+
+/** How often the server looks for Claude sign-ins close to expiry; the first look follows a start or a resume soon. */
+export const CLAUDE_CREDENTIAL_RENEWAL_INTERVAL_MS = 5 * 60 * 1000;
+export const CLAUDE_CREDENTIAL_RENEWAL_STARTUP_DELAY_MS = 20 * 1000;
+/** A refused renewal marks the login for reconnect once its access token has this long left. */
+const CLAUDE_PROACTIVE_REAUTHORIZE_WINDOW_MS = 30 * 60 * 1000;
 
 const claudeGrantExchanges = new Map<string, Promise<unknown>>();
 /**
@@ -567,7 +573,11 @@ export function aiConnectionService(db: Db) {
    * grant and the replacement is journaled before it is saved. The company-wide secret lock is held only for the
    * short save, never during the network request.
    */
-  async function refreshClaudeCredential(row: Parameters<typeof credentialRaw>[0], observed: StoredClaudeOauth): Promise<string> {
+  async function refreshClaudeCredential(
+    row: Parameters<typeof credentialRaw>[0],
+    observed: StoredClaudeOauth,
+    options: { marginMs?: number; reauthorizeWithinMs?: number } = {},
+  ): Promise<string> {
     const companyId = row.connection.companyId;
     const recovery = quotaCredentialRecovery(companyId, row.grant.id);
     let savingReplacement = false;
@@ -632,7 +642,7 @@ export function aiConnectionService(db: Db) {
           await recovery.clear();
           pending = null;
         }
-        if (!pending && (!stored || !claudeRefreshDue(stored))) return current;
+        if (!pending && (!stored || !claudeRefreshDue(stored, Date.now(), options.marginMs))) return current;
         let refreshed = pending?.value;
         if (!refreshed) {
           await recovery.prepare();
@@ -641,7 +651,7 @@ export function aiConnectionService(db: Db) {
             if (!(error instanceof ClaudeOauthRefreshError)) throw error;
             // The access token is still good for part of the margin; use it
             // rather than failing a run over a renewal that can be retried.
-            if (stored!.expiresAt > Date.now() + 60_000) {
+            if (stored!.expiresAt > Date.now() + (error.rejected ? options.reauthorizeWithinMs ?? 60_000 : 60_000)) {
               logger.warn({ grantId: grant.id, rejected: error.rejected }, "Claude token renewal failed; using the current access token");
               await recovery.clear().catch(clearError => logger.warn({ err: clearError, grantId: grant.id }, "Saved Claude credential recovery cleanup pending"));
               return current;
@@ -682,6 +692,39 @@ export function aiConnectionService(db: Db) {
       }
       throw error;
     }
+  }
+  /**
+   * Renews every active Claude sign-in that is close to expiry, even when no run asks for it. A login that sits idle
+   * (for example while the host sleeps) would otherwise reach the end of its access token and look signed out. Each
+   * renewal runs under the same per-grant exchange as a run's renewal. A refusal by the provider marks the
+   * connection for reconnect before the access token ends, so the user sees the card while work still runs.
+   */
+  async function renewDueClaudeCredentials(now = Date.now()) {
+    const rows = await db.select({ connection: toolConnections, grant: connectionGrants })
+      .from(toolConnections).innerJoin(connectionGrants, and(
+        eq(connectionGrants.connectionId, toolConnections.id), eq(connectionGrants.companyId, toolConnections.companyId),
+      )).where(and(
+        eq(toolConnections.connectionPurpose, "ai"), eq(toolConnections.enabled, true), eq(toolConnections.status, "active"),
+        eq(connectionGrants.status, "active"),
+      ));
+    const result = { checked: 0, attempted: 0, failed: 0 };
+    for (const row of rows) {
+      const metadata = aiConnectionMetadataSchema.safeParse(row.connection.config.ai);
+      if (!metadata.success || metadata.data.provider !== "anthropic" || metadata.data.method !== "subscription") continue;
+      result.checked += 1;
+      try {
+        const stored = parseStoredClaudeOauth(await credentialRaw(row));
+        if (!stored || !claudeRefreshDue(stored, now, CLAUDE_PROACTIVE_REFRESH_MARGIN_MS)) continue;
+        result.attempted += 1;
+        await refreshClaudeCredential(row, stored, {
+          marginMs: CLAUDE_PROACTIVE_REFRESH_MARGIN_MS, reauthorizeWithinMs: CLAUDE_PROACTIVE_REAUTHORIZE_WINDOW_MS,
+        });
+      } catch (error) {
+        result.failed += 1;
+        logger.warn({ err: error, grantId: row.grant.id }, "Background Claude token renewal failed");
+      }
+    }
+    return result;
   }
   async function save(
     companyId: string,
@@ -1133,6 +1176,34 @@ export function aiConnectionService(db: Db) {
     }
     return failAuthentication(input);
   }
+  /**
+   * How a sign-in failure of a finished run relates to the credential now. "renewed": the credential was renewed or
+   * reconnected after the run began. The provider stops accepting the old access token when it rotates, so the
+   * failure says nothing about the login and the work can start again at once. "needs_reauthorization": the
+   * login is disabled until the user signs in again. "current": the run used the credential that is stored now.
+   */
+  async function authenticationFailureState(input: {
+    companyId: string;
+    runStartedAt: Date;
+    attribution: AiConnectionAttribution & { identity: string };
+  }): Promise<"renewed" | "needs_reauthorization" | "current"> {
+    const { attribution } = input;
+    if (attribution.provider !== "anthropic") return "current";
+    return withClaudeGrantExchange(db, attribution.grantId, async () => {
+      const [row] = await db.select({ connection: toolConnections, grant: connectionGrants })
+        .from(connectionGrants).innerJoin(toolConnections, and(
+          eq(toolConnections.id, connectionGrants.connectionId), eq(toolConnections.companyId, connectionGrants.companyId),
+        )).where(and(
+          eq(connectionGrants.companyId, input.companyId), eq(connectionGrants.id, attribution.grantId),
+          eq(connectionGrants.connectionId, attribution.connectionId),
+        ));
+      if (!row) return "current";
+      if (row.grant.status !== "active") return "needs_reauthorization";
+      if (row.grant.updatedAt > input.runStartedAt) return "renewed";
+      const generation = createHash("sha256").update(claudeAccessTokenOf(await credentialRaw(row))).digest("hex").slice(0, 16);
+      return attribution.identity !== `${row.grant.id}:${attribution.responsibleUserId ?? "shared"}:${generation}` ? "renewed" : "current";
+    });
+  }
   async function failAuthentication(input: Parameters<typeof markAuthenticationFailed>[0]) {
     return withAccountHomeSecretMutationLock(undefined, input.companyId, async () => {
       let recovered = false;
@@ -1288,5 +1359,5 @@ export function aiConnectionService(db: Db) {
       return [{ ...row, summary }];
     });
   }
-  return { list, selectDecision, selectFastResponse, quotaAccounts, subscriptionAccounts: (companyId: string, userId: string) => quotaAccounts(companyId, userId, true), refreshQuotaCredential, select, credential, credentialRaw, runtimeCredential, probeUsage, save, setDefault, membership, markAuthenticationFailed };
+  return { list, selectDecision, selectFastResponse, quotaAccounts, subscriptionAccounts: (companyId: string, userId: string) => quotaAccounts(companyId, userId, true), refreshQuotaCredential, renewDueClaudeCredentials, select, credential, credentialRaw, runtimeCredential, probeUsage, save, setDefault, membership, markAuthenticationFailed };
 }

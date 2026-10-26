@@ -269,6 +269,20 @@ it as the user's provider default or validates and updates the agent's explicit
 account binding. The original account is retained. Accepting the card resumes with a fresh session
 through the existing durable continuation delivery.
 
+A Claude subscription access token lasts about eight hours. The server renews every
+active Claude sign-in that has less than three hours left, on a five-minute sweep, even
+when no run asks for it. The sweep uses the same per-grant exchange lock as a run's
+renewal. If the provider refuses a renewal and less than 30 minutes of the token remain,
+the connection is marked for reconnect so the card appears while work still runs.
+
+A run that fails to sign in with a token that was renewed or reconnected after the run
+began (a rotation race) restarts after five seconds without spending a failure retry.
+A run that fails to sign in while the login needs the user stays where it is: the task
+keeps its status, no retry is spent, and the periodic recovery sweep starts it again
+after the credential changes. A run whose controller lease was lost because the host
+stopped (sleep, stall) retries with a wait that doubles up to ten minutes. It does not
+spend the failure budget and never moves the task to `blocked`.
+
 For compatible legacy agents, the card offers the responsible person's provider
 connection without changing authentication automatically. After connecting,
 **Use connection and continue** checks agent-update permissions and validates in

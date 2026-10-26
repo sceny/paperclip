@@ -8,6 +8,8 @@ export const CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 export const CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
 /** Renew early so a long run does not outlive the token it started with. */
 export const CLAUDE_REFRESH_MARGIN_MS = 2 * 60 * 60 * 1000;
+/** The background renewal starts earlier than a run would, so an idle login still renews while its refresh token is valid. */
+export const CLAUDE_PROACTIVE_REFRESH_MARGIN_MS = 3 * 60 * 60 * 1000;
 /** The only scope a run needs; `claude setup-token` used to grant exactly this. */
 export const CLAUDE_RUN_SCOPES = ["user:inference"];
 const REFRESH_TIMEOUT_MS = 60_000;
@@ -68,8 +70,8 @@ export function claudeScopesExceedRun(stored: StoredClaudeOauth): boolean {
 }
 
 /** Due when the token nears expiry, or when a broad login token has not yet been narrowed for runs. */
-export function claudeRefreshDue(stored: StoredClaudeOauth, now = Date.now()): boolean {
-  if (stored.expiresAt - CLAUDE_REFRESH_MARGIN_MS <= now) return true;
+export function claudeRefreshDue(stored: StoredClaudeOauth, now = Date.now(), marginMs = CLAUDE_REFRESH_MARGIN_MS): boolean {
+  if (stored.expiresAt - marginMs <= now) return true;
   return claudeScopesExceedRun(stored) && !stored.scopeNarrowingRefused;
 }
 

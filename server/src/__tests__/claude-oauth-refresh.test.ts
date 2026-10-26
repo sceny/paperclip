@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import os from "node:os";
@@ -277,5 +277,74 @@ describe("Claude subscription token renewal", () => {
     expect(grant.status).toBe("active");
     expect(await stored(row)).toMatchObject({ refreshToken: "refresh-1" });
     expect(await service.credential(row)).toBe("access-1");
+  });
+});
+
+describe("Claude background token renewal", () => {
+  // Earlier cases leave connections behind that would answer the same fake provider.
+  beforeEach(async () => { await db.update(connectionGrants).set({ status: "needs_reauthorization" }); });
+
+  it("renews an idle login before its token is close to ending, without any run asking", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    const request = providerSequence([granted(1)]);
+    const row = await connect(document(0, T0 + 2.5 * HOUR));
+    expect(await service.renewDueClaudeCredentials()).toMatchObject({ attempted: 1, failed: 0 });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(await stored(row)).toMatchObject({ accessToken: "access-1", refreshToken: "refresh-1", expiresAt: T0 + 8 * HOUR });
+    request.mockClear();
+    expect(await service.renewDueClaudeCredentials()).toMatchObject({ attempted: 0 });
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it("leaves a login with a fresh token alone", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    const request = providerSequence([granted(1)]);
+    const row = await connect(document(0, T0 + 6 * HOUR));
+    expect(await service.renewDueClaudeCredentials()).toMatchObject({ checked: 1, attempted: 0 });
+    expect(request).not.toHaveBeenCalled();
+    expect(await stored(row)).toMatchObject({ accessToken: "access-0" });
+  });
+
+  it("shows the reconnect request while the old token still works when the provider refuses the renewal", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    providerSequence([() => new Response("{}", { status: 400 })]);
+    const row = await connect(document(0, T0 + 20 * 60 * 1000));
+    await service.renewDueClaudeCredentials();
+    const [grant] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, row.grant.id));
+    const [connection] = await db.select().from(toolConnections).where(eq(toolConnections.id, row.connection.id));
+    expect(grant.status).toBe("needs_reauthorization");
+    expect(connection.healthStatus).toBe("error");
+  });
+
+  it("keeps the login usable when a refused renewal still has time to be retried", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    providerSequence([() => new Response("{}", { status: 400 })]);
+    const row = await connect(document(0, T0 + 2.5 * HOUR));
+    await service.renewDueClaudeCredentials();
+    const [grant] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, row.grant.id));
+    expect(grant.status).toBe("active");
+    expect(await service.credential(row)).toBe("access-0");
+  });
+
+  it("tells a failed run whether the login was renewed after it started", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    providerSequence([granted(1)]);
+    const row = await connect(document(0, T0 + 2.5 * HOUR));
+    const generation = (token: string) => createHash("sha256").update(token).digest("hex").slice(0, 16);
+    const attribution = (token: string) => ({ connectionId: row.connection.id, grantId: row.grant.id, provider: "anthropic" as const,
+      method: "subscription" as const, mode: "responsible_user" as const, responsibleUserId: row.grant.subjectUserId,
+      identity: `${row.grant.id}:${row.grant.subjectUserId ?? "shared"}:${generation(token)}` });
+    const startedAt = new Date(T0 + 365 * 24 * HOUR);
+    expect(await service.authenticationFailureState({ companyId, runStartedAt: startedAt, attribution: attribution("access-0") })).toBe("current");
+    await service.renewDueClaudeCredentials();
+    expect(await service.authenticationFailureState({ companyId, runStartedAt: startedAt, attribution: attribution("access-0") })).toBe("renewed");
+    expect(await service.authenticationFailureState({ companyId, runStartedAt: startedAt, attribution: attribution("access-1") })).toBe("current");
+    await db.update(connectionGrants).set({ status: "needs_reauthorization" }).where(eq(connectionGrants.id, row.grant.id));
+    expect(await service.authenticationFailureState({ companyId, runStartedAt: startedAt, attribution: attribution("access-1") })).toBe("needs_reauthorization");
   });
 });
