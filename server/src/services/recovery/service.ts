@@ -21,7 +21,7 @@ import {
 import { CONTROLLER_LEASE_LOST_FAILURE_CODE, hasLiveLegacyController } from "../legacy-controller-lease.js";
 import { isCompletedOnboardingHandoffWake } from "../chat-completion-delivery.js";
 import { instanceSettingsService } from "../instance-settings.js";
-import { isWaitingConversation, settleConversationTurn, deliverConversationComments } from "../agent-conversations.js";
+import { isWaitingConversation, settleConversationTurnForRun, deliverConversationComments } from "../agent-conversations.js";
 import {
   and,
   asc,
@@ -4582,7 +4582,7 @@ export function recoveryService(
       if (issue.conversationAgentId) {
         const lastRun = await getLatestIssueRun(issue.companyId, issue.id);
         if (lastRun?.status === "succeeded") {
-          if (await settleConversationTurn(db, (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, lastRun.id)))[0]!)) {
+          if (await settleConversationTurnForRun(db, issue.companyId, lastRun.id)) {
             const [current] = await db.select().from(issues).where(eq(issues.id, issue.id));
             if (current) Object.assign(issue, current);
           }

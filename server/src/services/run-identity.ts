@@ -434,13 +434,13 @@ export async function acceptSteeredIdentity(
 export async function captureRunIdentity(
   db: Db,
   input: { companyId: string; runId: string; agentId: string },
-  options?: { readScope: "github_credentials" },
+  options?: { readScope: "github_credentials" | "request_authentication" },
 ) {
   // Lock acquisition serializes with steering delivery and its durable acknowledgement.
   return db.transaction(async (tx) => {
     await lockIdentityTask(tx, input.companyId, input.runId);
     const [run] = await tx
-      .select(options?.readScope === "github_credentials" ? {
+      .select(options?.readScope === "github_credentials" || options?.readScope === "request_authentication" ? {
         ...getTableColumns(heartbeatRuns),
         contextSnapshot: sql<Record<string, unknown> | null>`case when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
           then jsonb_build_object('issueId', ${heartbeatRuns.contextSnapshot}->'issueId',

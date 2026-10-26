@@ -1488,6 +1488,7 @@ export async function finalizeNativeRun(input: {
       workspaceFinalizeStatus: input.workspaceFinalizeStatus,
       monitorDelivery,
       monitorWaitAt: assessment.continuation?.kind === "monitor" ? monitorWaitAt : null,
+      preservedMonitorWait,
     });
     await input.db
       .update(nativeRunFinalizations)
