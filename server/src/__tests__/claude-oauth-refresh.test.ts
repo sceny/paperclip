@@ -234,6 +234,22 @@ describe("Claude subscription token renewal", () => {
     expect(request).toHaveBeenCalledTimes(2);
   });
 
+  it("renews through a pool of one connection because the renewal lock holds its own", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    const request = providerSequence([granted(1)]);
+    const row = await connect(document(0, T0 + 1 * HOUR));
+    const single = createDb(database.connectionString, { maxConnections: 1 });
+    try {
+      const renewal = aiConnectionService(single).credential(row);
+      const outcome = await Promise.race([renewal, new Promise<string>(resolve => setTimeout(() => resolve("stalled"), 5000))]);
+      expect(outcome).toBe("access-1");
+      expect(request).toHaveBeenCalledTimes(1);
+    } finally {
+      await single.$client.end({ timeout: 1 });
+    }
+  });
+
   it("exchanges the refresh token once across server processes that share the database", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(T0);

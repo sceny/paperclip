@@ -20,6 +20,7 @@ import {
   toolApplications,
   toolConnections,
   toolConnectionInstalls,
+  withDedicatedDbConnection,
 } from "@paperclipai/db";
 import {
   AI_CONNECTION_CAPABILITIES,
@@ -72,14 +73,15 @@ const claudeGrantExchanges = new Map<string, Promise<unknown>>();
 /**
  * Runs one Claude token exchange, or one failure verdict on the same credential, at a time per grant. The provider
  * rotates the refresh token, so the work is serialized in this process and, through a database advisory lock held
- * for the transaction, across server processes that share the database. Only this grant is locked.
+ * for the transaction, across server processes that share the database. Only this grant is locked. The lock holds
+ * its own connection so the work inside reads and saves through the normal pool, even when that pool has one slot.
  */
 function withClaudeGrantExchange<T>(db: Db, grantId: string, task: () => Promise<T>): Promise<T> {
   const previous = claudeGrantExchanges.get(grantId) ?? Promise.resolve();
-  const exclusive = () => db.transaction(async (tx) => {
+  const exclusive = () => withDedicatedDbConnection(db, connection => connection.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`paperclip:claude-grant-exchange:${grantId}`}, 0))`);
     return task();
-  });
+  }));
   const run = previous.catch(() => undefined).then(exclusive);
   const tail = run.catch(() => undefined);
   claudeGrantExchanges.set(grantId, tail);
