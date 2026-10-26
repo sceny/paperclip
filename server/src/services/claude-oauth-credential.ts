@@ -1,11 +1,15 @@
 // A Claude subscription connection from `claude auth login` stores the CLI's
 // OAuth document, not only the access token. The access token lives about eight
-// hours; the refresh token renews it. Runs receive only the access token.
+// hours; the refresh token renews it. Runs receive only the access token, and
+// only after it was renewed for inference alone: the login also grants
+// organization and account management, which an agent run must not hold.
 
 export const CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 export const CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
 /** Renew early so a long run does not outlive the token it started with. */
 export const CLAUDE_REFRESH_MARGIN_MS = 2 * 60 * 60 * 1000;
+/** The only scope a run needs; `claude setup-token` used to grant exactly this. */
+export const CLAUDE_RUN_SCOPES = ["user:inference"];
 const REFRESH_TIMEOUT_MS = 60_000;
 
 export interface StoredClaudeOauth {
@@ -15,6 +19,8 @@ export interface StoredClaudeOauth {
   scopes?: string[];
   subscriptionType?: string;
   rateLimitTier?: string;
+  /** The provider kept the broader scopes when asked for inference only; stop asking. */
+  scopeNarrowingRefused?: boolean;
 }
 
 const nonEmpty = (value: unknown): value is string => typeof value === "string" && value.length > 0;
@@ -31,6 +37,7 @@ function pickStored(source: unknown): StoredClaudeOauth | null {
     ...(Array.isArray(oauth.scopes) ? { scopes: oauth.scopes.filter((scope): scope is string => typeof scope === "string") } : {}),
     ...(nonEmpty(oauth.subscriptionType) ? { subscriptionType: oauth.subscriptionType } : {}),
     ...(nonEmpty(oauth.rateLimitTier) ? { rateLimitTier: oauth.rateLimitTier } : {}),
+    ...(oauth.scopeNarrowingRefused === true ? { scopeNarrowingRefused: true } : {}),
   };
 }
 
@@ -55,8 +62,15 @@ export function claudeAccessTokenOf(raw: string): string {
   return parseStoredClaudeOauth(raw)?.accessToken ?? raw;
 }
 
+/** True when the access token carries scopes beyond what a run needs. */
+export function claudeScopesExceedRun(stored: StoredClaudeOauth): boolean {
+  return Boolean(stored.scopes?.some(scope => !CLAUDE_RUN_SCOPES.includes(scope)));
+}
+
+/** Due when the token nears expiry, or when a broad login token has not yet been narrowed for runs. */
 export function claudeRefreshDue(stored: StoredClaudeOauth, now = Date.now()): boolean {
-  return stored.expiresAt - CLAUDE_REFRESH_MARGIN_MS <= now;
+  if (stored.expiresAt - CLAUDE_REFRESH_MARGIN_MS <= now) return true;
+  return claudeScopesExceedRun(stored) && !stored.scopeNarrowingRefused;
 }
 
 export class ClaudeOauthRefreshError extends Error {
@@ -80,22 +94,32 @@ export async function refreshClaudeOauth(
 ): Promise<string> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const now = options.now ?? Date.now;
-  let response: Response;
-  try {
-    response = await fetchImpl(CLAUDE_OAUTH_TOKEN_URL, {
-      method: "POST",
-      redirect: "error",
-      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
-      headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify({
-        grant_type: "refresh_token",
-        refresh_token: stored.refreshToken,
-        client_id: CLAUDE_OAUTH_CLIENT_ID,
-        ...(stored.scopes?.length ? { scope: stored.scopes.join(" ") } : {}),
-      }),
-    });
-  } catch {
-    throw new ClaudeOauthRefreshError("Claude token refresh could not reach the provider", false);
+  const post = async (scopes: string[] | undefined): Promise<Response> => {
+    try {
+      return await fetchImpl(CLAUDE_OAUTH_TOKEN_URL, {
+        method: "POST",
+        redirect: "error",
+        signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({
+          grant_type: "refresh_token",
+          refresh_token: stored.refreshToken,
+          client_id: CLAUDE_OAUTH_CLIENT_ID,
+          ...(scopes?.length ? { scope: scopes.join(" ") } : {}),
+        }),
+      });
+    } catch {
+      throw new ClaudeOauthRefreshError("Claude token refresh could not reach the provider", false);
+    }
+  };
+  // Ask for inference only. A refusal of the scope itself is not a revoked login:
+  // repeat with the stored scopes and remember not to ask again.
+  const narrow = claudeScopesExceedRun(stored) && !stored.scopeNarrowingRefused;
+  let refusedNarrowing = false;
+  let response = await post(narrow ? CLAUDE_RUN_SCOPES : stored.scopes);
+  if (narrow && response.status === 400 && (await providerErrorCode(response)) === "invalid_scope") {
+    refusedNarrowing = true;
+    response = await post(stored.scopes);
   }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
@@ -113,12 +137,28 @@ export async function refreshClaudeOauth(
   if (!payload || !nonEmpty(payload.access_token) || typeof payload.expires_in !== "number" || !(payload.expires_in > 0)) {
     throw new ClaudeOauthRefreshError("Claude token refresh returned an unexpected response", false);
   }
+  // A response without `scope` grants what was requested (RFC 6749 section 5.1).
+  const granted = nonEmpty(payload.scope)
+    ? payload.scope.split(/\s+/).filter(Boolean)
+    : refusedNarrowing || !narrow ? stored.scopes : CLAUDE_RUN_SCOPES;
+  const { scopeNarrowingRefused: _previous, ...rest } = stored;
   const next: StoredClaudeOauth = {
-    ...stored,
+    ...rest,
     accessToken: payload.access_token,
     refreshToken: nonEmpty(payload.refresh_token) ? payload.refresh_token : stored.refreshToken,
     expiresAt: now() + payload.expires_in * 1000,
-    ...(nonEmpty(payload.scope) ? { scopes: payload.scope.split(/\s+/).filter(Boolean) } : {}),
+    ...(granted ? { scopes: granted } : {}),
   };
+  if (stored.scopeNarrowingRefused || (narrow && claudeScopesExceedRun(next))) next.scopeNarrowingRefused = true;
   return JSON.stringify({ claudeAiOauth: next });
+}
+
+/** The OAuth `error` code of a failed response, read from a copy so the caller can still use the original. */
+async function providerErrorCode(response: Response): Promise<string | null> {
+  try {
+    const body = (await response.clone().json()) as { error?: unknown } | null;
+    return typeof body?.error === "string" ? body.error : null;
+  } catch {
+    return null;
+  }
 }

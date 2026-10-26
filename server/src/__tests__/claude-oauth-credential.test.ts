@@ -5,7 +5,7 @@ import {
 } from "../services/claude-oauth-credential.js";
 
 const HOUR = 60 * 60 * 1000;
-const oauth = { accessToken: "access-0", refreshToken: "refresh-0", expiresAt: 8 * HOUR, scopes: ["user:inference", "user:profile"], subscriptionType: "max" };
+const oauth = { accessToken: "access-0", refreshToken: "refresh-0", expiresAt: 8 * HOUR, scopes: ["user:inference"], subscriptionType: "max" };
 const stored = JSON.stringify({ claudeAiOauth: oauth });
 
 describe("Claude OAuth credential", () => {
@@ -35,16 +35,48 @@ describe("Claude OAuth credential", () => {
   });
 
   it("exchanges the refresh token and stores the rotated pair", async () => {
-    const fetchImpl = vi.fn(async () => Response.json({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 28800, scope: "user:inference user:profile" }));
+    const fetchImpl = vi.fn(async () => Response.json({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 28800, scope: "user:inference" }));
     const next = await refreshClaudeOauth(parseStoredClaudeOauth(stored)!, { fetchImpl: fetchImpl as unknown as typeof fetch, now: () => 7 * HOUR });
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe(CLAUDE_OAUTH_TOKEN_URL);
     expect(JSON.parse(String(init.body))).toEqual({
-      grant_type: "refresh_token", refresh_token: "refresh-0", client_id: CLAUDE_OAUTH_CLIENT_ID, scope: "user:inference user:profile",
+      grant_type: "refresh_token", refresh_token: "refresh-0", client_id: CLAUDE_OAUTH_CLIENT_ID, scope: "user:inference",
     });
     expect(parseStoredClaudeOauth(next)).toMatchObject({
       accessToken: "access-1", refreshToken: "refresh-1", expiresAt: 7 * HOUR + 28800 * 1000, subscriptionType: "max",
     });
+  });
+
+  it("is due at once for a broad login token, until the provider has refused to narrow it", () => {
+    const broad = parseStoredClaudeOauth(JSON.stringify({ claudeAiOauth: { ...oauth, scopes: ["user:inference", "org:create_api_key"] } }))!;
+    expect(claudeRefreshDue(broad, 0)).toBe(true);
+    expect(claudeRefreshDue({ ...broad, scopeNarrowingRefused: true }, 0)).toBe(false);
+    expect(claudeRefreshDue({ ...broad, scopes: undefined }, 0)).toBe(false);
+  });
+
+  it("asks the provider for inference only and keeps what it grants", async () => {
+    const broad = parseStoredClaudeOauth(JSON.stringify({ claudeAiOauth: { ...oauth, scopes: ["user:inference", "org:create_api_key", "user:profile"] } }))!;
+    const fetchImpl = vi.fn(async () => Response.json({ access_token: "access-1", expires_in: 3600 }));
+    const next = await refreshClaudeOauth(broad, { fetchImpl: fetchImpl as unknown as typeof fetch, now: () => 0 });
+    expect(JSON.parse(String((fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1].body)).scope).toBe("user:inference");
+    expect(parseStoredClaudeOauth(next)).toMatchObject({ scopes: ["user:inference"] });
+    expect(parseStoredClaudeOauth(next)?.scopeNarrowingRefused).toBeUndefined();
+  });
+
+  it("marks the token when the provider returns broad scopes anyway, and does not retry", async () => {
+    const broad = parseStoredClaudeOauth(JSON.stringify({ claudeAiOauth: { ...oauth, scopes: ["user:inference", "org:create_api_key"] } }))!;
+    const fetchImpl = vi.fn(async () => Response.json({ access_token: "access-1", expires_in: 28800, scope: "user:inference org:create_api_key" }));
+    const next = parseStoredClaudeOauth(await refreshClaudeOauth(broad, { fetchImpl: fetchImpl as unknown as typeof fetch, now: () => 0 }))!;
+    expect(next.scopeNarrowingRefused).toBe(true);
+    expect(claudeRefreshDue(next, 0)).toBe(false);
+  });
+
+  it("treats a refused narrowing as a refused scope, not a revoked login, only for invalid_scope", async () => {
+    const broad = parseStoredClaudeOauth(JSON.stringify({ claudeAiOauth: { ...oauth, scopes: ["user:inference", "org:create_api_key"] } }))!;
+    const fetchImpl = vi.fn(async () => Response.json({ error: "invalid_grant" }, { status: 400 }));
+    const error = await refreshClaudeOauth(broad, { fetchImpl: fetchImpl as unknown as typeof fetch }).catch(e => e);
+    expect(error.rejected).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the previous refresh token when the provider does not rotate it", async () => {

@@ -63,10 +63,18 @@ function canUseCredential(
 }
 
 const claudeGrantExchanges = new Map<string, Promise<unknown>>();
-/** Runs one Claude token exchange at a time per grant; the provider rotates the refresh token. */
-function withClaudeGrantExchange<T>(grantId: string, task: () => Promise<T>): Promise<T> {
+/**
+ * Runs one Claude token exchange, or one failure verdict on the same credential, at a time per grant. The provider
+ * rotates the refresh token, so the work is serialized in this process and, through a database advisory lock held
+ * for the transaction, across server processes that share the database. Only this grant is locked.
+ */
+function withClaudeGrantExchange<T>(db: Db, grantId: string, task: () => Promise<T>): Promise<T> {
   const previous = claudeGrantExchanges.get(grantId) ?? Promise.resolve();
-  const run = previous.catch(() => undefined).then(task);
+  const exclusive = () => db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`paperclip:claude-grant-exchange:${grantId}`}, 0))`);
+    return task();
+  });
+  const run = previous.catch(() => undefined).then(exclusive);
   const tail = run.catch(() => undefined);
   claudeGrantExchanges.set(grantId, tail);
   void tail.then(() => { if (claudeGrantExchanges.get(grantId) === tail) claudeGrantExchanges.delete(grantId); });
@@ -614,7 +622,7 @@ export function aiConnectionService(db: Db) {
     });
     const busy = () => unprocessable("AI credentials are being updated. Retry shortly.", { code: "ai_connection_busy" });
     try {
-      const value = await withClaudeGrantExchange(row.grant.id, async () => {
+      const value = await withClaudeGrantExchange(db, row.grant.id, async () => {
         // Another run, or a reconnect, may have renewed it while this one waited.
         const { grant, ref, current } = await read(db, false);
         const stored = parseStoredClaudeOauth(current);
@@ -1118,6 +1126,14 @@ export function aiConnectionService(db: Db) {
     runStartedAt: Date;
     attribution: AiConnectionAttribution & { identity: string };
   }) {
+    // A Claude renewal may be waiting on the provider with a replacement not yet journaled. Decide only after it
+    // finishes, so the verdict sees the renewed token or its journal instead of disabling the grant mid-exchange.
+    if (input.attribution.provider === "anthropic") {
+      return withClaudeGrantExchange(db, input.attribution.grantId, () => failAuthentication(input));
+    }
+    return failAuthentication(input);
+  }
+  async function failAuthentication(input: Parameters<typeof markAuthenticationFailed>[0]) {
     return withAccountHomeSecretMutationLock(undefined, input.companyId, async () => {
       let recovered = false;
       await db.transaction(async (tx) => {

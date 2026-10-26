@@ -7,6 +7,7 @@ import { eq } from "drizzle-orm";
 import { agents, companies, companyMemberships, connectionGrants, createDb, toolConnections } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "@paperclipai/db/test-embedded-postgres";
 import { aiConnectionService } from "../services/ai-connections.js";
+import { createHash } from "node:crypto";
 import { quotaCredentialRecovery, quotaCredentialHash } from "../services/quota-credential-recovery.js";
 import { parseStoredClaudeOauth } from "../services/claude-oauth-credential.js";
 import * as secretsModule from "../services/secrets.js";
@@ -24,8 +25,8 @@ let service: ReturnType<typeof aiConnectionService>;
 let home: string;
 let owners = 0;
 
-const document = (n: number, expiresAt: number) => JSON.stringify({ claudeAiOauth: {
-  accessToken: `access-${n}`, refreshToken: `refresh-${n}`, expiresAt, scopes: ["user:inference", "user:profile"], subscriptionType: "max",
+const document = (n: number, expiresAt: number, scopes = ["user:inference"]) => JSON.stringify({ claudeAiOauth: {
+  accessToken: `access-${n}`, refreshToken: `refresh-${n}`, expiresAt, scopes: scopes, subscriptionType: "max",
 } });
 
 async function connect(value: string) {
@@ -201,5 +202,80 @@ describe("Claude subscription token renewal", () => {
     expect(await service.credential(row)).toBe("access-0");
     const [grant] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, row.grant.id));
     expect(grant.status).toBe("active");
+  });
+
+  it("renews a broad login token for inference only before any run receives it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    const request = providerSequence([() => Response.json({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 28800, scope: "user:inference" })]);
+    const row = await connect(document(0, T0 + 8 * HOUR, ["user:inference", "user:profile", "org:create_api_key", "user:sessions:claude_code"]));
+    expect(await service.runtimeCredential(row)).toBe("access-1");
+    expect(JSON.parse(String(request.mock.calls[0][1]?.body))).toMatchObject({ refresh_token: "refresh-0", scope: "user:inference" });
+    expect(await stored(row)).toMatchObject({ accessToken: "access-1", scopes: ["user:inference"] });
+    expect(await service.runtimeCredential(row)).toBe("access-1");
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the login scopes once when the provider refuses an inference-only renewal", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    const broad = ["user:inference", "org:create_api_key"];
+    const request = providerSequence([
+      () => Response.json({ error: "invalid_scope" }, { status: 400 }),
+      () => Response.json({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 28800, scope: broad.join(" ") }),
+    ]);
+    const row = await connect(document(0, T0 + 8 * HOUR, broad));
+    expect(await service.credential(row)).toBe("access-1");
+    expect(request.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).scope)).toEqual(["user:inference", broad.join(" ")]);
+    const [grant] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, row.grant.id));
+    expect(grant.status).toBe("active");
+    expect(await stored(row)).toMatchObject({ scopeNarrowingRefused: true, scopes: broad });
+    expect(await service.credential(row)).toBe("access-1");
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("exchanges the refresh token once across server processes that share the database", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const request = providerSequence([async () => { await gate; return granted(1)(); }]);
+    const row = await connect(document(0, T0 + 1 * HOUR));
+    // A second module instance has its own in-process state, like a second server task.
+    vi.resetModules();
+    const other = (await import("../services/ai-connections.js")).aiConnectionService(db);
+    const first = service.credential(row);
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    const second = other.credential(row);
+    await new Promise(resolve => setTimeout(resolve, 500));
+    expect(request).toHaveBeenCalledTimes(1);
+    release();
+    expect(await Promise.all([first, second])).toEqual(["access-1", "access-1"]);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let an older run's failure disable a grant while its renewal is in flight", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const request = providerSequence([async () => { await gate; return granted(1)(); }]);
+    const row = await connect(document(0, T0 + 1 * HOUR));
+    const renewal = service.credential(row);
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    const generation = createHash("sha256").update("access-0").digest("hex").slice(0, 16);
+    const failure = service.markAuthenticationFailed({
+      companyId, agentId, runStartedAt: new Date(T0 + 365 * 24 * HOUR),
+      attribution: { connectionId: row.connection.id, grantId: row.grant.id, provider: "anthropic", method: "subscription",
+        mode: "responsible_user", responsibleUserId: row.grant.subjectUserId, identity: `${row.grant.id}:${row.grant.subjectUserId ?? "shared"}:${generation}` },
+    });
+    await new Promise(resolve => setTimeout(resolve, 500));
+    release();
+    expect(await renewal).toBe("access-1");
+    await failure;
+    const [grant] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, row.grant.id));
+    expect(grant.status).toBe("active");
+    expect(await stored(row)).toMatchObject({ refreshToken: "refresh-1" });
+    expect(await service.credential(row)).toBe("access-1");
   });
 });
