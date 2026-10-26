@@ -2081,8 +2081,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       ).toBe(false);
       const retries = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId));
       expect(retries).toHaveLength(1);
-      // One bounded transient retry, instead of escalating `setup_failed`.
-      expect(retries[0]).toMatchObject({ scheduledRetryReason: "transient_failure", scheduledRetryAttempt: 1 });
+      // A wait that does not spend the failure budget, instead of escalating `setup_failed`.
+      expect(retries[0]).toMatchObject({ scheduledRetryReason: "controller_lease_lost", scheduledRetryAttempt: 1 });
       expect(
         await db.select({ status: issues.status }).from(issues).where(eq(issues.id, issueId))
           .then((rows) => rows[0]?.status),
@@ -6845,6 +6845,43 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         (event) => event.action === "issue.successful_run_handoff_escalated",
       ),
     ).toBe(true);
+  });
+
+  it("keeps retrying a run that lost its controller lease after the failure budget is spent instead of blocking the issue", async () => {
+    const { agentId, runId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "failed",
+      runErrorCode: "controller_lease_lost",
+      runError: "Legacy controller lease lost (renewal_deadline)",
+    });
+    await db.update(heartbeatRuns)
+      .set({ scheduledRetryAttempt: 2, scheduledRetryReason: "transient_failure" })
+      .where(eq(heartbeatRuns.id, runId));
+
+    const result = await heartbeatService(db).reconcileStrandedAssignedIssues();
+    expect(result.escalated).toBe(0);
+
+    const retryRun = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(retryRun).toMatchObject({ agentId, status: "scheduled_retry", scheduledRetryReason: "controller_lease_lost" });
+    expect(await selectRecoveryIssueById(issueId)).toMatchObject({ status: "in_progress", assigneeAgentId: agentId });
+  });
+
+  it("leaves an issue in place while its Claude login waits for a reconnect", async () => {
+    const { agentId, runId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "failed",
+      runErrorCode: "claude_auth_required",
+      runError: "Claude login required",
+      livenessState: "blocked",
+    });
+
+    const result = await heartbeatService(db).reconcileStrandedAssignedIssues();
+    expect(result.escalated).toBe(0);
+
+    expect(await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))).toHaveLength(0);
+    expect(await selectRecoveryIssueById(issueId)).toMatchObject({ status: "in_progress", assigneeAgentId: agentId });
+    expect(await selectRecoveryActionsForIssue(issueId)).toHaveLength(0);
   });
 
   it("retries an interrupted corrective successful-run handoff instead of escalating it", async () => {

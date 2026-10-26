@@ -44,17 +44,22 @@ import {
 import { logger } from "../../middleware/logger.js";
 import { parseObject } from "../../adapters/utils.js";
 import { logActivity } from "../activity-log.js";
+import { isAiAuthenticationFailure } from "../ai-auth-failure.js";
 import { readContinuationAttempt } from "../recovery/index.js";
 import { withRecoveryContext } from "../recovery/status-only-context.js";
 import {
   MAX_TURN_CONTINUATION_RETRY_REASON,
   WORKSPACE_BUSY_RETRY_REASON,
   AI_CONNECTION_BUSY_RETRY_REASON,
+  CONTROLLER_LEASE_LOST_RETRY_REASON,
+  AI_CREDENTIAL_RENEWED_RETRY_REASON,
+  isFreeRetryReason,
   AI_CONNECTION_POOL_WAIT_RETRY_REASON,
   INTERACTION_CONTINUATION_INFRA_RETRY_REASON,
   INTERACTION_CONTINUATION_INFRA_WAKE_REASON,
   isNonAssigneeWorkspaceBusyRetry,
   isResolvedInteractionContinuationWakeContext,
+  isWaitRetryReason,
 } from "../../modules/run-dispatch/index.js";
 
 import type { AppendHeartbeatRunEventInput } from "../heartbeat-run-events.js";
@@ -108,8 +113,24 @@ export interface HeartbeatRetryDependencies {
     options?: { keepIdleOnFailure?: boolean; wasFirstHeartbeat?: boolean },
   ) => Promise<void>;
   getWorktreeExecutionCutoff: () => Promise<Date | null>;
+  /** True when the credential a failed run used was renewed or reconnected after the run began. */
+  aiAuthFailureState?: (run: HeartbeatRun) => Promise<"renewed" | "needs_reauthorization" | "current">;
   applyRunDispatchPostCommitEffects: (effects: PostCommitEffect[]) => void;
 }
+
+type ScheduleBoundedRetryOptions = {
+  now?: Date;
+  random?: () => number;
+  retryReason?: string;
+  wakeReason?: string;
+  maxAttempts?: number;
+  delayMs?: number;
+};
+
+const CONTROLLER_LEASE_LOST_RETRY_BASE_DELAY_MS = 30_000;
+const CONTROLLER_LEASE_LOST_RETRY_MAX_DELAY_MS = 10 * 60_000;
+const STALE_AI_CREDENTIAL_RETRY_DELAY_MS = 5_000;
+const STALE_AI_CREDENTIAL_RETRY_MAX_ATTEMPTS = 3;
 
 export const BOUNDED_TRANSIENT_HEARTBEAT_RETRY_DELAYS_MS = [
   30_000, 30_000,
@@ -384,20 +405,53 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
     releaseIssueExecutionAndPromote,
     finalizeAgentStatus,
     getWorktreeExecutionCutoff,
+    aiAuthFailureState,
     applyRunDispatchPostCommitEffects,
   } = dependencies;
+
+  async function resolveWaitRetryOptions(
+    run: typeof heartbeatRuns.$inferSelect,
+    opts: ScheduleBoundedRetryOptions | undefined,
+  ): Promise<ScheduleBoundedRetryOptions | undefined | "await_reconnect"> {
+    if (opts?.retryReason !== undefined) return opts;
+    const laneAttempts = (reason: string) =>
+      run.scheduledRetryReason === reason ? (run.scheduledRetryAttempt ?? 0) : 0;
+    // The controller lost its lease because the host stopped (sleep, stall), not because the work failed. Wait
+    // longer each time, and never charge the failure budget or give up on the task.
+    if (run.errorCode === CONTROLLER_LEASE_LOST_FAILURE_CODE) {
+      const attempt = laneAttempts(CONTROLLER_LEASE_LOST_RETRY_REASON);
+      return {
+        ...opts,
+        retryReason: CONTROLLER_LEASE_LOST_RETRY_REASON,
+        wakeReason: "controller_lease_lost_retry",
+        maxAttempts: attempt + 1,
+        delayMs: Math.min(CONTROLLER_LEASE_LOST_RETRY_MAX_DELAY_MS, CONTROLLER_LEASE_LOST_RETRY_BASE_DELAY_MS * 2 ** Math.min(attempt, 10)),
+      };
+    }
+    // The provider stops accepting the old access token when it rotates. A run that still held it did not meet a
+    // real sign-out, so it starts again with the current token without spending a failure retry. A login that
+    // needs the user cannot work until they sign in, so no retry is spent while it waits for them.
+    if (isAiAuthenticationFailure(run.errorCode)) {
+      const state = await aiAuthFailureState?.(run).catch(() => "current" as const);
+      if (state === "needs_reauthorization") return "await_reconnect";
+      if (state === "renewed" && laneAttempts(AI_CREDENTIAL_RENEWED_RETRY_REASON) < STALE_AI_CREDENTIAL_RETRY_MAX_ATTEMPTS) {
+        const attempt = laneAttempts(AI_CREDENTIAL_RENEWED_RETRY_REASON);
+        return {
+          ...opts,
+          retryReason: AI_CREDENTIAL_RENEWED_RETRY_REASON,
+          wakeReason: "ai_credential_renewed_retry",
+          maxAttempts: attempt + 1,
+          delayMs: STALE_AI_CREDENTIAL_RETRY_DELAY_MS,
+        };
+      }
+    }
+    return opts;
+  }
 
   async function scheduleBoundedRetryForRun(
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
-    opts?: {
-      now?: Date;
-      random?: () => number;
-      retryReason?: string;
-      wakeReason?: string;
-      maxAttempts?: number;
-      delayMs?: number;
-    },
+    callerOpts?: ScheduleBoundedRetryOptions,
   ) {
     if (parseObject(agent.adapterConfig).provider === "openai_dot"
         || parseObject(parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput).provider).kind === "openai_dot") {
@@ -413,6 +467,13 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
       return { outcome: "not_scheduled" as const, reason: "The completion outbox owns this reply's retry budget and publication identity.",
         errorCode: "chat_completion_outbox_owns_retry" as const, issueId: readNonEmptyString(run.contextSnapshot.issueId) };
     }
+    const resolvedOpts = await resolveWaitRetryOptions(run, callerOpts);
+    if (resolvedOpts === "await_reconnect") {
+      return { outcome: "not_scheduled" as const,
+        reason: "Waiting for the AI account to be reconnected; the task resumes after sign-in.",
+        issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
+    }
+    const opts = resolvedOpts;
     const now = opts?.now ?? new Date();
     const retryReason =
       opts?.retryReason ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON;
@@ -555,7 +616,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
     const requiresIssueGate =
       isTransientWorkspaceGitScanCode(run.errorCode) ||
       hasConversationContinuationPolicy(run.resultJson) ||
-      (retryReason === AI_CONNECTION_BUSY_RETRY_REASON || retryReason === AI_CONNECTION_POOL_WAIT_RETRY_REASON) ||
+      isWaitRetryReason(retryReason) || isFreeRetryReason(retryReason) ||
       retryReason === MAX_TURN_CONTINUATION_RETRY_REASON ||
       retryReason === INTERACTION_CONTINUATION_INFRA_RETRY_REASON;
     if (requiresIssueGate) {
@@ -625,7 +686,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
                 executionFailureRetryCount(run),
             }
           : {}),
-        ...((retryReason === AI_CONNECTION_BUSY_RETRY_REASON || retryReason === AI_CONNECTION_POOL_WAIT_RETRY_REASON)
+        ...(isWaitRetryReason(retryReason) || isFreeRetryReason(retryReason)
           ? { failureRetriesBeforeAiConnectionWait: executionFailureRetryCount(run) }
           : {}),
         ...(shouldQuarantineWorkspaceForRetry
@@ -952,7 +1013,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
         }
 
         if (
-          (retryReason === AI_CONNECTION_BUSY_RETRY_REASON || retryReason === AI_CONNECTION_POOL_WAIT_RETRY_REASON) && issueId &&
+          isWaitRetryReason(retryReason) && issueId &&
           !isNonAssigneeWorkspaceBusyRetry(retryReason, contextSnapshot)
         ) {
           // The issue row is locked above. Recheck after the preflight gate so
@@ -1546,6 +1607,12 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
   ) {
+    if (
+      run.errorCode === CONTROLLER_LEASE_LOST_FAILURE_CODE &&
+      !isResolvedInteractionContinuationWakeContext(run.contextSnapshot)
+    ) {
+      return scheduleBoundedRetryForRun(run, agent);
+    }
     if (!run.wakeupRequestId) return null;
     if (!isResolvedInteractionContinuationWakeContext(run.contextSnapshot))
       return null;

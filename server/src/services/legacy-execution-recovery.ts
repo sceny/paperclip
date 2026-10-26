@@ -50,6 +50,10 @@ export function legacyExecutionNeedsReconciliation(
   // that the bootstrap evidence proves never started. Keep unknown outcomes held.
   if ((run.errorCode === "workspace_git_scan_timeout" || run.errorCode === "workspace_git_scan_saturated") &&
       evidence?.kind === "bootstrap" && evidence.providerWorkStarted === false) return false;
+  // A lost controller lease and a refused sign-in are not failed attempts at the work. When the provider never
+  // started, a repeat cannot replay anything and must not wait for a person to reconcile it.
+  if ((run.errorCode === "controller_lease_lost" || run.errorCode === "claude_auth_required") &&
+      evidence?.kind === "bootstrap" && evidence.providerWorkStarted === false) return false;
   if (executionFailureRetryCount(run) >= 2) return true;
   return !(
     evidence?.kind === "bootstrap" && evidence.providerWorkStarted === false
