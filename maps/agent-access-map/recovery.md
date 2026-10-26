@@ -4,6 +4,10 @@ Product map: [Recovery](../feature-map/recovery.md).
 
 Feature ID: `recovery`.
 
+Native finalization deadline reconciliation records unfinished workspace
+preservation through the existing server-owned recovery path. It grants no
+additional agent API, provider-stop authority or permission to replay work.
+
 Ordinary board Retry can reauthorize saved GitHub input for the same App after
 reconnect. It pins current runtime authority and preserves sender, repository,
 conversation and task checks. Pending input takes precedence over the older

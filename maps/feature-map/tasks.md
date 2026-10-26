@@ -29,6 +29,13 @@ separate. It does not cover other property operations or agent authorization.
 
 ## How to get to it (user POV)
 
+Cold collection loads use a lightweight index and batched hierarchy context,
+then fetch diagnostic details for visible rows. Delay the index, hierarchy, and
+visible-row details independently when verifying `tasks/organize`: row heights,
+title bounds, and the first-row origin should remain stable. Test nested expansion,
+scrolling to more rows, and detail/back navigation; a collection projection must
+never suppress the full task instruction fetch.
+
 ### `new-task`
 
 Use New task from the global launcher, task list, or project task view.

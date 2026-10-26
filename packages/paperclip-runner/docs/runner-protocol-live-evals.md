@@ -316,6 +316,27 @@ The manifest schema is `paperclip.runner-eval.controller/v1`. It contains:
   `nativeLimits`, and a reviewed full-lifecycle `provisionalBound`. When absent,
   the controller starts no exporter or OTLP relay.
 
+For GitHub workers, the manifest must also contain `hosted` with `repository`,
+`runId` (a decimal string), `runAttempt: 1`, and `workflowRevision` (the run's
+`GITHUB_SHA`, including the merge commit for a pull-request run). Its `campaignId` must be `gha-<runId>-1`. Before creating
+an admission record, reading provider credentials, or starting a proxy, both
+`archive.mjs verify` and `run.mjs` compare this identity with the current
+`GITHUB_ACTIONS`, `GITHUB_REPOSITORY`, `GITHUB_RUN_ID`, `GITHUB_RUN_ATTEMPT` and
+`GITHUB_SHA`. Set `PAPERCLIP_RUNNER_EVAL_EXECUTION_ID` from the worker's selected
+cell. It must equal the bound allocation's `executionId`. A reused preparation
+job cannot authorize a later GitHub run attempt. Local manifests remain usable
+outside a GitHub context. A hosted manifest cannot execute with missing context.
+
+This checks the trusted workflow's current environment; it is not a distributed
+lock or signed GitHub attestation. The workflow must prepare one complete manifest,
+distribute identical bytes and fan out each selected cell exactly once. The
+private `prepare_controlled_campaign.py` command prepares requests with the
+existing case compiler and rejects duplicate or missing matrix cells. Independent
+budgets, a second workflow run, or duplicate first-attempt jobs are not authorized
+by this guard. Pack and report commands remain usable offline after the run, so
+expired or failed attempts can still be retained and reconciled. The current
+live workflow has not yet been connected to this contract.
+
 Use `requestBindingSha256` from `controlled-evals/manifest.mjs` to bind the
 complete compiled request. It excludes only the temporary working directory
 and native executable path; the executable digest remains bound and its path
@@ -413,6 +434,52 @@ GitHub workers. Hosted integration must bind unique cells to the prepared
 allocation, reject workflow/job reruns, and preserve the controller evidence
 before enabling paid work. Hosted tracing, destination readback, vendor
 metering bounds, and actual paid qualification remain separate gates.
+
+### Portable controller runtime
+
+The controller can run from a copied artifact without a repository checkout,
+`tsx`, or a worker-side dependency install. Build it once from the trusted
+orchestration checkout after installing that checkout's pinned dependencies:
+
+```sh
+node packages/paperclip-runner/scripts/controlled-evals/build-runtime.mjs \
+  /private/new-controller-runtime-directory "$(git rev-parse HEAD)"
+```
+
+The output directory must not exist. The build copies the controller entrypoints,
+bundles the shared cost and tracing code, and copies the installed protobuf
+runtime dependency closure. It does not install dependencies or run package
+lifecycle scripts. `runtime.json` records the caller-supplied source revision,
+source input hashes, installed package manifest hashes, and every output file's
+size and SHA-256. The caller must build from the intended trusted checkout; the
+revision label alone is not source attestation. The artifact is limited to
+32 MiB and 4,096 files, including a receipt limited to 2 MiB by both the builder
+and verifier. It contains no campaign credentials or allowance.
+
+Save the printed `receiptSha256` outside the artifact, such as a trusted build
+job output. Before a worker loads any copied code, invoke the verifier from its
+trusted orchestration checkout with that digest and the expected revision:
+
+```sh
+node packages/paperclip-runner/scripts/controlled-evals/verify-runtime.mjs \
+  /private/copied-controller-runtime-directory \
+  "$TRUSTED_CONTROLLER_REVISION" "$TRUSTED_CONTROLLER_RECEIPT_SHA256"
+```
+
+The verifier rejects altered, missing, unexpected, or nonregular files and a
+mismatched receipt. Do not obtain the expected digest from the downloaded
+artifact itself or execute its verifier before checking it with trusted code.
+Verification assumes a worker-owned directory that no other process can mutate
+between verification and execution.
+
+Use the copied `controlled-evals/run.mjs` as `--runner-cli` and its sibling
+`archive.mjs` as `PAPERCLIP_RUNNER_EVAL_ARCHIVE_CLI`. The existing reviewed campaign
+manifest is still required. Its executable paths and digests bind the actual
+Runner build, not this controller wrapper. The artifact does not authorize paid
+work, coordinate worker allocations, or prevent a workflow rerun by itself.
+The hosted matrix still needs the shared manifest and per-worker admission
+checks described above.
+
 ## Controller tracing allocations and retained proof
 
 The opt-in controller uses the existing native launch generator and Product E2E

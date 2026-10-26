@@ -1336,6 +1336,13 @@ does not reset the provider-attempt budget.
 
 Provider execution and control-plane finalization have different clocks. A healthy provider can think or execute a long tool without output. Once execution settles, recovery and finalization control steps have a 60-second deadline, checked on startup and every 15 seconds. With a healthy database and scheduler, an abandoned transition must be repaired or surfaced within 90 seconds. Terminal persistence must not wait on provider cleanup or publication; a late finalizer cannot change a reassigned or closed task or release another run's locks. Historical ambiguous runs are never automatically replayed after an upgrade.
 
+When that deadline fails a native run with a prepared workspace, the same
+transaction records the exact source's file-preservation obligation. Existing
+stop-and-retain recovery contains the provider and saves the files before
+ordinary Retry can continue. Finalized workspaces, mismatched sources and
+accepted results keep their existing settlement paths. Reassignment does not
+discard the stopped run's files or grant authority over the new assignee.
+
 Every continuation carries the triggering request, ordered user direction, interaction outcomes, completed work, and explicit history coverage. A delivered message remains part of the task's request after its connection or approval resolves. The original title is background; a completed Notion read does not satisfy a later Gmail request. Author and source-trust boundaries survive rendering into both native and legacy prompts. Missing required history must be fetched before dispatch rather than described as complete.
 
 ### Interrupted conversation continuation

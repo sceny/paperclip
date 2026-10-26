@@ -166,6 +166,7 @@ export const completeTerminatedLocalNativeSessionCleanup = runner.completeTermin
 export const probeAcpxClaudeInstallation = runner.probeAcpxClaudeInstallation;
 export const probeAcpxGrokInstallation = runner.probeAcpxGrokInstallation;
 export const probeAcpxPiInstallation = runner.probeAcpxPiInstallation;
+export const PROVIDER_PACK_COMPATIBILITY = runner.PROVIDER_PACK_COMPATIBILITY;
 export const bundledRemoteProviderPackManifestPath = runner.bundledRemoteProviderPackManifestPath;
 export const bundledRemoteRunnerBinary = runner.bundledRemoteRunnerBinary;
 

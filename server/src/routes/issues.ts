@@ -8354,7 +8354,26 @@ export function issueRoutes(
     const sortField = req.query.sortField as string | undefined;
     const sortDir = req.query.sortDir as string | undefined;
     const view = req.query.view as string | undefined;
-    const compactView = view === "compact";
+    const compactView = view === "compact" || view === "index" || view === "rows";
+    const issueIds = typeof req.query.ids === "string" ? [...new Set(req.query.ids.split(","))] : undefined;
+    const parentIds = typeof req.query.parentIds === "string" ? [...new Set(req.query.parentIds.split(","))] : undefined;
+    const oneChildPerParent = parseOptionalBooleanQuery(req.query.oneChildPerParent);
+    if (oneChildPerParent === null || (oneChildPerParent && (view !== "index" || !parentIds))) {
+      res.status(400).json({ error: "oneChildPerParent must be a boolean and requires view=index with parentIds" });
+      return;
+    }
+    if (req.query.ids !== undefined && (!issueIds?.length || issueIds.length > 100 || issueIds.some((id) => !z.string().uuid().safeParse(id).success))) {
+      res.status(400).json({ error: "ids must contain one to 100 comma-separated UUIDs" });
+      return;
+    }
+    if (req.query.parentIds !== undefined && (!parentIds?.length || parentIds.length > 100 || parentIds.some((id) => !z.string().uuid().safeParse(id).success))) {
+      res.status(400).json({ error: "parentIds must contain one to 100 comma-separated UUIDs" });
+      return;
+    }
+    if ((issueIds || parentIds) && (attention || (view !== "index" && view !== "rows"))) {
+      res.status(400).json({ error: "ids and parentIds require view=index or view=rows without attention" });
+      return;
+    }
     const hasPlanDocument = parseOptionalBooleanQuery(
       req.query.hasPlanDocument,
     );
@@ -8421,8 +8440,8 @@ export function issueRoutes(
         .json({ error: "attention must be 'blocked' when provided" });
       return;
     }
-    if (view !== undefined && view !== "compact") {
-      res.status(400).json({ error: "view must be 'compact' when provided" });
+    if (view !== undefined && !["compact", "index", "rows"].includes(view)) {
+      res.status(400).json({ error: "view must be compact, index, or rows when provided" });
       return;
     }
     if (
@@ -8509,6 +8528,10 @@ export function issueRoutes(
     const offset = parsedOffset ?? 0;
 
     const listFilters: IssueFilters = {
+      issueIds,
+      parentIds,
+      oneChildPerParent,
+      listProjection: view === "index" || view === "rows" ? view : undefined,
       readCondition: await issueReadSqlCondition(db, req.actor),
       attention: attention === "blocked" ? "blocked" : undefined,
       status: req.query.status as string | string[] | undefined,
@@ -8564,14 +8587,16 @@ export function issueRoutes(
       companyId,
       normalizedQuery: {
         ...requestKeyFilters,
-        view: compactView ? "compact" : undefined,
+        view,
       },
     });
     const coordinated = await coordinateIssueListGet({
       req,
       companyId,
       requestKey,
-      allowTtlCache: compactView,
+      // The new collection projections must reflect read/archive/undo mutations
+      // immediately. Keep in-flight coalescing and ETags, without a stale TTL body.
+      allowTtlCache: view === "compact",
       diagnostics: opts.issueListDiagnostics,
       compute: async () => {
         const rawResult = await svc.list(companyId, listFilters);
@@ -8579,6 +8604,10 @@ export function issueRoutes(
           ? rawResult
           : await filterIssuesForActor(req, rawResult);
         const result = await redactIssueRelationEdgesOnRows(req, companyId, visibleRows);
+        if (view === "index") {
+          const body = result.map((issue) => ({ ...toCompactIssue(issue), listProjection: "index" as const }));
+          return { kind: "compact", body, etag: compactIssueListEtag(body), cacheControl: "private, must-revalidate" };
+        }
         const issueIds = result.map((issue) => issue.id);
         const interruptions = await taskInterruptionPresentations(db, companyId, result);
         if (compactView) {
@@ -8603,12 +8632,12 @@ export function issueRoutes(
             }),
           );
           const compactResult = result.map((issue) =>
-            toCompactIssue({
+            ({ ...toCompactIssue({
               ...issue,
               activeRecoveryAction: recoveryActionByIssue.get(issue.id) ?? null,
               interruption: interruptions.get(issue.id) ?? null,
               successfulRunHandoff: handoffStates.get(issue.id) ?? null,
-            }),
+            }), ...(view === "rows" ? { listProjection: "rows" as const } : {}) }),
           );
           return {
             kind: "compact",

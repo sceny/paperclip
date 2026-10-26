@@ -506,6 +506,17 @@ select arbitrary destinations. Gateway response caching and fallback are refused
 Request journal and usage receipts contain no prompt/response bodies or keys.
 The manifest, journal, and receipts are not public report projections.
 
+`boundedEvalPayload` is the shared, credential-free request validator and
+normalizer. Qualification callers must apply it before recording budget-denial
+proof. The forwarding path applies the same policy before a ledger reservation.
+OpenAI tools may use one namespace level around local function or custom tools.
+Function and custom leaves require nonblank string names.
+Namespace wrappers contain only `type`, `name`, optional `description`, and
+`tools`. Nested namespaces, hosted tools, and tool lists attached to leaves fail
+closed. The request may contain at most 1,024 tool definitions, counting namespace
+wrappers and their children. Anthropic tool policy stays separate. Output limits,
+billing-mode restrictions, and multimodal exclusions apply in both paths.
+
 ## Configured repository and conversion proof
 
 The repository proof flow seeds only the exact `workspace` child of its resolved

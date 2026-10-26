@@ -87,6 +87,10 @@ export type ResolveRecoveryActionResponse = {
 };
 
 export type IssueListFilters = {
+  ids?: readonly string[];
+  parentIds?: readonly string[];
+  oneChildPerParent?: boolean;
+  projection?: "index" | "rows";
   attention?: "blocked";
   status?: string;
   projectId?: string;
@@ -126,6 +130,8 @@ function issueListSearchParams(filters?: IssueListFilters) {
   if (filters?.status) params.set("status", filters.status);
   if (filters?.projectId) params.set("projectId", filters.projectId);
   if (filters?.parentId) params.set("parentId", filters.parentId);
+  if (filters?.parentIds) params.set("parentIds", filters.parentIds.join(","));
+  if (filters?.oneChildPerParent) params.set("oneChildPerParent", "true");
   if (filters?.assigneeAgentId)
     params.set("assigneeAgentId", filters.assigneeAgentId);
   if (filters?.participantAgentId)
@@ -211,7 +217,8 @@ export const issuesApi = {
     options?: RequestOptions,
   ) => {
     const params = issueListSearchParams(filters);
-    params.set("view", "compact");
+    params.set("view", filters?.projection ?? "compact");
+    if (filters?.ids) params.set("ids", filters.ids.join(","));
     const path = `/companies/${companyId}/issues?${params.toString()}`;
     return options
       ? api.get<CompactIssue[]>(path, options)

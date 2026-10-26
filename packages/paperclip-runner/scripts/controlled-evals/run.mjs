@@ -1,3 +1,4 @@
+import { isEntrypoint } from './entrypoint.mjs';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
@@ -6,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { startControlledObservability } from './observability.mjs';
 import { limitFor, readRegularFile, replaceEvidenceFile } from './evidence-files.mjs';
-import { bindRequest, canonical, costRuntime, readJson, sha256, validateManifest } from './manifest.mjs';
+import { assertHostedAdmission, bindRequest, canonical, costRuntime, readJson, sha256, validateManifest } from './manifest.mjs';
 
 async function atomicJson(file, value) {
   const temporary = `${file}.tmp`;
@@ -68,6 +69,7 @@ export async function runControlledEval({ manifestPath, requestPath, outputPath,
   signal?.throwIfAborted();
   const { manifest, manifestSha256 } = validateManifest(await readJson(manifestPath));
   const request = await readJson(requestPath, 8_388_608), attempt = bindRequest(manifest, request);
+  assertHostedAdmission(manifest, attempt, environment);
   try { await lstat(outputPath); throw new Error('Controlled output already exists'); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   if (request.session.workingDirectory) {
@@ -213,7 +215,7 @@ registerHooks({ resolve(specifier, context, nextResolve) {
 
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (await isEntrypoint(import.meta.url)) {
   const controller = new AbortController();
   const cancel = () => controller.abort();
   process.once('SIGINT', cancel); process.once('SIGTERM', cancel);

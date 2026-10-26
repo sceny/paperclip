@@ -1,7 +1,7 @@
+import { isEntrypoint } from './entrypoint.mjs';
 import { lstat, readdir, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { bindRequest, canonical, fields, readJson, requestBindingSha256, sha256, units, usd, validateManifest } from './manifest.mjs';
+import { assertHostedAdmission, bindRequest, canonical, fields, readJson, requestBindingSha256, sha256, units, usd, validateManifest } from './manifest.mjs';
 import { attemptDirectory, controlledResultArtifact } from './run.mjs';
 import { summarizeControlledCampaign } from './report.mjs';
 import { FILE_LIMITS, RECEIPT, limitFor, readRegularFile } from './evidence-files.mjs';
@@ -170,11 +170,12 @@ export async function summarizeControlledEvidence(bundles, options) {
     incompleteAttempts: campaigns.reduce((total, c) => total + c.incompleteAttempts, 0), overBudget: campaigns.some(c => c.overBudget), campaigns };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+if (await isEntrypoint(import.meta.url)) {
   const [command, ...args] = process.argv.slice(2);
   if (command === 'verify' && args.length === 2) {
     const { manifest } = validateManifest(await readJson(args[0]));
-    bindRequest(manifest, await readJson(args[1], 8 * MiB));
+    const attempt = bindRequest(manifest, await readJson(args[1], 8 * MiB));
+    assertHostedAdmission(manifest, attempt, process.env);
   } else if (command === 'pack' && args.length === 3) {
     const bundle = await packControlledAttempt({ manifest: await readJson(args[0]), attemptId: args[1] });
     await writeFile(args[2], JSON.stringify(bundle) + '\n', { flag: 'wx', mode: 0o600 });

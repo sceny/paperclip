@@ -1,17 +1,25 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, mkdir, open, readFile, readdir, rm, stat, symlink, truncate, writeFile } from 'node:fs/promises';
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { canonical, costRuntime, observabilityBoundConfiguration, requestBindingSha256, sha256, validateManifest } from './manifest.mjs';
-import { attemptDirectory, runControlledEval } from './run.mjs';
-import { summarizeControlledCampaign } from './report.mjs';
-import { readRegularFile, replaceEvidenceFile } from './evidence-files.mjs';
-import { decodeControlledEvidence, packControlledAttempt, readControlledEvidence, readAttemptControlledEvidence, summarizeControlledEvidence } from './archive.mjs';
+import { join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
+const runtime = process.env.PAPERCLIP_CONTROLLER_TEST_RUNTIME
+  ? pathToFileURL(resolve(process.env.PAPERCLIP_CONTROLLER_TEST_RUNTIME) + '/') : import.meta.url;
+const { canonical, costRuntime, observabilityBoundConfiguration, requestBindingSha256, sha256, validateManifest } = await import(new URL('./manifest.mjs', runtime));
+const { attemptDirectory, runControlledEval } = await import(new URL('./run.mjs', runtime));
+const { summarizeControlledCampaign } = await import(new URL('./report.mjs', runtime));
+const { decodeControlledEvidence, packControlledAttempt, readControlledEvidence, readAttemptControlledEvidence, summarizeControlledEvidence } = await import(new URL('./archive.mjs', runtime));
+const { readRegularFile, replaceEvidenceFile } = await import(new URL('./evidence-files.mjs', runtime));
+
 import { aggregateProtocolEvalCampaign, sanitizeProtocolEvalRuns } from '../runner-protocol-eval-campaign.mjs';
+
+const { build } = createRequire(new URL('../../../../package.json', import.meta.url))('esbuild');
 
 const childScript = options => `
 import assert from 'node:assert/strict';
@@ -49,10 +57,7 @@ if(args.has('--observability-config')) {
  }
  nativeObservability={mode:'controller_otlp',configured:true,verification:'unverified',projectId:config.projectId,traceId:config.traceId,spanId:config.spanId,descriptorSha256:createHash('sha256').update(raw).digest('hex')};
  if(${Boolean(options.realObservabilityValidator)}) {
-  const {createRequire}=await import('node:module');
-  const require=createRequire(${JSON.stringify(fileURLToPath(new URL('../../../../server/package.json', import.meta.url)))});
-  const {tsImport}=await import(require.resolve('tsx/esm/api'));
-  const {prepareEvalObservabilityRuntime}=await tsImport(${JSON.stringify(fileURLToPath(new URL('../../src/cli/eval-observability-runtime.ts', import.meta.url)))},import.meta.url);
+  const {prepareEvalObservabilityRuntime}=await import(${JSON.stringify(options.observabilityValidatorModule ?? '')});
   await mkdir(process.env.HOME+'/codex',{recursive:true});
   const prepared=await prepareEvalObservabilityRuntime(args.get('--observability-config'),request,
    {evidence:{campaignId:descriptor.campaignId,executionId:descriptor.executionId},transportOptions:{environment:{CODEX_HOME:process.env.HOME+'/codex'}}},process.env);
@@ -85,6 +90,11 @@ async function fixture(t, { count = 1, allocation = '0.01', providerProfile = 'c
   const root = await mkdtemp(join(tmpdir(), 'runner-controller-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const cli = join(root, 'fake-cli.mjs'), binary = join(root, 'runnerd'), archive = join(root, 'runner.tgz');
+  if (options.realObservabilityValidator) {
+    options.observabilityValidatorModule = join(root, 'eval-observability-runtime.mjs');
+    await build({ entryPoints: [fileURLToPath(new URL('../../src/cli/eval-observability-runtime.ts', import.meta.url))],
+      outfile: options.observabilityValidatorModule, bundle: true, platform: 'node', format: 'esm', target: 'node24', logLevel: 'silent' });
+  }
   await writeFile(cli, childScript(options)); await writeFile(binary, 'synthetic daemon'); await writeFile(archive, 'synthetic package');
   const provenance = async path => ({ path, sha256: sha256(await readFile(path)) });
   const now = Date.now(), verifiedAt = new Date(now - 1000).toISOString(), expiresAt = new Date(now + 86_400_000).toISOString();
@@ -698,6 +708,66 @@ test('cancellation during root export stops forwarding and cannot close the atte
   assert.equal(summary.committedUsd, '0.014000000'); assert.equal(summary.knownUsd, '0.000068000');
 });
 
+
+test('hosted workers reject reruns and identity drift before requests, while retained evidence replays offline', async t => {
+  const f = await fixture(t);
+  f.manifest.campaignId = 'gha-12345-1';
+  f.manifest.hosted = { repository: 'paperclipai/paperclip', runId: '12345', runAttempt: 1, workflowRevision: 'c'.repeat(40) };
+  await f.save();
+  const context = { GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: 'paperclipai/paperclip', GITHUB_RUN_ID: '12345',
+    GITHUB_RUN_ATTEMPT: '1', GITHUB_SHA: 'c'.repeat(40), PAPERCLIP_RUNNER_EVAL_EXECUTION_ID: 'execution-0' };
+  let calls = 0;
+  const transport = async () => { calls++; return success(); };
+  for (const [key, value] of Object.entries(context)) {
+    for (const wrong of [undefined, key === 'GITHUB_RUN_ATTEMPT' ? '2' : 'wrong']) {
+      Object.assign(f.environment, context, { [key]: wrong });
+      await assert.rejects(f.run(0, transport), /current first-attempt worker/);
+      assert.equal(calls, 0);
+      await assert.rejects(readdir(f.manifest.outputDirectory), { code: 'ENOENT' });
+    }
+    f.environment[key] = value;
+  }
+  Object.assign(f.environment, context);
+  const command = [fileURLToPath(new URL('./archive.mjs', runtime)), 'verify', f.manifestPath, f.requests[0].requestPath];
+  const verify = promisify(execFile);
+  await verify(process.execPath, command, { env: { PATH: process.env.PATH, ...context }, timeout: 15000 });
+  await assert.rejects(verify(process.execPath, command, {
+    env: { PATH: process.env.PATH, ...context, GITHUB_RUN_ATTEMPT: '2' }, timeout: 15000,
+  }), /current first-attempt worker/);
+  assert.equal(calls, 0);
+  assert.equal((await f.run(0, transport)).code, 0);
+  assert.equal(calls, 2);
+  const bundle = await packControlledAttempt({ manifest: f.manifest, attemptId: 'attempt-0', environment: f.environment });
+  const replay = await summarizeControlledEvidence([bundle], { environment: {} });
+  assert.equal(replay.incompleteAttempts, 0);
+  assert.equal(replay.campaigns[0].campaignId, 'gha-12345-1');
+});
+
+test('hosted context requires a manifest identity and rejects invalid or later-attempt manifests', async t => {
+  const f = await fixture(t);
+  let calls = 0;
+  const transport = async () => { calls++; return success(); };
+  for (const key of ['GITHUB_ACTIONS', 'GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_SHA']) {
+    f.environment[key] = key === 'GITHUB_SHA' ? 'c'.repeat(40) : 'true';
+    await assert.rejects(f.run(0, transport), /requires a hosted controller identity/);
+    delete f.environment[key];
+  }
+  const hosted = { repository: 'paperclipai/paperclip', runId: '12345', runAttempt: 1, workflowRevision: 'c'.repeat(40) };
+  f.manifest.campaignId = 'gha-12345-1';
+  for (const change of [{ repository: '' }, { repository: 'paperclip' }, { runId: 12345 }, { runId: '012345' },
+    { runAttempt: 2 }, { workflowRevision: 'master' }, { workflowRevision: ['c'.repeat(40)] }, { unexpected: true }]) {
+    f.manifest.hosted = { ...hosted, ...change };
+    assert.throws(() => validateManifest(f.manifest), /hosted controller identity|controller fields/);
+  }
+  f.manifest.hosted = hosted;
+  await f.save();
+  await assert.rejects(f.run(0, transport), /current first-attempt worker/);
+  assert.equal(calls, 0);
+  await assert.rejects(readdir(f.manifest.outputDirectory), { code: 'ENOENT' });
+  f.manifest.campaignId = 'gha-12345-2';
+  assert.throws(() => validateManifest(f.manifest), /hosted controller identity/);
+});
+
 for (const name of ['observability.json', 'otlp-native.jsonl', 'otlp-controller.jsonl']) for (const kind of ['fifo', 'symlink', 'oversized']) {
   test(`native post-child ${name} rejects ${kind} and retains model cost plus the full hold`, { timeout: 20_000 }, async t => {
     const f = await fixture(t, { requests: 1, observability: true, invalidEvidence: name, invalidFileType: kind });
@@ -748,6 +818,7 @@ test('missing provider artifacts cannot bypass immutable result binding', async 
   malformed.files['result.json'] = { sizeBytes: bytes.length, sha256: sha256(bytes), base64: bytes.toString('base64') };
   await writeFile(join(directory, 'controller-evidence.json'), JSON.stringify(malformed));
   await assert.rejects(readAttemptControlledEvidence(directory), /Malformed immutable controller result proof/);
+
 });
 
 

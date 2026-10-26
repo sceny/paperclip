@@ -6,7 +6,7 @@ import { connect } from "node:net";
 import { afterEach, expect, it, vi } from "vitest";
 import { openEvalCostLedger, readEvalCostLedger } from "./cost-ledger.js";
 import { beginEvalAgentPhase, createEvalAttemptPhase, readEvalAttemptPhase } from "./attempt-phase.js";
-import { evalRequestReservation, EvalUsageStream, forwardEvalRequest, startEvalGateway, type EvalGatewayRoute, type EvalGatewayReceipt } from "./eval-gateway.js";
+import { boundedEvalPayload, evalRequestReservation, EvalUsageStream, forwardEvalRequest, startEvalGateway, type EvalGatewayRoute, type EvalGatewayReceipt } from "./eval-gateway.js";
 const directories: string[] = [], closes: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of closes.splice(0).reverse()) await close(); for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true }); });
 const identity = { executionId: "hello", attemptId: "attempt", phase: "agent" as const };
@@ -134,6 +134,71 @@ it("admits local function and custom tools inside a Codex namespace", async () =
   const result = await forwardEvalRequest({ ...f, payload: { ...f.payload, tools }, transport });
   expect(result.outcome).toBe("succeeded");
   expect(transport).toHaveBeenCalledOnce();
+});
+it("validates the native daemon's namespace envelope before reserving and forwarding", async () => {
+  const f = await fixture();
+  const localTool = (name: string) => ({ type: "function", name, description: "Synthetic local tool",
+    parameters: { type: "object", properties: {}, additionalProperties: false }, strict: true });
+  const tools = [...Array.from({ length: 7 }, (_, index) => localTool(`local_${index}`)),
+    { type: "namespace", name: "local_tools", description: "Synthetic local namespace",
+      tools: Array.from({ length: 5 }, (_, index) => localTool(`operation_${index}`)) }];
+  const payload = Object.freeze({ ...f.payload, tools });
+  const normalized = boundedEvalPayload(payload, { provider: route.provider, price: route.price, maximumOutputTokens: 100 });
+  expect(normalized).toEqual({ ...payload, max_output_tokens: 100, service_tier: "default" });
+  expect(payload).not.toHaveProperty("service_tier");
+  expect(payload.max_output_tokens).toBe(500);
+  expect(f.ledger.snapshot().requests).toHaveLength(0);
+  const transport = vi.fn<typeof fetch>(async (_url, init) => {
+    expect(JSON.parse(init!.body as string)).toEqual(normalized);
+    expect((await readEvalCostLedger(f.file)).state.snapshot().inflight).toBe(1);
+    return response();
+  });
+  const receipt = await forwardEvalRequest({ ...f, payload, transport });
+  expect(receipt).toMatchObject({ outcome: "succeeded", costUsd: "0.000068000", final: true });
+  expect(transport).toHaveBeenCalledOnce();
+});
+it.each([
+  { type: "namespace", name: " ", tools: [{ type: "function", name: "local" }] },
+  { type: "namespace", name: "local", description: {}, tools: [{ type: "function", name: "local" }] },
+  { type: "namespace", name: "local", tools: [] },
+  { type: "namespace", name: "local", tools: null },
+  { type: "namespace", name: "local", tools: [null] },
+  { type: ["function"], name: "local" },
+  { type: ["custom"], name: "local" },
+  { type: "namespace", name: "local", tools: [{ type: ["function"], name: "local" }] },
+  { type: "namespace", name: "local", tools: [{ type: ["custom"], name: "local" }] },
+  ...[undefined, null, 7, "", " "].flatMap(name => ["function", "custom"].flatMap(type =>
+    [{ type, name }, { type: "namespace", name: "local", tools: [{ type, name }] }])),
+  { type: "namespace", name: "local", tools: [{ type: "function", name: "local" }], future_hosted_tool: true },
+  { type: "namespace", name: "local", tools: [{ type: "namespace", name: "nested", tools: [{ type: "function", name: "local" }] }] },
+  ...["web_search", "file_search", "image_generation", "code_interpreter", "computer", "mcp", "unknown"].map(type =>
+    ({ type: "namespace", name: "local", tools: [{ type }] })),
+])("rejects malformed, nested, or hosted namespace tools before any side effects", async tool => {
+  const f = await fixture(), transport = vi.fn<typeof fetch>(), persist = vi.fn();
+  const payload = { ...f.payload, tools: [tool] };
+  expect(() => boundedEvalPayload(payload, f.route)).toThrow("unqualified_hosted_tool");
+  await expect(forwardEvalRequest({ ...f, payload, transport, persist })).rejects.toThrow("unqualified_hosted_tool");
+  expect(transport).not.toHaveBeenCalled(); expect(persist).not.toHaveBeenCalled();
+  expect(f.ledger.snapshot().requests).toHaveLength(0);
+});
+it.each(["flat", "namespace"] as const)("bounds the total %s tool definitions including namespace wrappers", async shape => {
+  const f = await fixture(), transport = vi.fn<typeof fetch>(), persist = vi.fn();
+  const tool = { type: "function", name: "local_tool" };
+  const tools = shape === "flat" ? Array.from({ length: 1024 }, () => tool)
+    : [{ type: "namespace", name: "local", tools: Array.from({ length: 1023 }, () => tool) }];
+  expect(boundedEvalPayload({ ...f.payload, tools }, f.route).tools).toEqual(tools);
+  const payload = { ...f.payload, tools: [...tools, tool] };
+  await expect(forwardEvalRequest({ ...f, payload, transport, persist })).rejects.toThrow("unqualified_hosted_tool");
+  expect(transport).not.toHaveBeenCalled(); expect(persist).not.toHaveBeenCalled();
+  expect(f.ledger.snapshot().requests).toHaveLength(0);
+});
+it("keeps Anthropic custom tools and output limits separate from OpenAI namespaces", () => {
+  const anthropic = { provider: "anthropic" as const, price: { ...route.price, provider: "anthropic" as const }, maximumOutputTokens: 100 };
+  const tools = [{ name: "local_tool", input_schema: { type: "object" } }, { type: "custom", name: "other_tool" }];
+  expect(boundedEvalPayload({ model: "fixture", tools, max_tokens: 500 }, anthropic))
+    .toEqual({ model: "fixture", tools, max_tokens: 100, service_tier: "standard_only" });
+  expect(() => boundedEvalPayload({ model: "fixture", tools: [{ type: "namespace", name: "local", tools }] }, anthropic))
+    .toThrow("unqualified_hosted_tool");
 });
 it.each([
   { type: "namespace", name: "local", tools: [{ type: "web_search" }] },

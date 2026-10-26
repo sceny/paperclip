@@ -110,7 +110,7 @@ COPY packages/paperclip-runner/src/providers/grok/platforms.json /tmp/grok-provi
 RUN node /tmp/grok-provision/scripts/provision-grok.mjs /opt/paperclip/providers/grok/1.0.13/grok && rm -rf /tmp/grok-provision
 
 COPY --from=runnerd-build /workspace/packages/paperclip-runner/runner/target/release/paperclip-runnerd /usr/local/bin/paperclip-runnerd
-COPY --from=provider-pack-build /provider-pack /opt/paperclip-runner/provider-pack
+COPY --chown=0:0 --from=provider-pack-build /provider-pack /opt/paperclip-runner/provider-pack
 RUN set -eu; for cli in codex claude opencode; do \
       printf '#!/bin/sh\nexec /opt/paperclip-runner/provider-pack/node_modules/.bin/%s "$@"\n' "$cli" > "/usr/local/bin/$cli"; \
       chmod 755 "/usr/local/bin/$cli"; \

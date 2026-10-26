@@ -1,11 +1,9 @@
 import { createHash } from 'node:crypto';
-import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 
-const require = createRequire(new URL('../../../../server/package.json', import.meta.url));
-const { tsImport } = await import(require.resolve('tsx/esm/api'));
-export const costRuntime = await tsImport('./shared-cost-runtime.ts', import.meta.url);
+import { costRuntime } from './runtime.mjs';
+export { costRuntime };
 export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 export const canonical = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
   ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
@@ -34,7 +32,7 @@ export async function readJson(file, maximum = 1_048_576) {
 }
 export function validateManifest(value, now = Date.now(), { admission = true } = {}) {
   fields(value, ['schema', 'campaignId', 'maxUsd', 'deadlineAt', 'pricingVerifiedAt', 'pricingExpiresAt', 'overhead',
-    'sourceRevision', 'definitionsRevision', 'runnerCli', 'runnerPackage', 'runnerd', 'outputDirectory', 'route', 'projectId', 'models', 'attempts', 'observability']);
+    'sourceRevision', 'definitionsRevision', 'runnerCli', 'runnerPackage', 'runnerd', 'outputDirectory', 'route', 'projectId', 'models', 'attempts', 'observability', 'hosted']);
   const deadline = Date.parse(value.deadlineAt);
   const verified = Date.parse(value.pricingVerifiedAt), expires = Date.parse(value.pricingExpiresAt);
   if (value.schema !== 'paperclip.runner-eval.controller/v1' || !id(value.campaignId)
@@ -48,6 +46,7 @@ export function validateManifest(value, now = Date.now(), { admission = true } =
     fields(artifact, ['path', 'sha256']);
     if (!isAbsolute(artifact.path ?? '') || !hash(artifact.sha256)) throw new Error('Invalid controller executable provenance');
   }
+  validateHostedIdentity(value);
   const overhead = costRuntime.validateOperatingOverhead(value.overhead, value.maxUsd);
   if (admission && Date.parse(value.overhead.verifiedAt) > now || Date.parse(value.overhead.expiresAt) <= deadline
       || value.overhead.components.some(component => !component.provisionalBound)) throw new Error('Controller requires current full-lifecycle operating bounds');
@@ -84,6 +83,33 @@ export function validateManifest(value, now = Date.now(), { admission = true } =
   validateObservability(value);
   return { manifest: structuredClone(value), manifestSha256: sha256(canonical(value)), allocatedUsd: usd(allocated), overheadUsd: usd(overhead) };
 }
+function validateHostedIdentity(manifest) {
+  const hosted = manifest.hosted;
+  if (hosted === undefined) return;
+  fields(hosted, ['repository', 'runId', 'runAttempt', 'workflowRevision']);
+  if (typeof hosted.repository !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/.test(hosted.repository)
+      || typeof hosted.runId !== 'string' || !/^[1-9][0-9]{0,19}$/.test(hosted.runId)
+      || hosted.runAttempt !== 1 || typeof hosted.workflowRevision !== 'string' || !/^[a-f0-9]{40}$/.test(hosted.workflowRevision)
+      || manifest.campaignId !== `gha-${hosted.runId}-1`) throw new Error('Invalid hosted controller identity');
+}
+
+export function assertHostedAdmission(manifest, attempt, environment) {
+  validateHostedIdentity(manifest);
+  const hosted = manifest.hosted;
+  if (!hosted) {
+    if (['GITHUB_ACTIONS', 'GITHUB_REPOSITORY', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'GITHUB_SHA'].some(key => environment[key] !== undefined)) {
+      throw new Error('GitHub execution requires a hosted controller identity');
+    }
+    return;
+  }
+  if (environment.GITHUB_ACTIONS !== 'true' || environment.GITHUB_REPOSITORY !== hosted.repository
+      || environment.GITHUB_RUN_ID !== hosted.runId || environment.GITHUB_RUN_ATTEMPT !== '1'
+      || environment.GITHUB_SHA !== hosted.workflowRevision
+      || environment.PAPERCLIP_RUNNER_EVAL_EXECUTION_ID !== attempt.executionId) {
+    throw new Error('Hosted controller admission does not match the current first-attempt worker');
+  }
+}
+
 export function bindRequest(manifest, request) {
   const attempt = manifest.attempts.find(item => item.attemptId === request.attemptId);
   if (!attempt || requestBindingSha256(request) !== attempt.requestSha256 || request.provider !== attempt.provider

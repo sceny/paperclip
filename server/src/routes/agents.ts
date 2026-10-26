@@ -1,3 +1,4 @@
+import { latestFailedRunsByAgent } from "@paperclipai/shared";
 import { prepareRuntimeSettingsPatch } from "../services/agent-runtime-settings.js";
 import { completeSetupTokenAiConnection } from "../services/setup-token-ai-connection.js";
 import { cancellationRequestId } from "../services/native-runtime/native-cancellation-request.js";
@@ -6910,7 +6911,8 @@ export function agentRoutes(
       ? Math.max(1, Math.min(HEARTBEAT_RUN_LIST_MAX_LIMIT, parseInt(limitParam, 10) || HEARTBEAT_RUN_LIST_DEFAULT_LIMIT))
       : HEARTBEAT_RUN_LIST_DEFAULT_LIMIT;
     const summary = req.query.summary === "true" || req.query.summary === "1";
-    const runs = await heartbeat.list(companyId, agentId, limit, { summary });
+    const recentRuns = await heartbeat.list(companyId, agentId, limit, { summary });
+    const runs = req.query.latestFailuresOnly === "true" ? latestFailedRunsByAgent(recentRuns) : recentRuns;
     const readDecisions = await getHeartbeatRunReadDecisions(db, access, req.actor, runs);
     res.json(await runRedactions.redactForRuns(companyId, runs.map((run, index) =>
       readDecisions[index] ? run : redactHeartbeatRunListRow(run)),

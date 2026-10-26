@@ -939,8 +939,11 @@ as the source Runner package.
 
 For native OpenCode and Cursor on Daytona, a complete installed Paperclip release
 also selects its packaged Linux daemon and provider-pack identity automatically.
-Use the matching Paperclip Daytona image: the controller verifies the image's
-pack manifest, executable hashes, bridge tree, and pinned versions before launch.
+Use a qualified Paperclip Daytona image. For an OS-protected pack, startup
+checks the selected provider interface and platform from its small manifest in
+the existing runner metadata query. It does not rescan the pack or require the
+same app source revision. Writable or legacy installations retain full content
+verification.
 The controller's operating system does not determine the remote daemon target.
 
 Native Claude remote execution also selects the Linux x64 or ARM64 daemon and
@@ -2192,7 +2195,15 @@ Historical v1 `provider-pack.tar.zst` receipts remain readable. Missing sidecars
 remote zstd, compatible GNU tar/checksum tools, or the Node 18+ helper retain
 directory staging; invalid sidecars fail
 closed. Keep transport files outside the pack so they cannot include themselves.
-Matching staged/preinstalled packs remain preferred and never transfer archives.
+Compatible protected image packs remain preferred and never transfer archives.
+The Runner's `src/live/provider-pack-contract.json` declares interface revisions;
+bump only the affected interface when its runner/pack contract breaks. Qualify
+and seal packs at image publication. The fast path requires root-owned,
+non-writable ancestors and manifest, and rejects writable aliases. The selected
+pack's own artifact identities feed launch and the recovery receipt. Reattachment
+keeps that exact identity; compatibility is a fresh-launch selection rule.
+Older packs without the declaration retain content verification until the image
+is updated. Selected ACPX agent profile checks remain in force.
 Daytona detects gzip/zstd headers and skips redundant transport compression.
 
 ### Remote GitHub launcher staging

@@ -38,7 +38,8 @@ function isCompleteIssueSnapshot(value: unknown): value is Issue {
   if (typeof value !== "object" || value === null) return false;
   const issue = value as Partial<Issue>;
   return (
-    isNonEmptyString(issue.id)
+    issue.listProjection === undefined
+    && isNonEmptyString(issue.id)
     && isNonEmptyString(issue.companyId)
     && typeof issue.title === "string"
     && typeof issue.status === "string"
