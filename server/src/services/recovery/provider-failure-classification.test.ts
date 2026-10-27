@@ -27,6 +27,15 @@ describe("classifyAdapterFailureForRecovery", () => {
     expect(classifyContinuationFailure({ errorCode: "setup_failed", error: "Legacy controller lease lost", resultJson: null } as never).kind)
       .toBe("non_retryable");
   });
+  it("reads a lease loss that an older build stored as a bootstrap setup failure as a lost controller lease", () => {
+    const stored = (providerWorkStarted: boolean) => ({
+      errorCode: "setup_failed", error: "Legacy controller lease lost",
+      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted } },
+    });
+    expect(classifyContinuationFailure(stored(false) as never))
+      .toMatchObject({ kind: "transient_infra", maxAttempts: Number.MAX_SAFE_INTEGER, maxBackoffMs: 10 * 60_000 });
+    expect(classifyContinuationFailure(stored(true) as never).kind).toBe("non_retryable");
+  });
   it("keeps waiting for a lost controller lease instead of giving up after a fixed number of tries", () => {
     const classification = classifyContinuationFailure({ errorCode: "controller_lease_lost", resultJson: null } as never);
     expect(classification.maxAttempts).toBeGreaterThan(1_000);

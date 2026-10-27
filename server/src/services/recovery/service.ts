@@ -12,7 +12,7 @@ import {
   decideLegacyContinuation, legacyDispositionEpisode, legacyDispositionFingerprint,
   LEGACY_DISPOSITION_REPAIR_INSTRUCTION, type LegacyDispositionEpisode,
 } from "./legacy-continuation.js";
-import { CONTROLLER_LEASE_LOST_FAILURE_CODE, hasLiveLegacyController } from "../legacy-controller-lease.js";
+import { CONTROLLER_LEASE_LOST_FAILURE_CODE, hasLiveLegacyController, isControllerLeaseLostRun } from "../legacy-controller-lease.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { isWaitingConversation, settleConversationTurn, deliverConversationComments } from "../agent-conversations.js";
 import {
@@ -742,22 +742,22 @@ export function classifyContinuationFailure(
       errorCode,
     };
   }
-  if (isAiAuthenticationBlocked(latestRun) || (errorCode && NON_RETRYABLE_CONTINUATION_ERROR_CODES.has(errorCode))) {
-    return {
-      kind: "non_retryable",
-      maxAttempts: 0,
-      baseBackoffMs: 0,
-      errorCode,
-    };
-  }
   // The host stopped while the run waited to start (sleep, stall). The work did not fail, so waiting longer is
-  // the only cost and the task is never moved to blocked for it.
-  if (errorCode === CONTROLLER_LEASE_LOST_FAILURE_CODE) {
+  // the only cost and the task is never moved to blocked for it. Older builds stored this as `setup_failed`.
+  if (isControllerLeaseLostRun(latestRun ?? {})) {
     return {
       kind: "transient_infra",
       maxAttempts: Number.MAX_SAFE_INTEGER,
       baseBackoffMs: CONTINUATION_RECOVERY_TRANSIENT_BASE_BACKOFF_MS,
       maxBackoffMs: CONTROLLER_LEASE_LOST_MAX_BACKOFF_MS,
+      errorCode,
+    };
+  }
+  if (isAiAuthenticationBlocked(latestRun) || (errorCode && NON_RETRYABLE_CONTINUATION_ERROR_CODES.has(errorCode))) {
+    return {
+      kind: "non_retryable",
+      maxAttempts: 0,
+      baseBackoffMs: 0,
       errorCode,
     };
   }

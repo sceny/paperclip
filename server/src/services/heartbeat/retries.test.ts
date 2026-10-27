@@ -270,6 +270,17 @@ describePostgres("heartbeat retry module database wiring", () => {
     expect(nine.dueAt.getTime() - now.getTime()).toBe(10 * 60_000);
   });
 
+  it("waits for a host that lost its controller lease even when an older build stored it as a setup failure", async () => {
+    const { run, agent } = await failedWith("setup_failed", {
+      error: "Legacy controller lease lost",
+      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
+      scheduledRetryAttempt: 2, scheduledRetryReason: "transient_failure",
+    });
+    const { retries } = boundRetries();
+    const result = await retries.scheduleBoundedRetryForRun(run, agent, { now, random: () => 0 });
+    expect(result).toMatchObject({ outcome: "scheduled", run: { scheduledRetryReason: "controller_lease_lost", scheduledRetryAttempt: 1 } });
+  });
+
   it("restarts a run at once when it failed to sign in with a token that was renewed after it began", async () => {
     const { retries } = boundRetries({ aiAuthFailureState: async () => "renewed" });
     const { run, agent } = await failedWith("claude_auth_required", { scheduledRetryAttempt: 2, scheduledRetryReason: "transient_failure" });
