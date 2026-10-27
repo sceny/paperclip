@@ -56,6 +56,7 @@ import {
   chatMessageLinks,
   chatPublications,
   companyMemberships,
+  connectionGrants,
   companySecretBindings,
   companySecrets,
   companySkills,
@@ -6867,21 +6868,70 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(await selectRecoveryIssueById(issueId)).toMatchObject({ status: "in_progress", assigneeAgentId: agentId });
   });
 
-  it("leaves an issue in place while its Claude login waits for a reconnect", async () => {
-    const { agentId, runId, issueId } = await seedStrandedIssueFixture({
+  async function seedClaudeLoginFailure(grantStatus: "active" | "needs_reauthorization" | null) {
+    const fixture = await seedStrandedIssueFixture({
       status: "in_progress",
       runStatus: "failed",
       runErrorCode: "claude_auth_required",
       runError: "Claude login required",
       livenessState: "blocked",
     });
+    if (grantStatus === null) return fixture;
+    const applicationId = randomUUID();
+    const connectionId = randomUUID();
+    const grantId = randomUUID();
+    await db.insert(toolApplications).values({
+      id: applicationId, companyId: fixture.companyId, applicationKey: `ai:${applicationId}`, name: "Claude", type: "mcp_http", status: "active",
+    });
+    await db.insert(toolConnections).values({
+      id: connectionId, companyId: fixture.companyId, applicationId, name: "Claude login", uid: `ai-${connectionId}`,
+      connectionPurpose: "ai", transport: "runtime_auth", authKind: "oauth", status: "active", enabled: true,
+      config: { ai: { provider: "anthropic", method: "subscription" } },
+    });
+    await db.insert(connectionGrants).values({
+      id: grantId, companyId: fixture.companyId, connectionId, kind: "organization", status: grantStatus,
+    });
+    const [run] = await db.select({ contextSnapshot: heartbeatRuns.contextSnapshot }).from(heartbeatRuns).where(eq(heartbeatRuns.id, fixture.runId));
+    await db.update(heartbeatRuns).set({
+      contextSnapshot: {
+        ...(run?.contextSnapshot ?? {}),
+        aiConnection: {
+          connectionId, grantId, provider: "anthropic", method: "subscription", mode: "shared",
+          identity: `${grantId}:shared:${"0".repeat(16)}`,
+        },
+      },
+    }).where(eq(heartbeatRuns.id, fixture.runId));
+    return fixture;
+  }
+
+  it("leaves an issue in place while its Claude login waits for a reconnect", async () => {
+    const { agentId, runId, issueId } = await seedClaudeLoginFailure("needs_reauthorization");
 
     const result = await heartbeatService(db).reconcileStrandedAssignedIssues();
     expect(result.escalated).toBe(0);
+    expect(result.skipped).toBeGreaterThanOrEqual(1);
 
     expect(await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))).toHaveLength(0);
     expect(await selectRecoveryIssueById(issueId)).toMatchObject({ status: "in_progress", assigneeAgentId: agentId });
     expect(await selectRecoveryActionsForIssue(issueId)).toHaveLength(0);
+  });
+
+  it("starts an issue again by itself once its Claude login was reconnected", async () => {
+    const { agentId, runId, issueId } = await seedClaudeLoginFailure("active");
+
+    const result = await heartbeatService(db).reconcileStrandedAssignedIssues();
+    expect(result.escalated).toBe(0);
+
+    expect(await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId))).toHaveLength(1);
+    expect(await selectRecoveryIssueById(issueId)).toMatchObject({ status: "in_progress", assigneeAgentId: agentId });
+  });
+
+  it("still moves an issue to blocked when the run had no managed Claude login", async () => {
+    const { issueId } = await seedClaudeLoginFailure(null);
+
+    const result = await heartbeatService(db).reconcileStrandedAssignedIssues();
+    expect(result.escalated).toBe(1);
+    expect(await selectRecoveryIssueById(issueId)).toMatchObject({ status: "blocked" });
   });
 
   it("retries an interrupted corrective successful-run handoff instead of escalating it", async () => {

@@ -711,6 +711,15 @@ type ContinuationRetryClassification = {
   errorCode: string | null;
 };
 
+function hasManagedAiConnection(latestRun: LatestIssueRun): boolean {
+  const attribution = parseObject(parseObject(latestRun?.contextSnapshot).aiConnection);
+  return (
+    typeof attribution.identity === "string" &&
+    typeof attribution.connectionId === "string" &&
+    typeof attribution.grantId === "string"
+  );
+}
+
 export function classifyContinuationFailure(
   latestRun: LatestIssueRun,
 ): ContinuationRetryClassification {
@@ -5453,7 +5462,12 @@ export function recoveryService(
         continue;
       }
       if (isUnsuccessfulTerminalIssueRun(latestRun)) {
-        const classification = classifyContinuationFailure(latestRun);
+        const baseClassification = classifyContinuationFailure(latestRun);
+        // Without a managed login there is nothing to renew or reconnect, so waiting would strand the issue.
+        const classification: ContinuationRetryClassification =
+          baseClassification.kind === "awaiting_reconnect" && !hasManagedAiConnection(latestRun)
+            ? { kind: "non_retryable", maxAttempts: 0, baseBackoffMs: 0, errorCode: baseClassification.errorCode }
+            : baseClassification;
 
         if (
           classification.errorCode === CONTINUATION_WAITING_ON_REVIEW_ERROR_CODE
