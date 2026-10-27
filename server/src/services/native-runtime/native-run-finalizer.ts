@@ -3,7 +3,7 @@ import { notifyExecutionRunWork } from "../execution-control-notifications.js";
 import { reconcileMuseNativeTerminalRun } from "./muse-terminal-reconciliation.js";
 import { assertNativeCaseHandoffResult } from "./native-case-handoff.js";
 import { scheduledIssueMonitorWait } from "../issue-monitors.js";
-import { hasPublishedGitHubReview } from "../chat-channels/github/review-wait.js";
+import { hasPublishedGitHubReview, readInheritedGitHubReviewWait } from "../chat-channels/github/review-wait.js";
 import { readNativeMonitorDelivery, readNativePreservedMonitorWait } from "./native-monitor-delivery.js";
 import { isNativePlanWaitResult, readNativePlanWait } from "./native-plan-wait.js";
 import { hasPendingNativeChildCompletion } from "./native-child-completion-delivery.js";
@@ -57,7 +57,7 @@ import {
 } from "./native-board-response-wait.js";
 import { emitAgentTaskRun } from "../agent-task-run-telemetry.js";
 import { isNewTerminalRunFailure, reportRunFailure } from "../run-failure-report.js";
-import { resolveExternalChatResponseWaitAuthorization } from "./chat-attachment-reuse.js";
+import { isPublishedGitHubReviewCompletionContinuation, readPublishedGitHubReviewCompletionContinuation, resolveExternalChatResponseWaitAuthorization } from "./chat-attachment-reuse.js";
 import {
   authorizeNativeChatReviewPresentation,
   hasMaterializedNativeReviewResponse,
@@ -1317,10 +1317,17 @@ export async function finalizeNativeRun(input: {
       .then((rows) => rows[0] ?? null);
     if (!authoritativeIssue)
       throw new Error("native_finalization_issue_missing");
+    const publishedReviewContinuation = assessment.reportedDisposition === "yielded" &&
+      isPublishedGitHubReviewCompletionContinuation(assessment.continuation)
+      ? await readPublishedGitHubReviewCompletionContinuation({ db: input.db,
+          binding: { companyId: run.companyId, issueId: authoritativeIssue.id, runId: run.id, agentId: run.agentId } })
+      : null;
     const externalChatResponseWaitAuthorization =
       assessment.reportedDisposition === "yielded" &&
       assessment.continuation?.kind === "response_wake"
-        ? await resolveExternalChatResponseWaitAuthorization({
+        ? isPublishedGitHubReviewCompletionContinuation(assessment.continuation)
+          ? publishedReviewContinuation?.idempotencyKey === assessment.continuation.idempotencyKey ? "authorized" : "revoked"
+          : await resolveExternalChatResponseWaitAuthorization({
             db: input.db,
             binding: {
               companyId: run.companyId,
@@ -1452,7 +1459,7 @@ export async function finalizeNativeRun(input: {
         (externalChatResponseWaitAuthorization === "authorized" || monitorWaitAt !== null)
         ? await hasPublishedGitHubReview(input.db, {
             companyId: run.companyId, issueId: authoritativeIssue.id, runId: run.id,
-          }) : false,
+          }) || (await readInheritedGitHubReviewWait(input.db, run))?.kind === "published" : false,
       boardResponseWaitAuthorized: boardResponseWait !== null,
       boardResponseWaitOrigin: boardResponseWaitOrigin !== null,
       isConversation: isConversation(authoritativeIssue),
@@ -1554,7 +1561,7 @@ export async function finalizeNativeRun(input: {
             : undefined,
         requireExternalChatResponseWaitAuthorization:
           decision.reasonCode === "external_chat_response_waiting"
-            ? { agentId: run.agentId }
+            ? { agentId: run.agentId, ...(publishedReviewContinuation ? { completionContinuationKey: publishedReviewContinuation.idempotencyKey } : {}) }
             : undefined,
         reviewResponsePresentation:
           decision.reasonCode === "governed_response_waiting" &&

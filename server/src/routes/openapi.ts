@@ -1430,6 +1430,8 @@ const BOARD_ONLY_OPERATIONS = new Set([
 
   "GET /api/companies/{companyId}/project-repositories",
   "PUT /api/projects/{id}/repositories",
+  "GET /api/projects/{id}/git-authorization",
+  "PUT /api/projects/{id}/git-authorization",
   "DELETE /api/issues/{id}/documents/{key}",
   "GET /api/companies/{companyId}/decisions",
   "GET /api/cloud/stacks",
@@ -5002,6 +5004,25 @@ registry.registerPath({
     401: r.unauthorized,
     403: r.forbidden,
   },
+});
+
+const projectGitAuthorizationResponse = z.object({
+  grantId: z.string().uuid().nullable(),
+  authorizedByUserId: z.string().nullable(),
+  options: z.array(z.object({ grantId: z.string().uuid(), connectionName: z.string(), login: z.string() })),
+});
+registry.registerPath({
+  method: "get", path: "/api/projects/{id}/git-authorization", tags: ["projects"],
+  summary: "Read background project GitHub authorization and the viewer's eligible grants",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(projectGitAuthorizationResponse), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+registry.registerPath({
+  method: "put", path: "/api/projects/{id}/git-authorization", tags: ["projects"],
+  summary: "Authorize or revoke a personal GitHub grant for background project work",
+  description: "Board project workspace writers can select only their own active company-installed grant. No task authority or token is stored.",
+  request: { params: z.object({ id: z.string() }), body: jsonBody(z.object({ grantId: z.string().uuid().nullable() }).strict()) },
+  responses: { 200: r.ok(projectGitAuthorizationResponse), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
 registry.registerPath({

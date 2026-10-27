@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import { agentWakeupRequests, chatActions, chatConversations, chatEndpoints, heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import type { DbOrTransaction } from "./runtime-types.js";
 
@@ -8,15 +8,19 @@ export const taskRetryInputSchema = z.object({
   // Truncating it strands older requests or makes the newer-input guard reject
   // every Retry. Dispatch already carries the full queue with bounded inline text.
   sourceActionIds: z.array(z.string().uuid()).refine(ids => new Set(ids).size === ids.length),
+  skippedActionIds: z.array(z.string().uuid()).optional(),
   runtimeFence: z.object({ generation: z.number().int().nonnegative(),
     credentialFingerprint: z.string().regex(/^[a-f0-9]{64}$/) }).optional(),
-});
+}).refine(value => !value.skippedActionIds || (
+  new Set(value.skippedActionIds).size === value.skippedActionIds.length &&
+  value.skippedActionIds.every(id => value.sourceActionIds.includes(id))
+));
 export type TaskRetryInput = z.infer<typeof taskRetryInputSchema>;
 
 export async function selectTaskRetryInput(tx: DbOrTransaction, input: {
   companyId: string; issueId: string; agentId: string; failedRunId: string;
 }) {
-  const [conversation] = await tx.select({ id: chatConversations.id }).from(chatConversations)
+  const [conversation] = await tx.select({ id: chatConversations.id, runCreatedAt: heartbeatRuns.createdAt }).from(chatConversations)
     .innerJoin(chatEndpoints, eq(chatEndpoints.id, chatConversations.endpointId))
     .innerJoin(chatActions, and(eq(chatActions.companyId, chatConversations.companyId),
       eq(chatActions.conversationId, chatConversations.id)))
@@ -28,15 +32,20 @@ export async function selectTaskRetryInput(tx: DbOrTransaction, input: {
       eq(chatEndpoints.externalExecutionPolicy, "restricted"),
     )).limit(1);
   if (!conversation) return undefined;
-  const pending = await tx.select({ id: chatActions.id }).from(chatActions)
+  const pending = await tx.select({ id: chatActions.id, status: agentWakeupRequests.status }).from(chatActions)
     .innerJoin(agentWakeupRequests, and(eq(agentWakeupRequests.companyId, chatActions.companyId),
       eq(agentWakeupRequests.id, chatActions.id))).where(and(
       eq(chatActions.companyId, input.companyId), eq(chatActions.conversationId, conversation.id),
-      eq(chatActions.kind, "inbound_wakeup"), eq(chatActions.status, "processed"),
-      eq(agentWakeupRequests.agentId, input.agentId), eq(agentWakeupRequests.status, "deferred_issue_execution"),
+      eq(chatActions.kind, "inbound_wakeup"), eq(agentWakeupRequests.agentId, input.agentId),
+      or(and(eq(chatActions.status, "processed"), eq(agentWakeupRequests.status, "deferred_issue_execution")),
+        and(eq(chatActions.status, "failed"), eq(agentWakeupRequests.status, "skipped"),
+          inArray(agentWakeupRequests.reason, ["budget.blocked", "agent.not_invokable"]),
+          sql`${chatActions.payload}->>'requestedByActorType' = 'user'`,
+          gt(chatActions.createdAt, conversation.runCreatedAt))),
       isNull(agentWakeupRequests.runId),
     )).orderBy(asc(chatActions.createdAt), asc(chatActions.id)).for("update", { of: agentWakeupRequests });
-  return taskRetryInputSchema.parse({ sourceActionIds: pending.map(row => row.id) });
+  return taskRetryInputSchema.parse({ sourceActionIds: pending.map(row => row.id),
+    skippedActionIds: pending.filter(row => row.status === "skipped").map(row => row.id) });
 }
 
 export async function claimTaskRetryInput(tx: DbOrTransaction, input: {

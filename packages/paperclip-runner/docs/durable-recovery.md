@@ -175,16 +175,24 @@ The ACK means that every source event through sequence 9 is committed or
 deduplicated. The runner rejects an ACK that moves backward or beyond its
 produced source cursor. It removes only events at or below a valid ACK.
 
-The controller stages `item.delta` output snapshots with asynchronous file writes and file
-flushes. A slow volume does not block unrelated HTTP requests during those
-operations. The controller still publishes the snapshot atomically, flushes its
-directory, and waits for persistence before acknowledging an event.
-A newer command or authenticated connection can save the
-same event while staging is pending; the older snapshot cannot replace that
-newer durable state. A failed write fences further authority until reload.
-Lifecycle, control, authentication, and semantic tool events retain synchronous
-persistence before transport readers can observe their state. Semantic tool
-admission and dispatch cannot yield to a replacement connection between those operations.
+The controller stages routine priority 1 and 2 event snapshots with asynchronous
+file writes and file fsyncs. Those operations let unrelated HTTP requests run
+while the volume is slow. Rename and directory fsync remain synchronous. The
+candidate snapshot stays private until its atomic replacement
+and directory flush finish. Lifecycle readers and replacement connections see
+only the committed cursor. The controller acknowledges the event after that commit.
+A command that saves during staging includes the pending event in its own
+durable write. Further commands do not add event deliveries or cause another
+staged write. Other authority changes leave an uncommitted event available for
+replay instead of repeatedly rewriting the snapshot. A replaced
+connection cannot publish its old candidate. Its unacknowledged event remains
+available for replay. A failed write fences further authority until reload.
+Priority 0 events, all `run.*` and `turn.*` lifecycle events, commands,
+authentication, and semantic tool input retain synchronous persistence. The
+lifecycle rule also covers producers that label a terminal event priority 1.
+A terminal suffix remains in the same
+control-loop turn. Semantic tool admission and dispatch cannot yield to a
+replacement connection between those operations.
 Controller replacement must still stop ingress and drain admitted processing
 before a successor reuses the journal. External control routes stop their
 reconnect loop before the controller joins admitted work. An incomplete drain

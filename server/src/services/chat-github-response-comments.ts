@@ -35,6 +35,33 @@ const responseRunColumns = {
   issueId: heartbeatRuns.issueId,
   status: heartbeatRuns.status,
   updatedAt: heartbeatRuns.updatedAt,
+  // Terminal execution can precede native presentation commit. Until its
+  // durable decision exists, missing output is undecided rather than failure.
+  nativePresentationPending: sql<boolean>`coalesce(
+    ${heartbeatRuns.status} = 'succeeded'
+    and ${heartbeatRuns.runtimeMode} = 'native'
+    and (${heartbeatRuns.nativePhase} is distinct from 'committed'
+      or ${heartbeatRuns.resultJson}->'presentationDecision'->>'schema' is distinct from 'paperclip.run_presentation_decision.v1'
+      or coalesce(${heartbeatRuns.resultJson}->'presentationDecision'->>'commentAction', '') not in ('none', 'create', 'reuse')),
+    false
+  )`,
+  // Project only the server-committed no-publication decision, never the
+  // potentially large native result or model-authored summary.
+  passiveResponseWait: sql<boolean>`coalesce(
+    ${heartbeatRuns.status} = 'succeeded'
+    and ${heartbeatRuns.runtimeMode} = 'native'
+    and ${heartbeatRuns.nativePhase} = 'committed'
+    and ${heartbeatRuns.resultJson}->>'finalizationPhase' = 'committed'
+    and ${heartbeatRuns.resultJson}->>'finalizationReasonCode' = 'external_chat_response_waiting'
+    and ${heartbeatRuns.resultJson}->'nativeResult'->>'schema' = 'paperclip.run_result.v1'
+    and ${heartbeatRuns.resultJson}->'nativeResult'->>'reportedWorkDisposition' = 'yielded'
+    and ${heartbeatRuns.resultJson}->'nativeResult'->'continuation'->>'kind' = 'response_wake'
+    and ${heartbeatRuns.resultJson}->'presentationDecision'->>'schema' = 'paperclip.run_presentation_decision.v1'
+    and ${heartbeatRuns.resultJson}->'presentationDecision'->>'chosenSource' = 'none'
+    and ${heartbeatRuns.resultJson}->'presentationDecision'->>'commentAction' = 'none'
+    and ${heartbeatRuns.resultJson}->'presentationDecision'->'reasonCodes' @> '["yielded_control_plane_wait"]'::jsonb,
+    false
+  )`,
   contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object(
     'issueId', ${heartbeatRuns.contextSnapshot}->'issueId',
     'taskId', ${heartbeatRuns.contextSnapshot}->'taskId',
@@ -130,7 +157,7 @@ export async function writeGitHubResponseComment(
   const sameRequest = !shared || previous?.body?.includes(requestResponseMarker(source)) === true;
   const alreadyFinal = sameRequest && previous?.body?.includes("<!-- paperclip-response-state:final -->") === true;
   const body = `${projectSafeChatPublicationText(input.body)}\n\n${marker}${shared ? `\n${requestResponseMarker(source)}` : ""}\n<!-- paperclip-response-version:${versionAt.toISOString()} -->${input.final ? "\n<!-- paperclip-response-state:final -->" : ""}`;
-  const preserved = previous && (previous.body === body || (input.acknowledgement && sameRequest) || (alreadyFinal && !input.final) ||
+  const preserved = previous && (previous.body === body || (input.acknowledgement && (sameRequest || (shared && previous.body?.includes("<!-- paperclip-response-state:final -->")))) || (alreadyFinal && !input.final) ||
     (input.preserveFinal && previous.body?.includes("<!-- paperclip-response-state:final -->"))) ? previous : null;
   const posted = preserved && (!shared || preserved.body?.includes(marker)) ? preserved : await api.request<Comment>(
     previous ? `${item}/${previous.id}` : source.replyId
@@ -145,7 +172,8 @@ export async function writeGitHubResponseComment(
   const receipt = { id: String(posted.id), url: posted.html_url };
   await lease.commit(async tx => {
     if (shared) await tx.update(chatActions).set({ result: {
-      ...receipt, final: input.final || alreadyFinal, versionAt: versionAt.toISOString(), deliveryId: source.delivery.id,
+      ...receipt, final: input.final || alreadyFinal || Boolean(preserved?.body?.includes("<!-- paperclip-response-state:final -->")),
+      versionAt: versionAt.toISOString(), deliveryId: source.delivery.id,
     }, updatedAt: new Date() }).where(eq(chatActions.id, target.id));
     await tx.update(chatActions).set({ status: "processed", result: {
       ...receipt, final: input.final || alreadyFinal, versionAt: versionAt.toISOString(),
@@ -230,6 +258,20 @@ export function githubResponseCommentService(db: Db, fetchImpl = fetch) {
             companyId: source.endpoint.companyId, endpointId: source.endpoint.id,
             issueId: source.conversation.issueId!, runId: run.id }) : "none";
           if (reply === "unsettled") throw conflict("GitHub reply is still being resolved");
+          // A confirmed reply for this exact run can retire its placeholder.
+          // Otherwise terminal execution is not yet a missing-response decision.
+          if (ownsLatestRequest && run.nativePresentationPending && reply === "none") return;
+          if (isMainPullResponse(source) && ownsLatestRequest && run.passiveResponseWait && reply === "none") {
+            // A committed passive turn intentionally has no new response.
+            // Settle this request's acknowledgement without editing the shared
+            // PR assessment or inventing a current-run publication receipt.
+            await lease.commit(async tx => { await tx.update(chatActions).set({
+              status: "cancelled", result: { ...existing.result, final: true, code: "passive_response_wait" },
+              updatedAt: new Date(),
+            }).where(and(eq(chatActions.id, existing.id), eq(chatActions.companyId, source.endpoint.companyId),
+              sql`coalesce(${chatActions.result}->>'final', 'false') <> 'true'`)); });
+            return;
+          }
           if (existing.result?.final === true) return existing.result.id ? { id: String(existing.result.id), url: String(existing.result.url) } : undefined;
           preserveFinal = reply === "confirmed";
           onlyExisting = reply === "confirmed" && !existing.result?.id;
@@ -374,6 +416,8 @@ export function githubResponseCommentService(db: Db, fetchImpl = fetch) {
         )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
         if (latest?.id !== run.id) throw forbidden("A newer GitHub run owns the response");
         if ((await responseForRequest())?.result?.final === true) throw forbidden("GitHub request already has a final response");
+        if (current.nativePresentationPending) throw conflict("GitHub native response presentation is still being resolved");
+        if (isMainPullResponse(source) && current.passiveResponseWait) throw forbidden("GitHub run intentionally yielded without a new response");
         if (await githubRunReplyState(db, input) !== "none") throw conflict("GitHub reply is still being resolved");
       };
       receipt = await acknowledge(link.deliveryId, input.body, assertRun);

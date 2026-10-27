@@ -2184,12 +2184,13 @@ describe("OpenCodeServerDriver", () => {
     await session.close({ reason: "test" });
   });
 
-  it.each([true, false])("resolves an omitted continuation through the real OpenCode MCP boundary only with a saved monitor: %s", async eligible => {
+  it.each(["monitor", "response_wake"] as const)("resolves an omitted %s through the real OpenCode MCP boundary only from current server state", async kind => {
+    for (const eligible of [true, false]) {
     await chmod(fixture, 0o755);
     const root = await mkdtemp(join(tmpdir(), "paperclip-opencode-monitor-"));
     const workspace = await mkdtemp(join(tmpdir(), "paperclip-opencode-monitor-workspace-"));
     roots.push(root, workspace);
-    const continuation = { kind: "monitor", summary: "Wait for the saved task monitor.", idempotencyKey: "task-monitor:saved" };
+    const continuation = { kind, summary: "Wait for the saved task path.", idempotencyKey: "task-wait:saved" };
     const reads: string[] = [];
     const accepted: unknown[] = [];
     const driver = new OpenCodeServerDriver({
@@ -2216,7 +2217,8 @@ describe("OpenCodeServerDriver", () => {
         expect(events.filter(event => event.eventType === "run.result.proposed")).toEqual([]);
         expect((await session.snapshot()).semanticResult).toBeNull();
       }
-    } finally { await session.close({ reason: "monitor default test complete" }); }
+    } finally { await session.close({ reason: "saved wait default test complete" }); }
+    }
   });
 
   it("keeps assigned discovery operation IDs at the authenticated MCP and controller boundary", async () => {

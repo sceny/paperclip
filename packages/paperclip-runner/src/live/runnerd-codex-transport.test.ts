@@ -8322,6 +8322,7 @@ async function verifyLiveRunnerAdoption(
   goalMidTurn = false,
   detachBeforeCleanup = false,
   startWithoutCheckpoint = false,
+  uncertainAtClose = false,
 ) {
   const stateDirectory = await mkdtemp(join(tmpdir(), "runnerd-live-adopt-"));
   const server = createServer();
@@ -8344,7 +8345,7 @@ async function verifyLiveRunnerAdoption(
     authority = next;
     return {
       connectUrl: `ws://127.0.0.1:${address.port}/runner`,
-      ...(mismatchedArtifact ? { checkpoint } : {}),
+      ...(mismatchedArtifact || uncertainAtClose ? { checkpoint } : {}),
       release: async () => {
         if (authority === next) authority = null;
       },
@@ -8371,6 +8372,7 @@ async function verifyLiveRunnerAdoption(
   let runnerPid: number | null = null;
   let adopted: ReturnType<typeof createCapabilityRunnerdCodexTransport> | null =
     null;
+  let restoreIntervalSpies: () => void = () => undefined;
   try {
     let opened: Record<string, unknown>;
     try {
@@ -8438,8 +8440,14 @@ async function verifyLiveRunnerAdoption(
     });
     const openedThread = opened.thread as Record<string, unknown>;
     const signal = vi.fn(() => true);
+    const probeError = new Error("fixture remote process identity is unavailable");
+    let rejectLiveness = false;
+    const intervals = uncertainAtClose ? vi.spyOn(globalThis, "setInterval") : null;
+    const clearedIntervals = uncertainAtClose ? vi.spyOn(globalThis, "clearInterval") : null;
+    restoreIntervalSpies = () => { intervals?.mockRestore(); clearedIntervals?.mockRestore(); };
     adopted = createCapabilityRunnerdCodexTransport({
       ...sharedOptions,
+      ...(uncertainAtClose ? { closeGraceMs: 2_000 } : {}),
       // Hash different stable bytes without replacing the real runner artifact
       // used by concurrent tests. Adoption must never execute this path.
       ...(mismatchedArtifact
@@ -8462,6 +8470,7 @@ async function verifyLiveRunnerAdoption(
         startedAt: new Date().toISOString(),
         signal,
         isAlive: () => {
+          if (rejectLiveness) return Promise.reject(probeError);
           try {
             process.kill(runnerPid!, 0);
             return true;
@@ -8540,6 +8549,30 @@ async function verifyLiveRunnerAdoption(
       expect(observed.params).toMatchObject({ threadId: "codex-thread-1", turnId: "provider-goal-turn-1" });
     }
     expect(duplicateLauncher).not.toHaveBeenCalled();
+    if (uncertainAtClose) {
+      const before = JSON.parse(await readFile(controlPlaneStatePath, "utf8"));
+      const retainedAuthority = authority as DurablePrpControlPlane | null;
+      rejectLiveness = true;
+      await expect(adopted.transport.close()).rejects.toBe(probeError);
+      expect(retainedAuthority?.activeRunnerConnectionCount()).toBe(0);
+      expect(intervals!.mock.results.length).toBeGreaterThan(0);
+      for (const interval of intervals!.mock.results) if (interval.type === "return") expect(clearedIntervals).toHaveBeenCalledWith(interval.value);
+      const notificationsClosed = (async () => { for await (const _event of adopted!.transport.notifications()) {} return true; })();
+      let queueDeadline: ReturnType<typeof setTimeout> | undefined;
+      try {
+        expect(await Promise.race([notificationsClosed, new Promise<boolean>(resolve => { queueDeadline = setTimeout(() => resolve(false), 250); })])).toBe(true);
+      } finally { clearTimeout(queueDeadline); }
+      await expect(adopted.transport.close()).rejects.toBe(probeError);
+      expect(adopted.transport.processInfo()).toMatchObject({ exited: false });
+      expect(() => process.kill(runnerPid!, 0)).not.toThrow();
+      expect(signal).not.toHaveBeenCalled();
+      expect(checkpoint).not.toHaveBeenCalled();
+      expect(duplicateLauncher).not.toHaveBeenCalled();
+      const retained = JSON.parse(await readFile(controlPlaneStatePath, "utf8"));
+      expect(retained.identity).toEqual(before.identity);
+      expect(retained.commands).toEqual(before.commands);
+      return;
+    }
     expect(adopted.evidence().diagnostics).toContain(
       `adopted runner ${runnerPid} authenticated to its durable PRP authority`,
     );
@@ -8563,6 +8596,15 @@ async function verifyLiveRunnerAdoption(
     }
   } finally {
     await adopted?.transport.close().catch(() => undefined);
+    if (uncertainAtClose) {
+      const providerPid = adopted?.evidence().codexPid;
+      if (providerPid) {
+        try { process.kill(providerPid, "SIGKILL"); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+      }
+      await (authority as DurablePrpControlPlane | null)?.stop();
+    }
+    restoreIntervalSpies();
     if (runnerPid) {
       try {
         process.kill(-runnerPid, "SIGKILL");
@@ -8585,6 +8627,8 @@ it(
   () => verifyLiveRunnerAdoption(false),
   30_000,
 );
+
+it("retains authenticated adopted-runner ownership when a close probe rejects", () => verifyLiveRunnerAdoption(false, false, false, false, false, true), 30_000);
 
 it(
   "blocks adopted runner artifact drift without duplicate launch, checkpoint replacement, or process signals",

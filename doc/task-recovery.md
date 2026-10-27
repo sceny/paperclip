@@ -28,6 +28,12 @@ comment receipt, then checks current sender, repository, conversation and task
 access. The retry records the current runtime generation and credential-reference
 fingerprint. Another reconnect invalidates that admission. Historical deliveries,
 stale webhook callbacks and the exact-run retry contract retain their fences.
+Legacy input that predates saved App IDs can also use an earlier processed
+response ledger from the same company, endpoint, conversation and agent. Its
+server-owned App binding must predate that input and retain a processed delivery
+and inbound source link. The endpoint's non-null App claim cannot be replaced;
+this proves historical identity without replaying the earlier response. Missing
+proof or an explicit conflicting App binding still rejects Retry.
 
 Task Retry keeps the complete saved-input batch, including batches larger than
 the exact-run endpoint's limit. Source rows, receipts and invalidations are read

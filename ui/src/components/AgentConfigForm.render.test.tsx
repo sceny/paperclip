@@ -1640,6 +1640,86 @@ describe("AgentConfigForm environment selector", () => {
     expect(result.container.textContent).not.toContain("Cannot read properties of undefined");
   });
 
+  it("qualifies an existing native runner's saved computer before its normal Test", async () => {
+    const computer = makeEnvironment({ id: "saved-computer", driver: "sandbox", status: "active",
+      config: { provider: "daytona", snapshot: "managed-snapshot" } });
+    const order: string[] = [];
+    mockAgentsApi.qualifyRunner.mockImplementation(async () => {
+      order.push("qualification");
+      return { ok: true, driver: "sandbox", details: { platformQualificationRecorded: true } };
+    });
+    mockAgentsApi.testEnvironment.mockImplementation(async () => {
+      order.push("runtime");
+      return { adapterType: "paperclip_runner", status: "pass", checks: [], testedAt: new Date(0).toISOString() };
+    });
+    const result = await renderForm([computer], { adapterType: "paperclip_runner", defaultEnvironmentId: computer.id,
+      adapterConfig: { provider: "opencode", model: "example/model" } }, { showAdapterTestEnvironmentButton: true });
+    roots.push(result.root);
+    await runTest(result.container);
+    expect(mockAgentsApi.qualifyRunner).toHaveBeenCalledWith("agent-1", computer.id, "company-1");
+    expect(order).toEqual(["qualification", "runtime"]);
+    expect(result.onSave).not.toHaveBeenCalled();
+  });
+
+  it.each(["failed", "missing-proof"])("does not run the native runtime test after %s saved-computer qualification", async state => {
+    const computer = makeEnvironment({ id: "saved-computer", driver: "sandbox", status: "active",
+      config: { provider: "daytona", snapshot: "managed-snapshot" } });
+    mockAgentsApi.qualifyRunner.mockResolvedValue({ ok: state !== "failed", driver: "sandbox", summary: "Computer test failed.",
+      details: { platformQualificationRecorded: false } });
+    const result = await renderForm([computer], { adapterType: "paperclip_runner", defaultEnvironmentId: computer.id,
+      adapterConfig: { provider: "opencode" } }, { showAdapterTestEnvironmentButton: true });
+    roots.push(result.root);
+    await runTest(result.container);
+    expect(mockAgentsApi.qualifyRunner).toHaveBeenCalledTimes(1);
+    expect(mockAgentsApi.testEnvironment).not.toHaveBeenCalled();
+    expect(result.container.textContent).toContain("Computer test failed.");
+  });
+
+  it.each(["openai_dot", "muse", "pool"])("does not turn the %s readiness preview into a computer qualification", async provider => {
+    const computer = makeEnvironment({ id: "saved-computer", driver: "sandbox", status: "active",
+      config: { provider: "daytona", snapshot: "managed-snapshot" } });
+    mockAgentsApi.qualifyRunner.mockResolvedValue({ ok: true, driver: "sandbox", details: { platformQualificationRecorded: true } });
+    const result = await renderForm([computer], { adapterType: "paperclip_runner", defaultEnvironmentId: computer.id,
+      adapterConfig: { provider: provider === "pool" ? "opencode" : provider },
+      ...(provider === "pool" ? { runtimeConfig: { aiConnection: { mode: "router", connectionId: "a8d3a9a3-9866-49d8-93d6-c497ae090d05" } } } : {}) },
+      { showAdapterTestEnvironmentButton: true, compactTestFeedback: true });
+    roots.push(result.root);
+    await clickByText(result.container, provider === "pool" ? "Run test" : "Check setup");
+    expect(mockAgentsApi.testEnvironment).toHaveBeenCalledTimes(1);
+    expect(mockAgentsApi.qualifyRunner).not.toHaveBeenCalled();
+  });
+
+  it("does not run a native test after settings change during computer qualification", async () => {
+    const computer = makeEnvironment({ id: "saved-computer", driver: "sandbox", status: "active",
+      config: { provider: "daytona", snapshot: "managed-snapshot" } });
+    let finish: (() => void) | undefined;
+    mockAgentsApi.qualifyRunner.mockImplementation(() => new Promise(resolve => {
+      finish = () => resolve({ ok: true, driver: "sandbox", details: { platformQualificationRecorded: true } });
+    }));
+    const result = await renderForm([computer], { adapterType: "paperclip_runner", defaultEnvironmentId: computer.id,
+      adapterConfig: { provider: "opencode" } }, { showAdapterTestEnvironmentButton: true });
+    roots.push(result.root);
+    await runTest(result.container);
+    expect(mockAgentsApi.qualifyRunner).toHaveBeenCalledTimes(1);
+    await act(async () => setInputValue(result.container.querySelector<HTMLInputElement>('[placeholder="Agent name"]')!, "Changed while testing"));
+    await act(async () => finish!());
+    await flushReact();
+    expect(mockAgentsApi.testEnvironment).not.toHaveBeenCalled();
+    expect(result.container.textContent).toContain("Agent settings changed during the test.");
+  });
+
+  it("does not qualify a draft computer through the native runtime Test", async () => {
+    const computers = ["saved-computer", "draft-computer"].map(id => makeEnvironment({ id, driver: "sandbox", status: "active",
+      config: { provider: "daytona", snapshot: "managed-snapshot" } }));
+    const result = await renderForm(computers, { adapterType: "paperclip_runner", defaultEnvironmentId: computers[0]!.id,
+      adapterConfig: { provider: "opencode" } }, { showAdapterTestEnvironmentButton: true });
+    roots.push(result.root);
+    await selectEnvironment(result.container, computers[1]!.id);
+    await runTest(result.container);
+    expect(mockAgentsApi.qualifyRunner).not.toHaveBeenCalled();
+    expect(result.onSave).not.toHaveBeenCalled();
+  });
+
   it("omits undefined adapter config entries when testing a create form with the default model", async () => {
     const result = await renderCreateForm([
       makeEnvironment({ id: "local-1", name: "Local", driver: "local" }),

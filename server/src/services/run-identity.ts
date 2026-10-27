@@ -1,3 +1,4 @@
+import { readTaskRetryIntent, readTaskRetryBoardMessageOrigin } from "./task-retry.js";
 import { and, asc, desc, eq, getTableColumns, inArray, sql } from "drizzle-orm";
 import {
   agentWakeupRequests,
@@ -201,6 +202,39 @@ export async function initializeRunIdentity(
       return current!;
     }
     const operatorIdentity = await explicitOperatorRunIdentity(tx, run);
+    let retryOrigin: string | null = null;
+    const retryId = run.contextSnapshot?.taskRetryRequestId;
+    if (typeof retryId === "string") {
+      const [receipt] = await tx.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.id, retryId), eq(agentWakeupRequests.companyId, input.companyId),
+        eq(agentWakeupRequests.agentId, run.agentId)));
+      const retry = readTaskRetryIntent(receipt?.payload);
+      if (run.contextSnapshot?.boardMessageRetry === true || retry?.boardMessageOrigin) {
+        if (!retry?.boardMessageOrigin) throw forbidden("This saved message can no longer be retried safely. Send a new message on the task to continue from saved work.");
+        const [dispatch] = run.wakeupRequestId ? await tx.select().from(agentWakeupRequests).where(and(
+          eq(agentWakeupRequests.id, run.wakeupRequestId), eq(agentWakeupRequests.companyId, input.companyId),
+          eq(agentWakeupRequests.agentId, run.agentId), eq(agentWakeupRequests.runId, run.id),
+          eq(agentWakeupRequests.status, "claimed"), eq(agentWakeupRequests.reason, "task_retry"),
+          eq(agentWakeupRequests.idempotencyKey, `task-retry-dispatch:${receipt!.id}`),
+          eq(agentWakeupRequests.requestedByActorType, "user"), eq(agentWakeupRequests.requestedByActorId, retry.actorId))) : [];
+        const [task] = input.issueId ? await tx.select({ id: issues.id }).from(issues).where(and(
+          eq(issues.id, input.issueId), eq(issues.companyId, input.companyId), eq(issues.assigneeAgentId, run.agentId),
+          eq(issues.executionRunId, run.id))) : [];
+        const origin = input.issueId && run.status === "running" && task && dispatch &&
+          [run.issueId, run.nativeIssueId, run.contextSnapshot?.issueId, run.contextSnapshot?.taskId]
+            .every(id => id === null || id === undefined || id === input.issueId) && receipt!.runId === run.id && receipt!.status === "coalesced" &&
+          receipt!.reason === "task_retry" && receipt!.requestedByActorType === "user" &&
+          run.contextSnapshot?.previousRunId === retry.sourceRunId && retry.generationId === receipt!.id && !retry.chatActionId && !retry.canonicalIntentId &&
+          receipt!.payload?.issueId === input.issueId && retry.actorId === receipt!.requestedByActorId &&
+          await readTaskRetryBoardMessageOrigin(tx as unknown as Db, { companyId: input.companyId, issueId: input.issueId,
+            agentId: run.agentId, sourceRunId: retry.sourceRunId, actorId: retry.actorId });
+        if (!origin || origin.commentId !== retry.boardMessageOrigin.commentId ||
+            origin.identityContextId !== retry.boardMessageOrigin.identityContextId) {
+          throw forbidden("This saved message can no longer be retried safely. Send a new message on the task to continue from saved work.");
+        }
+        retryOrigin = origin.identityContextId;
+      }
+    }
     const [parent] = input.parentRunId
       ? await tx
           .select()
@@ -226,7 +260,7 @@ export async function initializeRunIdentity(
             )
         : [];
     const parentId = operatorIdentity ? null : (
-      interaction?.sourceIdentityContextId ?? input.parentContextId ?? parent?.activeIdentityContextId
+      retryOrigin ?? interaction?.sourceIdentityContextId ?? input.parentContextId ?? parent?.activeIdentityContextId
     );
     const [origin] = parentId
       ? await tx

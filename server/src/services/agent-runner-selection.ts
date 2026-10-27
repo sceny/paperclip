@@ -15,6 +15,7 @@ export type RunnerTarget = {
   driver: string; platform?: string; architecture?: string; libc?: "glibc" | "musl" | "unknown"; glibcVersion?: string;
   /** A plugin environment whose driver declares Runner task execution. It runs agents only through Paperclip Runner. */
   runnerTasks?: boolean;
+  warmTaskVersion?: 1;
 };
 export const AGENT_RUNNER_SSH_PLATFORM_COMMAND = "uname -s; uname -m; if paperclip_glibc_version=$(getconf GNU_LIBC_VERSION 2>/dev/null) && [ -n \"$paperclip_glibc_version\" ]; then printf 'glibc\\n%s\\n' \"$paperclip_glibc_version\"; else case \"$(ldd --version 2>&1)\" in *musl*) printf 'musl\\n' ;; *) printf 'unknown\\n' ;; esac; fi";
 export interface AgentRunnerSelection {
@@ -293,7 +294,10 @@ export async function resolveAgentRunnerTargetForCompany(db: Db, companyId: stri
   const { environment, driver } = await resolveAgentRunnerEnvironmentForCompany(db, companyId, defaultEnvironmentId);
   let target: RunnerTarget = driver === "local" ? localAgentRunnerTarget()
     : { driver };
-  if (driver === "plugin" && environment && await pluginEnvironmentRunsRunnerTasks(db, environment)) target = { driver, runnerTasks: true };
+  if (driver === "plugin" && environment) {
+    const taskDriver = await pluginEnvironmentRunnerTaskDriver(db, environment);
+    if (taskDriver) target = { driver, runnerTasks: true, ...(taskDriver.warmTaskVersion === 1 ? { warmTaskVersion: 1 as const } : {}) };
+  }
   if (driver === "sandbox" && environment) {
     const { readSandboxPlatformQualification } = await import("./environment-probe.js");
     const qualified = await readSandboxPlatformQualification(db, environment, companyId);
@@ -312,6 +316,18 @@ export async function resolveAgentRunnerTargetForCompany(db: Db, companyId: stri
 }
 
 export async function resolveAgentRunnerEnvironmentForCompany(db: Db, companyId: string, defaultEnvironmentId?: string | null) {
+  const resolved = await resolveAgentEnvironmentForCompany(db, companyId, defaultEnvironmentId);
+  if (resolved.environment?.driver === "sandbox" && resolved.environment.config?.provider === "fake") throw unprocessable("The fake sandbox provider cannot execute runs.");
+  return resolved;
+}
+
+// Hiring defaults inspect capabilities without probing or qualifying an already selected runner.
+export async function resolveAgentRunnerTaskDriverForCompany(db: Db, companyId: string, defaultEnvironmentId?: string | null) {
+  const { environment, driver } = await resolveAgentEnvironmentForCompany(db, companyId, defaultEnvironmentId);
+  return driver === "plugin" && environment ? pluginEnvironmentRunnerTaskDriver(db, environment) : undefined;
+}
+
+async function resolveAgentEnvironmentForCompany(db: Db, companyId: string, defaultEnvironmentId?: string | null) {
   const { instanceSettingsService } = await import("./instance-settings.js");
   const { environmentService } = await import("./environments.js");
   const settings = await instanceSettingsService(db).get();
@@ -331,7 +347,6 @@ export async function resolveAgentRunnerEnvironmentForCompany(db: Db, companyId:
     const boundCompanyIds = await envs.listBoundCompanyIds(environment.id);
     if (boundCompanyIds.length > 0 && !boundCompanyIds.includes(companyId)) throw forbidden("The selected environment belongs to another company.", { code: "environment_company_mismatch" });
     if (environment.status === "archived") throw unprocessable("Environment is archived.");
-    if (environment.driver === "sandbox" && environment.config?.provider === "fake") throw unprocessable("The fake sandbox provider cannot execute runs.");
   }
   return { environment, driver: environment?.driver ?? "local" };
 }
@@ -339,17 +354,17 @@ export async function resolveAgentRunnerEnvironmentForCompany(db: Db, companyId:
 // The plugin's manifest declaration decides whether its environment runs
 // Runner tasks. Run admission separately verifies a ready plugin and a live
 // worker, so a plugin that is down still selects the Runner and fails its run.
-async function pluginEnvironmentRunsRunnerTasks(db: Db, environment: Parameters<typeof parseEnvironmentDriverConfig>[0]): Promise<boolean> {
+async function pluginEnvironmentRunnerTaskDriver(db: Db, environment: Parameters<typeof parseEnvironmentDriverConfig>[0]) {
   let config: { pluginKey: string; driverKey: string };
   try {
     const parsed = parseEnvironmentDriverConfig(environment);
-    if (parsed.driver !== "plugin") return false;
+    if (parsed.driver !== "plugin") return undefined;
     config = parsed.config;
   } catch {
-    return false;
+    return undefined;
   }
   const { pluginRegistryService } = await import("./plugin-registry.js");
   const plugin = await pluginRegistryService(db).getByKey(config.pluginKey);
-  return Boolean(plugin?.manifestJson.capabilities.includes("environment.drivers.register")
-    && plugin.manifestJson.environmentDrivers?.some(driver => driver.driverKey === config.driverKey && driver.supportsTasks === true));
+  return plugin?.manifestJson.capabilities.includes("environment.drivers.register")
+    ? plugin.manifestJson.environmentDrivers?.find(driver => driver.driverKey === config.driverKey && driver.supportsTasks === true) : undefined;
 }

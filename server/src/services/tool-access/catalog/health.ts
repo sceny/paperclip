@@ -205,12 +205,22 @@ export function createConnectionHealth(db: Db, { now, audit, getConnectionRow, d
         actor,
         details: { status: failure.status, transport: connection.transport },
       });
+      // Keep GitHub's recovery links so Refresh access can point at the exact
+      // installation page, such as the one with the Unsuspend button.
+      const githubRecovery =
+        failure.code === "github_installation_required" && error instanceof HttpError
+          ? {
+              installationUrl: asRecord(error.details).installationUrl,
+              managementUrl: asRecord(error.details).managementUrl,
+            }
+          : {};
       throw retainMcpConnectionFailure(error, new HttpError(healthFailureHttpStatus(failure), failure.message, {
         code: failure.code,
         connection: toConnection(updated),
         runtimeSlot,
         setupUrl: connectionSetupUrl(connection),
         reconnectUrl: connectionReconnectUrl(connection),
+        ...githubRecovery,
       }));
     }
   }

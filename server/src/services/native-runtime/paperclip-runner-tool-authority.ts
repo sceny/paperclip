@@ -103,6 +103,7 @@ import {
   type CurrentWakeCommentsBinding,
 } from "./current-wake-comments.js";
 import {
+  readPublishedGitHubReviewCompletionContinuation,
   authorizeChatAttachmentReuse,
   authorizeChatConversationForBoundRun,
   LIST_CHAT_ATTACHMENTS_TOOL_DEFINITION,
@@ -314,12 +315,13 @@ export class PaperclipRunnerToolAuthority {
             : descriptor.inputSchema,
       }));
     // Keep the provider session's direct tool catalog stable across ordinary
-    // and truncated external-chat turns. Execution still fails closed unless
-    // this exact run carries a server-verified current-wake binding.
-    if (this.binding.currentWakeComments) definitions.push(READ_CURRENT_WAKE_COMMENTS_TOOL_DEFINITION);
+    // and truncated external-chat turns: Codex thread/resume cannot add tools,
+    // so a reader missing at thread/start stays missing. Execution still fails
+    // closed unless this exact run carries the server-verified binding/scope.
+    definitions.push(READ_CURRENT_WAKE_COMMENTS_TOOL_DEFINITION);
     definitions.push(LIST_CHAT_ATTACHMENTS_TOOL_DEFINITION);
     definitions.push(REUSE_CHAT_ATTACHMENT_TOOL_DEFINITION);
-    if (this.binding.chatAttachmentReadScope) definitions.push(READ_CHAT_ATTACHMENT_TOOL_DEFINITION);
+    definitions.push(READ_CHAT_ATTACHMENT_TOOL_DEFINITION);
     if (this.binding.taskAttachmentRead) definitions.push(...TASK_ATTACHMENT_DEFINITIONS);
     definitions.push(...runnerBridgeDefinitions({ workspace: !this.binding.firstPartyOnly && !!this.binding.workspaceRoot && this.binding.workspaceBridge === true, skills: !!this.binding.runtimeContext, api: runnerApiToolsEnabled(this.binding.companyId, this.binding.apiToolsEnabled), mode: workMode }));
     const connectionTools = this.binding.firstPartyOnly ? [] : [...RUNTIME_CONNECTION_TOOL_DEFINITIONS,
@@ -687,6 +689,7 @@ export class PaperclipRunnerToolAuthority {
           } : !this.binding.nativeReview && context.issue.workMode === "standard" && context.issue.executionRunId === this.binding.runId
             ? await pendingTaskRepositoryContinuation(this.db, { companyId: this.binding.companyId, issueId: this.binding.issueId,
                 runId: this.binding.runId, workspaceId: context.issue.executionWorkspaceId })
+              ?? await readPublishedGitHubReviewCompletionContinuation({ db: this.db, binding: this.binding })
             : null,
           childTasks: visibleChildTasks.slice(0, 100).map(redactedTask),
           childTasksTruncated: childTasks.length > 100,

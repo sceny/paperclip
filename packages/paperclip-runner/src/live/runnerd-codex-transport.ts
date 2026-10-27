@@ -4513,6 +4513,14 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     this.#closed = true;
     this.#resolveClosedSignal();
     this.#turnStartAdmission?.resolve(false);
+    await this.#retireControllerForRecovery(deadline);
+    this.#handle = null;
+    this.#diagnostic(
+      "controller authority detached for restart; durable runner left alive",
+    );
+  }
+
+  async #retireControllerForRecovery(deadline: number): Promise<void> {
     if (this.#pump !== null) clearInterval(this.#pump);
     this.#pump = null;
     if (this.#adoptedRunnerMonitor !== null)
@@ -4523,21 +4531,14 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     this.#controlPlaneRelease = null;
     await Promise.resolve(release?.("detach")).catch((error: unknown) => {
       this.#diagnostic(
-        `controller route release failed during restart detach: ${String(error)}`,
+        `controller route release failed during retirement: ${String(error)}`,
       );
     });
-    // A successor must not share this journal with an admitted async write.
-    // A timeout rejects detachment, including repeated calls, instead of
-    // reporting that the old writer has retired.
     try {
       await this.#stopAndDrainAuthority(deadline);
     } finally {
       this.#queue.close();
     }
-    this.#handle = null;
-    this.#diagnostic(
-      "controller authority detached for restart; durable runner left alive",
-    );
   }
 
   #trackStartup<T>(start: () => Promise<T>): Promise<T> {
@@ -4557,6 +4558,20 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
   }
 
   async #closeOnce(): Promise<void> {
+    const deadline = Date.now() + runnerCloseGraceMs(this.options);
+    try {
+      await this.#closeAndSettle();
+    } catch (error) {
+      this.#queue.close();
+      try { await this.#retireControllerForRecovery(deadline); }
+      catch (retirementError) {
+        this.#diagnostic(`controller retirement after failed close is unconfirmed: ${String(retirementError)}`);
+      }
+      throw error;
+    }
+  }
+
+  async #closeAndSettle(): Promise<void> {
     this.#closed = true;
     this.#resolveClosedSignal();
     const { preparationDeadline, closeDeadline } = runnerCloseDeadlines(Date.now(), runnerCloseGraceMs(this.options));
@@ -6898,11 +6913,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     if (this.#handle) return this.#handle.isExitConfirmed?.() ?? this.#handle.child.exitCode !== null;
     const adoptedRunner = this.options.adoptExistingRunner;
     if (!adoptedRunner) return true;
-    try {
-      return !(await adoptedRunner.isAlive());
-    } catch {
-      return true;
-    }
+    return !(await adoptedRunner.isAlive());
   }
 
   #watchAdoptedRunner(

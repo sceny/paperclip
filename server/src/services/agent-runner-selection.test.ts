@@ -12,7 +12,7 @@ vi.mock("./environment-config.js", async () => ({
 }));
 vi.mock("./plugin-registry.js", () => ({ pluginRegistryService: () => ({ getByKey: state.pluginByKey }) }));
 vi.mock("@paperclipai/adapter-utils/ssh", () => ({ runSshCommand: state.ssh }));
-import { AGENT_RUNNER_SSH_PLATFORM_COMMAND, agentRunnerAvailability, resolveAgentRunnerTargetForCompany, resolveNewAgentRunner, resolveNewAgentRunnerForCompany } from "./agent-runner-selection.js";
+import { AGENT_RUNNER_SSH_PLATFORM_COMMAND, agentRunnerAvailability, resolveAgentRunnerTaskDriverForCompany, resolveAgentRunnerTargetForCompany, resolveNewAgentRunner, resolveNewAgentRunnerForCompany } from "./agent-runner-selection.js";
 import { buildCodexAcpConfig, resolveCodexExecutionEngine } from "@paperclipai/adapter-codex-local/server";
 import { secretService } from "./secrets.js";
 import * as localPlatform from "../lib/agent-runner-platform.js";
@@ -522,6 +522,24 @@ describe("Runner-only plugin environments", () => {
     expect(agentRunnerAvailability("gemini_local", target)).toEqual({ supportedRunners: ["legacy"], defaultRunner: "legacy" });
     expect(state.ssh).not.toHaveBeenCalled();
   });
+  it("carries warm task capability from the selected driver without provider gates", async () => {
+    state.pluginByKey.mockResolvedValue(plugin({ supportsTasks: true, warmTaskVersion: 1 }));
+    expect(await resolveAgentRunnerTargetForCompany({} as never, "company", "computer"))
+      .toEqual({ driver: "plugin", runnerTasks: true, warmTaskVersion: 1 });
+    expect(await resolveAgentRunnerTaskDriverForCompany({} as never, "company", "computer"))
+      .toMatchObject({ driverKey: "tasks", supportsTasks: true, warmTaskVersion: 1 });
+  });
+
+  it.each(["ssh", "sandbox"])("does not qualify a %s runner while inspecting hire defaults", async driver => {
+    state.getEnvironment.mockResolvedValue({ ...pluginEnvironment, driver, config: { provider: "fake" } });
+    expect(await resolveAgentRunnerTaskDriverForCompany({} as never, "company", "computer")).toBeUndefined();
+    expect(state.ssh).not.toHaveBeenCalled();
+    expect(state.sandboxQualification).not.toHaveBeenCalled();
+    expect(state.pluginByKey).not.toHaveBeenCalled();
+    if (driver === "sandbox") await expect(resolveAgentRunnerTargetForCompany({} as never, "company", "computer"))
+      .rejects.toThrow("The fake sandbox provider cannot execute runs.");
+  });
+
   it("saves a Claude agent on the plugin environment as Paperclip Runner", async () => {
     const saved = await resolveNewAgentRunnerForCompany({} as never, "company", { adapterType: "claude_local", defaultEnvironmentId: "computer" });
     expect(saved).toMatchObject({ adapterType: "paperclip_runner", adapterConfig: { provider: "acpx", acpxAgent: "claude" } });

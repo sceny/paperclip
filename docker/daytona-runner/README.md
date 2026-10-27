@@ -27,11 +27,11 @@ pack. Claude Code 2.1.280 is the minimum for
 minimum for Sonnet 5.5; the pinned runtime also supports Fable 5.1. Codex
 0.160.0 ships bundled metadata for the current
 [GPT-6.1 Sol, GPT-6 Sol, and GPT-6 Luna model IDs](https://learn.chatgpt.com/docs/models).
-The same refresh pins Grok CLI 1.0.46, Gemini CLI 0.62.0, Kimi Code 2.1.1,
-Cursor CLI 2026.10.01-e373342, and GitHub CLI 2.102.0 in the sandbox layer.
-The native Cursor provider uses its separately verified distribution, pinned to
-2026.09.26-dd393fe; it does not use the sandbox layer’s global Cursor executable.
-Grok CLI 1.0.46 supports the current
+The sandbox layer pins Grok CLI 1.0.70, Gemini CLI 0.65.0, Kimi Code 2.3.3,
+Cursor CLI 2026.10.22-27dcf5f, and GitHub CLI 2.103.3 (October 2026
+refresh). The native Cursor provider uses its separately verified distribution,
+pinned to 2026.09.26-dd393fe; it does not use the sandbox layer’s global Cursor
+executable. Grok CLI 1.0.70 supports the current
 [Grok 4.7](https://docs.x.ai/developers/grok-4-7) model family. Hermes stays
 at 0.19.0, the newest release on PyPI.
 

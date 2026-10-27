@@ -320,6 +320,69 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     expect((await readIssue(issue.id)).executionWorkspaceId).toBe(prepared.persistedExecutionWorkspace!.id);
   });
 
+  it("reuses a successful fresh task attempt for the next ordinary user turn", async () => {
+    const { input, issue } = await fixture();
+    input.policy.useIsolatedTaskDirectory = true;
+    input.policy.effectiveExecutionWorkspaceMode = "isolated_workspace";
+    input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
+    input.task.freshWorkspace = { mode: "fresh_isolated_workspace", retryIntentId: input.run.id,
+      sourceRunId: input.run.id, retainedSourceIds: [] };
+    const original = await prepareHeartbeatWorkspace(db, input);
+    const workspace = original.persistedExecutionWorkspace!;
+    await writeFile(join(workspace.cwd!, "saved-review.txt"), "completed review history\n");
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() })
+      .where(eq(heartbeatRuns.id, input.run.id));
+    await reuse(input, workspace);
+    input.task.freshWorkspace = null;
+    const next = await prepareHeartbeatWorkspace(db, input);
+    expect(next.persistedExecutionWorkspace!.id).toBe(workspace.id);
+    expect(next.executionWorkspace.cwd).toBe(workspace.cwd);
+    expect(await readFile(join(next.executionWorkspace.cwd, "saved-review.txt"), "utf8"))
+      .toBe("completed review history\n");
+    expect((await readIssue(issue.id)).executionWorkspaceId).toBe(workspace.id);
+    await reuse(input, workspace);
+    input.task.freshWorkspace = { mode: "fresh_isolated_workspace", retryIntentId: input.run.id,
+      sourceRunId: input.run.id, retainedSourceIds: [] };
+    input.reuse.existingExecutionWorkspace = null;
+    input.reuse.reusableExistingExecutionWorkspace = null;
+    input.reuse.requestedShouldReuseExisting = false;
+    input.reuse.workspaceReuseRequest = resolveExecutionWorkspaceReuseRequestForIssue({
+      issueExecutionWorkspaceId: null, issueExecutionWorkspacePreference: "create_new", existingExecutionWorkspaceStatus: null,
+    });
+    const replacement = await prepareHeartbeatWorkspace(db, input);
+    expect(replacement.executionWorkspace.cwd).not.toBe(workspace.cwd);
+    await expect(access(join(replacement.executionWorkspace.cwd, "saved-review.txt"))).rejects.toThrow();
+    expect(await readFile(join(workspace.cwd!, "saved-review.txt"), "utf8")).toBe("completed review history\n");
+  });
+
+  it.each(["task_binding", "workspace_row", "foreign_issue", "foreign_company", "closed_workspace"])(
+    "rejects a retained task attempt after its %s changes", async change => {
+      const { input, issue, source } = await fixture();
+      input.policy.useIsolatedTaskDirectory = true;
+      input.policy.effectiveExecutionWorkspaceMode = "isolated_workspace";
+      input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
+      input.task.freshWorkspace = { mode: "fresh_isolated_workspace", retryIntentId: input.run.id,
+        sourceRunId: input.run.id, retainedSourceIds: [] };
+      const original = await prepareHeartbeatWorkspace(db, input);
+      const workspace = original.persistedExecutionWorkspace!;
+      await writeFile(join(workspace.cwd!, "saved-review.txt"), "keep saved work\n");
+      await reuse(input, workspace);
+      input.task.freshWorkspace = null;
+      if (change === "task_binding") await db.update(issues).set({ executionWorkspaceId: null }).where(eq(issues.id, issue.id));
+      if (change === "workspace_row") await db.update(executionWorkspaces).set({ cwd: source }).where(eq(executionWorkspaces.id, workspace.id));
+      if (change === "foreign_issue") await db.update(executionWorkspaces).set({ sourceIssueId: null }).where(eq(executionWorkspaces.id, workspace.id));
+      if (change === "foreign_company") {
+        const [other] = await db.insert(companies).values({ name: "Other workspace company", issuePrefix: "OTH" }).returning();
+        await db.update(executionWorkspaces).set({ companyId: other.id }).where(eq(executionWorkspaces.id, workspace.id));
+      }
+      if (change === "closed_workspace") await db.update(executionWorkspaces).set({ status: "archived" }).where(eq(executionWorkspaces.id, workspace.id));
+      await expect(prepareHeartbeatWorkspace(db, input)).rejects.toMatchObject({
+        resultJson: { workspaceValidation: { reason: "isolated_task_directory_binding_mismatch", issueId: issue.id } },
+      });
+      expect(await readFile(join(workspace.cwd!, "saved-review.txt"), "utf8")).toBe("keep saved work\n");
+    },
+  );
+
   async function reuse(input: HeartbeatWorkspacePreparationInput, workspace: NonNullable<Awaited<ReturnType<typeof prepareHeartbeatWorkspace>>["persistedExecutionWorkspace"]>) {
     input.reuse.requestedShouldReuseExisting = true;
     input.reuse.existingExecutionWorkspace = workspace;
@@ -393,10 +456,12 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
 
   it("persists the workspace and issue binding before acquiring its environment", async () => {
     const { input, source, issue, envOrchestrator } = await fixture();
+    input.config.managedAiCredentialIdentity = "account:generation";
     const acquire = envOrchestrator.acquireForRun;
     vi.spyOn(envOrchestrator, "acquireForRun").mockImplementation(async args => {
       expect((await readIssue(issue.id)).executionWorkspaceId).toBe(args.persistedExecutionWorkspace?.id);
       expect((await readRun(input.run.id)).contextSnapshot?.executionWorkspaceId).toBe(args.persistedExecutionWorkspace?.id);
+      expect(args.managedAiCredentialIdentity).toBe("account:generation");
       return acquire(args);
     });
     const result = await prepareHeartbeatWorkspace(db, input);

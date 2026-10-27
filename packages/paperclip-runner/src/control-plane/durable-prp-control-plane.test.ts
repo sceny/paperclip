@@ -49,32 +49,38 @@ const identity: DurableRecoveryIdentity = {
 const expectedRunnerVersion = "0.3.0";
 const expectedRunnerDigest = `sha256:${"a".repeat(64)}`;
 
-it.each(["event", "newer_command", "replacement", "write_failure", "drain", "semantic_replacement"] as const)(
+it.each(["event", "progress", "lifecycle", "lifecycle_priority_one", "usage", "credentials", "newer_command", "command_burst", "command_failure", "authority_conflict", "replacement", "write_failure", "usage_write_failure", "drain", "usage_drain", "semantic_replacement"] as const)(
   "keeps HTTP responsive during a durable event write and preserves %s", async (mode) => {
+    if (mode === "command_failure" && process.platform === "win32") return;
     const root = mkdtempSync(resolve(tmpdir(), "runner-event-io-"));
     const dispatch = vi.fn(async () => {
       expect(JSON.parse(readFileSync(resolve(root, "control-plane-state.json"), "utf8")).ackedSourceSeq).toBe(1);
       return { result: { ok: true } };
     });
+    const effects = new Set<string>();
+    const commit = vi.fn(async (event: { sourceEventId: string }) => { effects.add(event.sourceEventId); });
     const core = new DurablePrpControlPlane({ stateDirectory: root, identity,
-      expectedRunnerVersion, expectedRunnerDigest, onCommittedEvent: async () => {}, onSemanticToolInput: dispatch });
+      expectedRunnerVersion, expectedRunnerDigest, onCommittedEvent: commit, onSemanticToolInput: dispatch });
     const http = createServer((_req, res) => res.end("responsive"));
     let release!: () => void;
     const barrier = new Promise<void>(resolveWrite => { release = resolveWrite; });
     const originalOpen = fsPromises.open;
     let staged = false;
+    let stagedWrites = 0;
     let holdFirst = true;
     let client: AuthenticatedClient | null = null;
     let replacement: AuthenticatedClient | null = null;
+    let restoreCommandSync = () => {};
     const open = vi.spyOn(fsPromises, "open").mockImplementation(async (...args) => {
       const file = await originalOpen(...args);
+      if (String(args[0]).includes(".control-plane-state.json.")) stagedWrites++;
       if (holdFirst && String(args[0]).includes(".control-plane-state.json.")) {
         holdFirst = false;
         const sync = file.sync.bind(file);
         file.sync = async () => {
           staged = true;
           await barrier;
-          if (mode === "write_failure") throw new Error("controlled disk failure");
+          if (mode === "write_failure" || mode === "usage_write_failure") throw new Error("controlled disk failure");
           await sync();
         };
       }
@@ -90,10 +96,30 @@ it.each(["event", "newer_command", "replacement", "write_failure", "drain", "sem
         payload.eventType = "item.delta";
         payload.priority = 2;
         payload.payload = { delta: "output while the volume is slow" };
+        if (mode === "progress") {
+          payload.eventType = "tool.execution.progressed";
+          payload.payload = { schema: "paperclip.tool.execution.v1", executionId: "progress-1",
+            transport: "process", operation: "execute", status: "running", output: "working",
+            outputBytes: 7, outputTruncated: false, outputDigest: null };
+        } else if (mode === "lifecycle" || mode === "lifecycle_priority_one") {
+          payload.eventType = "turn.completed";
+          // Direct TypeScript producers can label turn.completed as P1.
+          payload.priority = mode === "lifecycle_priority_one" ? 1 : 0;
+          payload.payload = { status: "completed" };
+        } else if (mode === "usage" || mode === "usage_drain" || mode === "usage_write_failure") {
+          payload.eventType = "usage.reported";
+          payload.priority = 1;
+          payload.payload = { inputTokens: 100, outputTokens: 20 };
+        } else if (mode === "credentials") {
+          payload.eventType = "auth.credentials.updated";
+          payload.priority = 0;
+          payload.payload = { schema: "paperclip.auth.credentials.updated.v1", provider: "codex",
+            bindingId: "harness-auth", revision: 1, detection: "credential_store" };
+        }
       }
       expect(validatePrpEvent(payload)).toMatchObject({ ok: true });
       sendSecure(client, event);
-      await vi.waitFor(() => expect(staged || dispatch.mock.calls.length > 0).toBe(true));
+      await vi.waitFor(() => expect(staged || dispatch.mock.calls.length > 0 || core.store.state.ackedSourceSeq > 0).toBe(true));
       if (mode === "semantic_replacement") {
         replacement = (await authenticate(core, client.leaseToken!))!;
         release();
@@ -101,13 +127,51 @@ it.each(["event", "newer_command", "replacement", "write_failure", "drain", "sem
         await vi.waitFor(() => expect(core.store.state.commands.some(command => command.type === "semantic_tool.result")).toBe(true));
         return;
       }
+      if (mode === "lifecycle" || mode === "lifecycle_priority_one" || mode === "credentials") {
+        expect(staged).toBe(false);
+        expect(JSON.parse(readFileSync(core.store.path, "utf8")).ackedSourceSeq).toBe(1);
+        expect(await receiveSecure(client)).toMatchObject({ kind: "ack", payload: { ackedSourceSeq: 1 } });
+        return;
+      }
       // The actual socket request completes while the real file's fsync is held.
       const address = http.address() as { port: number };
       expect(await (await fetch(`http://127.0.0.1:${address.port}`)).text()).toBe("responsive");
       expect(JSON.parse(readFileSync(core.store.path, "utf8")).ackedSourceSeq).toBe(0);
-      if (mode === "newer_command") core.queueCommand("session.snapshot", {}, "command_during_event");
+      // Lifecycle readers and replacement handshakes must not observe an event
+      // whose snapshot is still waiting for its first durable write.
+      expect(core.store.state.ackedSourceSeq).toBe(0);
+      expect(core.store.state.committedEvents).toEqual([]);
+      if (mode === "newer_command" || mode === "command_burst") {
+        core.queueCommand("session.snapshot", {}, "command_during_event");
+        if (mode === "command_burst") core.queueCommand("session.snapshot", {}, "second_command_during_event");
+        const saved = JSON.parse(readFileSync(core.store.path, "utf8"));
+        // The command's existing durable write can also publish the pending
+        // event. It must not need another full staged write afterward.
+        expect(saved.ackedSourceSeq).toBe(1);
+        expect(core.store.state.ackedSourceSeq).toBe(1);
+        expect(saved.commands.some((command: { commandId: string }) => command.commandId === "command_during_event")).toBe(true);
+      }
+      if (mode === "command_failure") {
+        const originalSync = nodeFs.fsyncSync;
+        const failDirectorySync = vi.spyOn(nodeFs, "fsyncSync").mockImplementation(fd => {
+          if (nodeFs.fstatSync(fd).isDirectory()) throw new Error("controlled directory sync failure");
+          originalSync(fd);
+        });
+        syncBuiltinESMExports();
+        restoreCommandSync = () => { failDirectorySync.mockRestore(); syncBuiltinESMExports(); };
+        expect(() => core.queueCommand("session.snapshot", {}, "failed_command_during_event")).toThrow("controlled directory sync failure");
+        expect(JSON.parse(readFileSync(core.store.path, "utf8")).ackedSourceSeq).toBe(1);
+        expect(core.store.state.ackedSourceSeq).toBe(0);
+        expect(() => core.queueCommand("session.snapshot")).toThrow("indeterminate");
+      }
+      if (mode === "authority_conflict") {
+        core.store.commit(structuredClone(core.store.state));
+        core.queueCommand("session.snapshot", {}, "command_after_authority");
+        expect(JSON.parse(readFileSync(core.store.path, "utf8")).ackedSourceSeq).toBe(0);
+        expect(core.store.state.ackedSourceSeq).toBe(0);
+      }
       let drained = false;
-      const retirement = mode === "drain" ? (async () => {
+      const retirement = mode === "drain" || mode === "usage_drain" ? (async () => {
         await core.stop();
         await core.drainPendingConnectionProcessing();
         drained = true;
@@ -118,6 +182,9 @@ it.each(["event", "newer_command", "replacement", "write_failure", "drain", "sem
       }
       if (mode === "replacement") {
         replacement = (await authenticate(core, client.leaseToken!))!;
+        expect(replacement.welcome.payload).toMatchObject({ ackedSourceSeq: 0 });
+        sendSecure(replacement, event);
+        expect(await receiveSecure(replacement)).toMatchObject({ kind: "ack", payload: { ackedSourceSeq: 1 } });
         const second = structuredClone(event);
         const next = second.payload as Record<string, unknown>;
         next.sourceSeq = 2;
@@ -130,7 +197,10 @@ it.each(["event", "newer_command", "replacement", "write_failure", "drain", "sem
         expect(await receiveSecure(client)).toBeNull();
         await retirement;
         expect(drained).toBe(true);
-      } else if (mode === "write_failure") {
+      } else if (mode === "authority_conflict") {
+        expect(await receiveSecure(client)).toBeNull();
+        expect(stagedWrites).toBe(1);
+      } else if (mode === "write_failure" || mode === "usage_write_failure" || mode === "command_failure") {
         expect(await receiveSecure(client)).toBeNull();
         expect(() => core.queueCommand("session.snapshot")).toThrow("indeterminate");
       } else if (mode !== "replacement") {
@@ -139,16 +209,45 @@ it.each(["event", "newer_command", "replacement", "write_failure", "drain", "sem
       await core.stop();
       await core.drainPendingConnectionProcessing();
       const restored = new DurablePrpControlPlane({ stateDirectory: root, identity,
-        expectedRunnerVersion, expectedRunnerDigest });
-      const expectedEvents = mode === "replacement" ? 2 : mode === "write_failure" ? 0 : 1;
+        expectedRunnerVersion, expectedRunnerDigest, onCommittedEvent: commit });
+      const expectedEvents = mode === "replacement" ? 2 : mode === "write_failure" || mode === "usage_write_failure" || mode === "authority_conflict" ? 0 : 1;
       expect(restored.store.state.ackedSourceSeq).toBe(expectedEvents);
       expect(restored.store.state.committedEvents).toHaveLength(expectedEvents);
-      if (mode === "newer_command") {
+      if (mode === "newer_command" || mode === "command_burst") {
         expect(restored.store.state.commands.some(command => command.commandId === "command_during_event")).toBe(true);
+        expect(commit).toHaveBeenCalledTimes(1);
+        expect(stagedWrites).toBe(1);
+        expect(restored.store.state.committedEvents[0].deliveryCount).toBe(1);
+        if (mode === "command_burst") {
+          expect(restored.store.state.commands.some(command => command.commandId === "second_command_during_event")).toBe(true);
+        }
+      }
+      if (mode === "replacement") {
+        expect(commit).toHaveBeenCalledTimes(3);
+        expect(effects.size).toBe(2);
+      }
+      if (mode === "command_failure") {
+        expect(restored.store.state.commands.some(command => command.commandId === "failed_command_during_event")).toBe(true);
+        expect(stagedWrites).toBe(1);
+      }
+      if (mode === "drain" || mode === "usage_drain" || mode === "authority_conflict") {
+        await restored.start();
+        try {
+          replacement = (await authenticate(restored, client.leaseToken!))!;
+          sendSecure(replacement, event);
+          expect(await receiveSecure(replacement)).toMatchObject({ kind: "ack", payload: { ackedSourceSeq: 1 } });
+          expect(commit).toHaveBeenCalledTimes(2);
+          expect(effects.size).toBe(1);
+        } finally {
+          replacement?.socket.destroy();
+          await restored.stop();
+          await restored.drainPendingConnectionProcessing();
+        }
       }
       expect(nodeFs.readdirSync(root).filter(name => name.endsWith(".tmp"))).toEqual([]);
     } finally {
       release();
+      restoreCommandSync();
       open.mockRestore();
       client?.socket.destroy();
       replacement?.socket.destroy();
