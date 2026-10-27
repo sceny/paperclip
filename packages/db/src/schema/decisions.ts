@@ -69,6 +69,8 @@ export const decisions = pgTable(
       table.status,
       table.expiresAt,
     ),
+    pendingContinuationIdx: index("decisions_pending_continuation_idx").on(table.id)
+      .where(sql`${table.continuationPolicy} = 'wake_origin_agent' AND ${table.metadata} ->> 'continuationPending' = 'true' AND (${table.status} IN ('expired', 'cancelled') OR (${table.status} = 'decided' AND ${table.executionStatus} IN ('succeeded', 'partial', 'failed')))`),
     bundleIdx: index("decisions_bundle_idx").on(table.bundleId),
     originIssueIdx: index("decisions_origin_issue_idx").on(table.originIssueId),
     companyIdempotencyUq: uniqueIndex("decisions_company_idempotency_uq")

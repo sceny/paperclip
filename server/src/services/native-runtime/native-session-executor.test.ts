@@ -313,6 +313,8 @@ vi.mock("./current-wake-comments.js", () => ({
 }));
 
 vi.mock("../activity-log.js", () => ({
+  logActivity: vi.fn(async () => undefined),
+  publishPluginDomainEvent: vi.fn(async () => undefined),
   persistActivity: state.persistActivity,
   publishActivity: state.publishActivity,
 }));
@@ -884,6 +886,83 @@ describe("remote runner launch fingerprint compatibility", () => {
 });
 
 describe("remote runner process supervision", () => {
+  it.each(["staging", "dispatch trace"])("retains cancellation during %s without a launch RPC", async (boundary) => {
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const pause = async () => { enter(); await gate; };
+    const execute = vi.fn();
+    const handle = createRemoteRunnerProcessLauncher({
+      target: { kind: "remote", transport: "sandbox", environmentId: "environment", leaseId: "lease", remoteCwd: "/workspace" },
+      runner: { execute } as never,
+      remoteBinary: "/runtime/runnerd", processIdentityPath: "/runtime/identity",
+      stateDirectory: "/runtime", diagnosticsDirectory: "/runtime/diagnostics", runnerInstanceId: "runner-remote",
+      ...(boundary === "staging" ? { ensureArtifact: pause } : { trace: { record: pause } as never }),
+    })({ command: "/controller/runnerd", args: [], cwd: "/controller", environment: {} });
+    try {
+      await entered;
+      expect(handle.child.kill("SIGTERM")).toBe(true);
+      expect(handle.isExitConfirmed?.()).toBe(false);
+      expect(execute).not.toHaveBeenCalled();
+      release();
+      await expect(handle.completion).resolves.toMatchObject({ code: null, signal: "SIGTERM" });
+      expect(handle.isExitConfirmed?.()).toBe(true);
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await handle.completion;
+    }
+  });
+
+  it("defers an in-flight launch signal until its exact identity is available", async () => {
+    let enter!: () => void;
+    let release!: () => void;
+    let releaseMonitor!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const monitor = new Promise<void>(resolve => { releaseMonitor = resolve; });
+    let nonce = "";
+    const ok = { exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "" };
+    const execute = vi.fn(async (input: { args?: string[] }) => {
+      const label = input.args?.[2];
+      if (label === "paperclip-runner-launch") {
+        nonce = input.args![4]!;
+        enter(); await gate;
+        return ok;
+      }
+      if (label === "paperclip-runner-process-identity") return { ...ok, stdout: `${nonce}\n4321\n2026-09-06T00:00:00.000Z\nrunner-remote\n` };
+      if (label === "paperclip-runner-monitor") { await monitor; return { ...ok, exitCode: 45 }; }
+      if (label === "paperclip-runner-signal") return ok;
+      return { ...ok, exitCode: 1 };
+    });
+    const handle = createRemoteRunnerProcessLauncher({
+      target: { kind: "remote", transport: "sandbox", environmentId: "environment", leaseId: "lease", remoteCwd: "/workspace" },
+      runner: { execute } as never,
+      remoteBinary: "/runtime/runnerd", processIdentityPath: "/runtime/identity",
+      stateDirectory: "/runtime", diagnosticsDirectory: "/runtime/diagnostics", runnerInstanceId: "runner-remote",
+    })({ command: "/controller/runnerd", args: [], cwd: "/controller", environment: {} });
+    try {
+      await entered;
+      expect(handle.child.kill("SIGKILL")).toBe(true);
+      expect(handle.child.kill("SIGTERM")).toBe(true);
+      expect(execute.mock.calls.some(([input]) => input.args?.[2] === "paperclip-runner-signal")).toBe(false);
+      expect(handle.isExitConfirmed?.()).toBe(false);
+      release();
+      await vi.waitFor(() => expect(execute.mock.calls.filter(([input]) => input.args?.[2] === "paperclip-runner-signal")).toHaveLength(1));
+      const signal = execute.mock.calls.find(([input]) => input.args?.[2] === "paperclip-runner-signal")![0];
+      expect(signal.args?.slice(3)).toEqual(["/runtime/identity", nonce, "runner-remote", "4321"]);
+      expect(signal.args?.[1]).toContain('kill -KILL "$expected_pid"');
+      expect(handle.isExitConfirmed?.()).toBe(false);
+      releaseMonitor();
+      await handle.completion;
+      expect(handle.isExitConfirmed?.()).toBe(true);
+      expect(execute.mock.calls.filter(([input]) => input.args?.[2] === "paperclip-runner-launch")).toHaveLength(1);
+    } finally {
+      release(); releaseMonitor();
+      await handle.completion;
+    }
+  });
   it.each(["exit", "unreadable", "changed generation"] as const)("requires an exit receipt when process metadata changes during supervision (%s)", async failure => {
     const root = await mkdtemp(join(tmpdir(), "runner-exit-receipt-"));
     const marker = join(root, "identity");
@@ -11347,6 +11426,36 @@ describe("runnerd provider runtime wiring", () => {
     });
   });
 
+  it.each(["isolated", "preconfigured"].flatMap(homeMode =>
+    [true, false].map(disableWebSearch => ({ homeMode, disableWebSearch })),
+  ))("pins Grok v10 permissions, effort and search policy at daemon startup: $homeMode $disableWebSearch", async ({ homeMode, disableWebSearch }) => {
+    const current = { ...execution, schema: "paperclip.native-execution-input.v10", homeMode,
+      provider: { kind: "acpx", agent: "grok", model: "grok-4.7", permissionMode: "approve-all",
+        grokEffort: "high", grokDisableWebSearch: disableWebSearch },
+      session: { ...execution.session, driverKind: "acpx_runtime" },
+    } as unknown as NativeExecutionInput;
+    const startup = { db: leaseDb(current), execution: current,
+      runnerInstanceId: `grok-v10-pinned-${homeMode}-${disableWebSearch}`,
+      managedAiCredentialHome: join(isolatedStateDirectory, "absent-grok-login") };
+    await createRunnerdBackend({ ...startup, runnerEnvironment: { XAI_API_KEY: "synthetic-grok-api-key" } });
+    state.createBackend.mock.calls.at(-1)![1].codexTransportFactory!();
+    expect(state.createTransport.mock.calls.at(-1)![0]).toMatchObject({
+      provider: "acpx", acpxAgent: "grok", acpxPermissionMode: "approve-all",
+      acpxPermissionModePinned: true, grokEffort: "high", grokDisableWebSearch: disableWebSearch, homeMode,
+    });
+  });
+
+  it("requires explicit Grok credentials before v10 daemon startup", async () => {
+    const current = { ...execution, schema: "paperclip.native-execution-input.v10", homeMode: "isolated",
+      provider: { kind: "acpx", agent: "grok", model: "grok-4.7", permissionMode: "approve-all", grokEffort: "high" },
+      session: { ...execution.session, driverKind: "acpx_runtime" },
+    } as unknown as NativeExecutionInput;
+    await expect(createRunnerdBackend({ db: leaseDb(current), execution: current,
+      runnerInstanceId: "grok-v10-missing-credential", runnerEnvironment: {},
+      managedAiCredentialHome: join(isolatedStateDirectory, "absent-grok-login"),
+    })).rejects.toThrow("Grok subscription login is unavailable");
+  });
+
   it("copies back and removes Grok credentials from the exact ACPX launch home", async () => {
     const priorHome = process.env.PAPERCLIP_HOME;
     const privateRoot = await realpath(isolatedStateDirectory);
@@ -14832,4 +14941,92 @@ it("keeps an ACPX missing runtime package failure actionable and stops automatic
   const code = nativeSessionFailureSourceCode(failure);
   expect(code).toBe("native_provider_runtime_missing");
   expect(nativeSessionFailureDisposition(1, new Date(), code)).toEqual({ phase: "terminal_failure", failureCode: code, nextAttemptAt: null });
+});
+describe("HTTP Stop during remote runner staging", () => {
+  it("does not dispatch after Stop and bounded bootstrap cleanup", async () => {
+    const { createCapabilityRunnerdCodexTransport } = await import("@paperclipai/paperclip-runner/live");
+    const { createNativeSessionBackend } = await import("@paperclipai/paperclip-runner");
+
+    vi.spyOn(runEventWriter, "appendHeartbeatRunEvent").mockResolvedValue({ row: { seq: 1 }, disposition: "committed", highestContiguousSourceSeq: 1 } as never);
+    const root = await mkdtemp(join(tmpdir(), "remote-startup-stop-"));
+    const retained = join(root, "retained.txt");
+    const artifact = join(root, "unexecuted-artifact");
+    await writeFile(retained, "preserve exact bytes\n");
+    await writeFile(artifact, "fixture; launch RPC rejects before execution\n");
+    let enter!: () => void, release!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let dispatches = 0;
+    const launch = createRemoteRunnerProcessLauncher({
+      target: { kind: "remote", transport: "sandbox", environmentId: "controlled", leaseId: "controlled", remoteCwd: root },
+      runner: { execute: async (input: { args?: string[] }) => {
+        if (input.args?.[2] === "paperclip-runner-launch") { dispatches++; }
+        return { exitCode: 1, timedOut: false, stdout: "", stderr: "controlled RPC failure; no process started", signal: null };
+      } } as never,
+      remoteBinary: artifact, processIdentityPath: join(root, "identity"), stateDirectory: root,
+      diagnosticsDirectory: join(root, "diagnostics"), runnerInstanceId: "runner",
+      ensureArtifact: async () => { enter(); await gate; },
+    });
+    const bundle = createCapabilityRunnerdCodexTransport({
+      stateDirectory: join(root, "transport"), runnerBinary: artifact, codexCommand: artifact,
+      provider: "codex", closeGraceMs: 100, sourceCodexHome: "", environment: { PATH: process.env.PATH },
+      runnerProcessLauncher: launch,
+      controlPlaneRegistration: async authority => { await authority.start(); return { connectUrl: authority.connectUrl, release: async () => { await authority.stop(); } }; },
+    });
+    const dbModule = await import("@paperclipai/db");
+    const { resolveExternalTestDatabaseUrl } = await import("../../__tests__/helpers/external-test-database.js");
+    const externalUrl = resolveExternalTestDatabaseUrl("PAPERCLIP_TEST_DATABASE_URL");
+    const temporary = externalUrl
+      ? { connectionString: externalUrl, cleanup: () => dbModule.closeRegisteredClients(externalUrl) }
+      : await dbModule.startEmbeddedPostgresTestDatabase("remote-staging-http-");
+    const httpDb = dbModule.createDb(temporary.connectionString);
+    const localExecution = { ...execution, binding: { ...execution.binding,
+      companyId: randomUUID(), agentId: randomUUID(), issueId: randomUUID(), runId: randomUUID(), executionWorkspaceId: randomUUID() },
+      workspace: { ...execution.workspace, cwd: root } };
+    const { companyId, agentId, issueId, runId } = localExecution.binding;
+    await httpDb.insert(dbModule.companies).values({ id: companyId, name: "Controlled Stop", issuePrefix: "STOP" });
+    await httpDb.insert(dbModule.agents).values({ id: agentId, companyId, name: "Controlled agent" });
+    await httpDb.insert(dbModule.issues).values({ id: issueId, companyId, title: "Controlled Stop", status: "in_progress", assigneeAgentId: agentId });
+    await httpDb.insert(dbModule.heartbeatRuns).values({ id: runId, companyId, agentId, nativeIssueId: issueId,
+      invocationSource: "on_demand", status: "running", runtimeMode: "native" });
+    await httpDb.insert(dbModule.nativeRunFinalizations).values({ runId, companyId, issueId, phase: "observed" });
+    const originalIssueService = issueServiceModule.issueService;
+    vi.spyOn(issueServiceModule, "issueService").mockImplementation(db => db === httpDb ? originalIssueService(db) : ({ update: vi.fn(async () => ({ status: "blocked", statusVersion: 1 })) } as never));
+    const { default: express } = await import("express");
+    const { default: request } = await import("supertest");
+    const { agentRoutes } = await import("../../routes/agents.js");
+    const { errorHandler } = await import("../../middleware/error-handler.js");
+    const app = express(); app.use(express.json());
+    app.use((req, _res, next) => { req.actor = { type: "board", source: "local_implicit", userId: "fixture-board", companyIds: [companyId] }; next(); });
+    const httpErrors: string[] = [];
+    app.use("/api", agentRoutes(httpDb));
+    app.use((error: Error, _req: unknown, _res: unknown, next: (error: Error) => void) => { httpErrors.push(error.stack ?? String(error)); next(error); });
+    app.use(errorHandler);
+    const backend = createNativeSessionBackend(localExecution, { codexTransportFactory: () => bundle.transport, runnerInstanceId: "runner", workingDirectoryAuthority: "remote_runner", environment: { PAPERCLIP_WORKSPACE_CWD: root, PATH: process.env.PATH } });
+    // Execute real startup and transport code. The execution lease/event sink
+    // are controlled ports; HTTP cancellation uses a fresh PostgreSQL database.
+    state.execute.mockReset().mockImplementationOnce(options => executeNativeSession({ ...options, timeoutMs: 1000,
+      controlPlane: { async openRun() {}, async checkpointSession() {}, async appendEvent(event) { const sequence = "sourceSeq" in event ? event.sourceSeq : event.sequence; return { cursor: sequence, highestContiguousSourceSeq: sequence, disposition: "committed" as const }; }, async replayEvents() { return { events: [], highestContiguousSourceSeq: 0 }; }, async completeRun() {} },
+    }));
+    const outcome = executePaperclipNativeSession({ db: leaseDb(localExecution), execution: localExecution, runnerInstanceId: "runner", backend, useRunnerd: false }).catch(error => error);
+
+    let stopping: Promise<unknown> | undefined;
+    try {
+      await Promise.race([entered, outcome.then(result => { throw new Error(`startup ended before staging: ${result instanceof Error ? result.stack : JSON.stringify(result)}`); })]);
+      stopping = request(app).post(`/api/heartbeat-runs/${runId}/cancel`).send({}).then(response => ({ status: response.status, body: response.body })).catch(error => error);
+      await new Promise(resolve => setTimeout(resolve, 1400));
+      const close = await bundle.transport.close("join already requested bootstrap cleanup").catch(error => error);
+      expect(close).toBeInstanceOf(Error);
+      release();
+      const result = await outcome;
+      const stop = await stopping;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(result).toBeInstanceOf(Error);
+      expect(httpErrors).toEqual([]);
+      expect(await readFile(retained, "utf8")).toBe("preserve exact bytes\n");
+      await expect(access(join(root, "identity"))).rejects.toThrow();
+      expect(stop).toMatchObject({ status: 200, body: { status: "cancelled" } });
+      expect(dispatches).toBe(0);
+    } finally { release(); await outcome; await stopping; await bundle.transport.detachControllerForRestart?.().catch(() => {}); await temporary.cleanup(); await rm(root, { recursive: true, force: true }); }
+  }, 120000);
 });

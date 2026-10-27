@@ -31,7 +31,8 @@ describe("public repository paid workflow security", () => {
       expect(jobStart, filename).toBeGreaterThanOrEqual(0);
       expect(jobEnd, filename).toBeGreaterThan(jobStart);
       const paidJob = workflow.slice(jobStart, jobEnd);
-      expect(paidJob, filename).toContain("name: runner-e2e-paid");
+      expect(paidJob, filename).toContain(filename === "runner-protocol-live-evals.yml"
+        ? "'runner-e2e-private-paid' || 'runner-e2e-paid'" : "name: runner-e2e-paid");
       expect(paidJob, filename).toContain(credentialStep);
       const reauthorizationIndex = paidJob.indexOf("Reauthorize paid execution before provider access");
       expect(reauthorizationIndex, filename).toBeGreaterThanOrEqual(0);
@@ -212,7 +213,8 @@ describe("public repository paid workflow security", () => {
       expect(contents).toContain("github.triggering_actor");
       expect(contents).toContain("refs/heads/$DEFAULT_BRANCH");
       expect(contents).toContain("needs: authorize");
-      expect(contents).toContain("name: runner-e2e-paid");
+      expect(contents).toContain(name === "runner-protocol-live-evals.yml"
+        ? "'runner-e2e-private-paid' || 'runner-e2e-paid'" : "name: runner-e2e-paid");
       expect(contents).not.toMatch(
         /^\s*(?:pull_request|pull_request_target|push|workflow_call|workflow_run):/m,
       );
@@ -872,13 +874,17 @@ describe("public repository paid workflow security", () => {
     }
     expect(recurring).toContain("needs.authorize.outputs.target_sha == github.sha");
     for (const filename of await readdir(workflows)) {
-      if (!/\.ya?ml$/u.test(filename) || filename === "runner-full-stack-e2e.yml") continue;
+      if (!/\.ya?ml$/u.test(filename) || ["runner-full-stack-e2e.yml", "runner-protocol-live-evals.yml"].includes(filename)) continue;
       const other = await readFile(path.join(workflows, filename), "utf8");
       for (const environment of environments) expect(other, filename).not.toContain(environment);
     }
     const protocol = await readFile(path.join(workflows, "runner-protocol-live-evals.yml"), "utf8");
-    expect(protocol).toContain("name: runner-e2e-paid");
-    expect(protocol).toContain("needs.authorize.outputs.target_sha");
+    expect(protocol).toContain("'runner-e2e-private-paid' || 'runner-e2e-paid'");
+    const admission = protocol.split("      - name: Validate accounting mode and retry envelope")[1]!.split("      - name:")[0]!;
+    expect(admission).toContain('test "$TARGET_SHA" = "$GITHUB_SHA"');
+    const worker = protocol.split("    steps: &direct_eval_steps")[1]!.split("      - uses:")[0]!;
+    expect(worker).toContain("test '${{ needs.authorize.outputs.target_sha }}' = \"$GITHUB_SHA\"");
+    expect(worker).toContain('test "$GITHUB_RUN_ATTEMPT" = 1');
   });
 
   it("uses environment-scoped OIDC for a no-delete history publisher", async () => {
@@ -941,4 +947,24 @@ describe("public repository paid workflow security", () => {
       for (const install of installs) expect(install[0]).toContain('--store-dir "${{ runner.temp }}/eval-');
     }
   });
+});
+
+it("keeps dependency resolution and shared caches out of Runner protocol archive jobs", async () => {
+  const workflow = await readFile(path.join(repositoryRoot, ".github/workflows/runner-protocol-live-evals.yml"), "utf8");
+  const jobs = workflow.split(/\n(?=  [A-Za-z0-9_]+:)/u);
+  const privileged = jobs.filter(job => job.includes("id-token: write"));
+  expect(privileged.length).toBeGreaterThanOrEqual(4);
+  for (const job of privileged) {
+    expect(job).not.toMatch(/--no-frozen-lockfile|cache:\s*(?:pnpm|npm|yarn)|actions\/cache/u);
+    for (const install of job.matchAll(/pnpm install[^\n]*/gu)) {
+      expect(install[0]).toContain("--frozen-lockfile");
+      expect(install[0]).toContain("--ignore-scripts");
+      expect(install[0]).toContain("--store-dir");
+    }
+  }
+  const builder = jobs.find(job => job.startsWith("  build_controller:"))!;
+  expect(builder).not.toMatch(/id-token: write|environment:|secrets\./u);
+  const preparer = jobs.find(job => job.startsWith("  prepare_controller:"))!;
+  expect(preparer).not.toMatch(/pnpm install/u);
+  expect(preparer.indexOf("verify-runtime.mjs")).toBeLessThan(preparer.indexOf('hosted.mjs" prepare'));
 });

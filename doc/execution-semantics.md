@@ -19,6 +19,27 @@ Paperclip separates four concepts that are easy to blur together:
 
 The system works best when those are kept separate.
 
+### Onboarding first-task creation
+
+When an authenticated agent run serves the server-created `onboarding_first_task`,
+new task creation requires acceptance of its latest ordinary proposal. The same
+transactional admission applies to native `create_task` and REST issue/child
+creation. Choosing a different parent, including a standalone task, does not
+change the run's source task.
+
+Acceptance comes from a saved human card decision or a saved conversational
+resolution linked to a genuine later user comment on that task. Opening answers
+and clarification responses alone, agent-only decisions, and tool/credential
+approvals do not authorize the proposal. A newer pending or rejected proposal supersedes an
+older acceptance. A saved plan requires approval of its current document revision;
+checkbox decisions retain the user's actual selected scope.
+
+Planning documents, questions and proposal cards remain available before approval.
+Ordinary task delegation and previously committed task-creation replay retain
+their existing behavior, including dispatch recovery for already admitted work.
+This boundary governs new task creation; other execution and resource authorities
+continue to apply independently.
+
 ## 2. Assignee Semantics
 
 An issue has at most one assignee.
@@ -1402,7 +1423,45 @@ replay: the provider stop receipt, saved-file receipt, current execution authori
 and effect fences still control successor admission. Repeated clicks retain the
 same recovery generation and request.
 
+An authenticated new message also registers that missing obligation before it
+waits for cleanup. Orphan cleanup reconstructs it for a failed native run that
+still owns an exact prepared remote workspace, including historical saved input.
+Both paths wake the existing preservation worker at commit instead of waiting
+indefinitely for an export that has no owner. A live executor or finalizer, accepted result, or mismatched source
+remains protected. Cleanup never interprets this registration as a stop receipt
+or permission to replay provider work. Repeated cleanup visits register the source
+once; settled sources add no continuing discovery or new maintenance timer.
+
 Every continuation carries the triggering request, ordered user direction, interaction outcomes, completed work, and explicit history coverage. A delivered message remains part of the task's request after its connection or approval resolves. The original title is background; a completed Notion read does not satisfy a later Gmail request. Author and source-trust boundaries survive rendering into both native and legacy prompts. Missing required history must be fetched before dispatch rather than described as complete.
+
+### Remote runner process evidence
+
+A failed remote health request does not prove that runnerd stopped. Read-only
+process checks retry transient transport failures up to three times within one
+30-second budget. Missing or changed identity, an unknown process generation,
+and exhausted health reads retain uncertainty. They do not authorize a signal,
+replacement launch, or provider replay. Confirmed predecessor exit permits the
+transport to attempt recovery within its existing reconnect deadline. Repeated
+listener conflicts use that same deadline and port; they do not grant ownership
+of another listener.
+
+The remote launcher retains a stop signal received while artifact staging is
+pending. It checks cancellation again immediately before dispatch. A cancelled
+launch that has not been dispatched settles without starting a process. If a
+launch RPC is already in flight, signalling waits for its exact identity and
+uses the existing marker, nonce, PID and runner identity checks. The signal
+request is not a termination receipt. Monitor evidence still decides whether
+an already dispatched process stopped.
+
+A runner receipt that its reconnect grace expired ends that incident. The
+transport recognizes both the coded error and the runner's plain-text message.
+It must not open another recovery window after that receipt.
+
+A bounded transport close can return before artifact staging settles. That
+return does not prove cleanup completed or release the retained-state obligation.
+Launch attempts, authenticated runner connections, provider process entries,
+provider turns, and external effects are different counts. Transport recovery
+alone does not prove the shared provider-attempt budget or authorize a new turn.
 
 ### Interrupted conversation continuation
 
@@ -1501,6 +1560,27 @@ Historical legacy interruption holds for conversational adapters no longer block
 
 The server projection remains available for diagnostics. Normal working, finishing, and interaction waits add no badges or cards to task lists or feeds. Active transcript headers keep saying Working during automatic retry and execution confirmation; attempts, causes, and recovery decisions belong in the run log. Recovery uses the existing transcript and run log rather than adding a reconciliation form. A cancelled run that never started says “Couldn't start” instead of implying that the agent answered.
 
+Native workspace export failures offer **Inspect recovery** on the run page.
+The explicit read lists recovery actions for that exact task and source run;
+selecting an action observes its current recorded-source identity. It includes
+resolved actions whose retained work may still need attention. This observation
+does not prove provider termination, local descriptor integrity, or successful
+file preservation, and it does not explain an earlier owner state retroactively.
+Recorded system recovery failures retain their original attempt and intent.
+New source-binding failures record a closed reason and, for a rejected lease
+policy, an allowlisted policy value. Neither detail includes paths, provider
+allocation identifiers, credentials, or raw provider errors.
+
+The company/task-authorized `GET /api/issues/{id}/recovery-actions` accepts
+`inspectSourceRunId` to list at most 20 matching actions and an optional
+`inspectSourceActionId` to inspect one exact action. This opt-in path bypasses
+read revalidation and performs no recovery writes, provider calls, filesystem
+inspection, or retries. It reads the existing source verifier without changing
+its guards. Inspection of more than eight recorded leases returns
+`not_inspected/source_limit` before per-lease lookup; physical recovery retains
+its existing acceptance rules. The observation spans multiple database reads
+and grants no execution or preservation authority.
+
 ### Codex startup and provider state
 
 Paperclip trusts the server-selected startup execution root in the isolated
@@ -1522,6 +1602,14 @@ delta when attaching a new run. Other stale-event and authority checks remain.
 
 
 ### Explicit user continuation after execution failure
+
+A deferred chat Retry retains its authorized source batch when it resumes.
+Separate board queues do not join that batch. For a historical mixed batch
+refused before provider startup, a new task Retry can restore the undelivered
+receipts only after certifying the exact bootstrap failure, source authority,
+unchanged board comments and absence of execution, allocation or prior delivery.
+The restoration is audited. Historical runs and budget-skipped receipts remain
+unchanged; each input still passes its ordinary admission and dispatch checks.
 
 When a user's comment also assigns the task back to its agent, the assignment
 wake retains that comment's continuation intent. Admission validates the saved
@@ -1549,6 +1637,23 @@ system wake cannot release a hold. The source task keeps its assignee. Process
 ownership, active controllers, cleanup leases, pause, approval, budget, and normal
 execution gates still apply. Dependency-blocked interaction mode remains limited
 to its existing answer/triage contract.
+
+Snapshot preservation and native copyback are distinct receipts. A historical
+workspace recovered as an immutable snapshot does not make its old native sync
+reference finalized. Once recovery settles, the current inbound owner can
+reauthorize its same unconsumed durable human request and select a fresh isolated
+workspace. The saved snapshot attaches to that successor through the existing
+verified attachment path. A saved board-message queue uses the same fresh
+strategy. Historical holds for the same failed run share that recovery strategy;
+each still requires its own execution and termination proofs. Neither path
+replays the stopped turn, adopts a chat request through the generic board queue,
+nor invents a copyback hash or resets the predecessor's attempt count.
+A later ordinary turn keeps the current source-free task directory, including a
+fresh attempt directory. Inherited agent Git defaults do not turn that saved
+directory into a Git base. Recognition requires the current same-task binding,
+active local directory realization, and verified canonical path. Explicit new
+source or Git requirements and immutable recovery bindings keep their existing
+selection rules. Preparation rechecks the binding and path under the source lock.
 
 The hold retirement, audit record, and new run commit together under the task
 lock. The new turn uses a fresh provider session and retains the latest user

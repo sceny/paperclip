@@ -461,6 +461,8 @@
   --motion-ease-scroll-pill-in: cubic-bezier(0.23, 1, 0.32, 1);
   --motion-ease-scroll-pill-out: cubic-bezier(0.7, 0, 0.84, 0);
   --motion-pane-glide: 320ms;           /* properties-pane maximize/restore glide */
+  --motion-pane-reveal: var(--motion-duration-slow);
+  --motion-ease-pane-reveal: var(--motion-ease-out-expo);
   --motion-pane-width-reset: 200ms;
   --motion-ease-pane-width-reset: ease-in-out;
   --motion-side-panel-tab: var(--motion-duration-fast);
@@ -1384,6 +1386,10 @@ html:has(.paperclip-app-shell[data-mobile="true"] [data-task-chat-shell]) #root 
 /* Properties-pane maximize/restore glide (left animates between docked and
    sidebar-flush while the pane is position:fixed). */
 .tc-pane-glide { transition: left var(--motion-pane-glide) var(--motion-ease-standard); }
+.properties-panel-docked {
+  transition: width var(--motion-pane-reveal) var(--motion-ease-pane-reveal),
+    opacity var(--motion-pane-reveal) var(--motion-ease-pane-reveal);
+}
 .sidebar-shell[data-width-resetting="true"],
 .sidebar-shell[data-width-resetting="true"] > .sidebar-shell-panel { transition: width var(--motion-pane-width-reset) var(--motion-ease-pane-width-reset); }
 .design-page-aside[data-width-resetting="true"] { transition: flex-basis var(--motion-pane-width-reset) var(--motion-ease-pane-width-reset); }
@@ -1457,6 +1463,7 @@ html:has(.paperclip-app-shell[data-mobile="true"] [data-task-chat-shell]) #root 
   .tc-turn-metrics,
   .tc-line-scroll-inner,
   .tc-pane-glide,
+  .properties-panel-docked,
   .side-panel-tab-motion,
   .side-panel-tab-close-motion { transition: none; }
   /* The pill keyframes carry the X-centering; with animation:none restore it. */
@@ -3177,7 +3184,6 @@ span.paperclip-mention-chip[data-mention-kind="external-object"] {
   --tp-max-height: max-height; /* Extracted from ui/src/components/FoldCurtain.tsx (transition-[max-height]). */
   --tp-border-color-background-color-box-shadow: border-color,background-color,box-shadow; /* Extracted from ui/src/components/IssueChatThread.tsx (transition-[border-color,background-color,box-shadow]). */
   --tp-width-min-width: width,min-width; /* Extracted from ui/src/components/KanbanBoard.tsx (transition-[width,min-width]). */
-  --tp-width-opacity: width,opacity; /* Extracted from ui/src/components/OnboardingWizard.tsx (transition-[width,opacity]). */
   --tp-background-color-right: background-color,right; /* Extracted from ui/src/components/ScrollToBottom.tsx (transition-[background-color,right]). */
   --tp-background-color-border-color-color: background-color,border-color,color; /* Extracted from ui/src/components/SystemNotice.tsx (transition-[background-color,border-color,color]). */
   --tp-transform-opacity: transform,opacity; /* Extracted from ui/src/components/ToastViewport.tsx (transition-[transform,opacity]). */
