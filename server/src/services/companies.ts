@@ -331,7 +331,7 @@ export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
 
         if (companyPatch.status !== undefined && companyPatch.status !== existing.status) {
           await notifyDeliveryWork(tx, DELIVERY_QUEUES.skillSourceSync);
-          await notifyCompanyRetentionWork(tx);
+          await notifyCompanyRetentionWork(tx, id);
           await notifyDeliveryWork(tx, DELIVERY_QUEUES.agentLifecycle, id);
         }
         const updated = await tx
@@ -483,7 +483,7 @@ export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
 
         if (!wasAlreadyArchived) {
           await notifyDeliveryWork(tx, DELIVERY_QUEUES.skillSourceSync);
-          await notifyCompanyRetentionWork(tx);
+          await notifyCompanyRetentionWork(tx, id);
           await notifyDeliveryWork(tx, DELIVERY_QUEUES.agentLifecycle, id);
           await tx
             .update(companies)

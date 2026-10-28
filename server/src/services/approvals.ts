@@ -1,5 +1,5 @@
 import { notifyToolReviewChange } from "./tool-review-work-notifications.js";
-import { writeApprovalChange } from "./retention-work-notifications.js";
+import { writeApprovalChange } from "./approval-work-notifications.js";
 import { approvalResolutionRecords, resolvableApprovalStatuses as resolvableStatuses } from "../lib/approval-records.js";
 import { notifyHireApproved } from "./hire-hook.js";
 
@@ -55,7 +55,7 @@ export function approvalRecords(db: Db) {
     },
 
     create: (companyId: string, data: Omit<typeof approvals.$inferInsert, "companyId">) =>
-      writeApprovalChange(db, tx => tx
+      writeApprovalChange(db, companyId, tx => tx
         .insert(approvals)
         .values({ ...data, companyId })
         .returning()
@@ -68,7 +68,7 @@ export function approvalRecords(db: Db) {
       const now = new Date();
       const [existing] = await db.select({ companyId: approvals.companyId }).from(approvals).where(eq(approvals.id, id));
       if (!existing) return null;
-      const updated = await writeApprovalChange(db, async tx => {
+      const updated = await writeApprovalChange(db, existing.companyId, async tx => {
         await notifyToolReviewChange(tx, existing.companyId);
         return tx.update(approvals)
         .set({
@@ -91,7 +91,7 @@ export function approvalRecords(db: Db) {
       }
 
       const now = new Date();
-      return writeApprovalChange(db, tx => tx
+      return writeApprovalChange(db, existing.companyId, tx => tx
         .update(approvals)
         .set({
           status: "revision_requested",
@@ -112,7 +112,7 @@ export function approvalRecords(db: Db) {
       }
 
       const now = new Date();
-      return writeApprovalChange(db, tx => tx
+      return writeApprovalChange(db, existing.companyId, tx => tx
         .update(approvals)
         .set({
           status: "pending",

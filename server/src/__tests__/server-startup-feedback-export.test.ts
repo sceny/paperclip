@@ -1,3 +1,4 @@
+import { approvalQueueSeedingService } from "../services/approval-queue-seeding-work.js";
 import { joinRequestRetentionService } from "../services/join-request-retention.js";
 import { approvalRetentionService } from "../services/approval-retention.js";
 import { createSecretProposalsService } from "../services/secret-proposals.js";
@@ -8,7 +9,7 @@ import { readIdleSleepSafety } from "../services/idle-sleep-safety.js";
 import * as idleLocalWork from "../services/idle-local-work.js";
 import { idleBackupWakeMarker, markIdleBackupWakeRequired } from "../services/idle-database-backup.js";
 import { DELIVERY_QUEUES } from "../services/delivery-work-notifications.js";
-import { decisionService, decisionRetentionService, reconcileBuiltInAgentsOnStartup, reconcileCodexLocalManagedHomesOnStartup, reconcilePersistedRuntimeServicesOnStartup } from "../services/index.js";
+import { decisionService, decisionRetentionService, toolAccessService, reconcileBuiltInAgentsOnStartup, reconcileCodexLocalManagedHomesOnStartup, reconcilePersistedRuntimeServicesOnStartup } from "../services/index.js";
 
 import { companies, runDatabaseBackup, type Db } from "@paperclipai/db";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -337,6 +338,11 @@ vi.mock("../services/join-request-retention.js", async importOriginal => ({
   joinRequestRetentionService: vi.fn(() => ({ sweep: vi.fn(async () => ({ archived: 0 })), next: vi.fn(async () => null) })),
 }));
 
+vi.mock("../services/approval-queue-seeding-work.js", async importOriginal => ({
+  ...await importOriginal<typeof import("../services/approval-queue-seeding-work.js")>(),
+  approvalQueueSeedingService: vi.fn(() => ({ sweep: vi.fn(async () => undefined), next: vi.fn(() => null), request: vi.fn() })),
+}));
+
 vi.mock("../services/approval-retention.js", async importOriginal => ({
   ...await importOriginal<typeof import("../services/approval-retention.js")>(),
   approvalRetentionService: vi.fn(() => ({ sweep: vi.fn(async () => ({ archived: 0 })), next: vi.fn(async () => null) })),
@@ -426,6 +432,7 @@ vi.mock("../services/index.js", () => ({
   routineService: routineServiceFactoryMock,
   statusCardService: vi.fn(() => ({})),
   toolAccessService: vi.fn(() => ({
+    scheduledHealth: { load: vi.fn(async () => []), check: vi.fn(async () => null) },
     sweepConnectionHealth: vi.fn(async () => ({
       checked: 0,
       healthy: 0,
@@ -540,6 +547,21 @@ describe("startServer feedback export wiring", () => {
     createBetterAuthInstanceMock.mockReturnValue({});
     deriveAuthTrustedOriginsMock.mockReturnValue([]);
     process.env.BETTER_AUTH_SECRET = "test-secret";
+  });
+
+  it.each([false, true])("registers approval queue seeding only when maintenance is enabled (%s)", async enabled => {
+    loadConfigMock.mockReturnValue(buildTestConfig({ heartbeatSchedulerEnabled: enabled }));
+    await startServer(); await settleStartupHousekeeping();
+    const registration = deliveryWorkRegisterMock.mock.calls.find(([queue]) => queue === DELIVERY_QUEUES.approvalQueueSeeding);
+    expect(Boolean(registration)).toBe(enabled);
+    if (enabled) {
+      const service = vi.mocked(approvalQueueSeedingService).mock.results.at(-1)!.value;
+      await registration![1].run(new AbortController().signal);
+      expect(service.sweep).toHaveBeenCalled();
+      expect(registration![1].nextRunAt()).toBeNull();
+      expect(await registration![1].hasPending()).toBe(false);
+      expect(service.next).toHaveBeenCalled();
+    }
   });
 
   it.each([false, true])("registers approval retention only when maintenance is enabled (%s)", async enabled => {
@@ -858,6 +880,31 @@ describe("startServer feedback export wiring", () => {
     completionSweepMock.mockClear();
     publishLiveEvent({ companyId: "company-two", type: "activity.logged", payload: { action: "issue.updated" } });
     expect(completionSweepMock).not.toHaveBeenCalled();
+  });
+
+  it("does not rescan idle tool health from the aggregate maintenance tick", async () => {
+    loadConfigMock.mockReturnValue(buildTestConfig({ heartbeatSchedulerEnabled: true, heartbeatSchedulerIntervalMs: 30_000 }));
+    let tick: (() => void) | undefined;
+    const intervals = vi.spyOn(globalThis, "setInterval").mockImplementation(((callback: () => void, ms: number) => {
+      if (ms === 30_000) tick = callback;
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    }) as typeof setInterval);
+    try {
+      await startServer(); await settleStartupHousekeeping();
+      const sweeps = vi.mocked(toolAccessService).mock.results.map(result => vi.mocked(result.value.sweepConnectionHealth));
+      const count = () => sweeps.reduce((total, sweep) => total + sweep.mock.calls.length, 0);
+      expect(count()).toBe(0);
+      const registrations = deliveryWorkRegisterMock.mock.calls.filter(([queue]) => queue === DELIVERY_QUEUES.toolConnectionHealth);
+      expect(registrations).toHaveLength(1);
+      const loads = vi.mocked(toolAccessService).mock.results.map(result => result.value.scheduledHealth.load);
+      const loadCount = () => loads.reduce((total, load) => total + load.mock.calls.length, 0);
+      expect(loadCount()).toBe(1);
+      expect(tick).toEqual(expect.any(Function));
+      tick!(); await new Promise<void>(resolve => setImmediate(resolve));
+      tick!(); await new Promise<void>(resolve => setImmediate(resolve));
+      expect(count()).toBe(0);
+      expect(loadCount()).toBe(1);
+    } finally { intervals.mockRestore(); }
   });
 
   it("never invokes the retired review detector at startup or on periodic recovery", async () => {

@@ -9,6 +9,7 @@ export const DELIVERY_QUEUES = {
   executionStatus: "execution-status",
   executionDisposition: "execution-disposition",
   environmentCleanup: "environment-cleanup",
+  approvalQueueSeeding: "approval-queue-seeding",
   approvalRetention: "approval-retention",
   joinRequestRetention: "join-request-retention",
   decisionTargets: "decision-targets",
@@ -17,7 +18,7 @@ export const DELIVERY_QUEUES = {
   decisionContinuation: "decision-continuation",
 
   decisionArchiveDelivery: "decision-archive-delivery",
-
+  toolConnectionHealth: "tool-connection-health",
   toolReviewProjection: "tool-review-projection",
   toolReviewInterruption: "tool-review-interruption",
   toolReviewRecovery: "tool-review-recovery",
@@ -31,6 +32,7 @@ export const DELIVERY_QUEUES = {
   localLoginCleanup: "local-login-cleanup",
   budgetEnforcement: "budget-enforcement",
   accounting: "cost-accounting",
+  taskDrainExpiry: "task-drain-expiry",
   agentLifecycle: "agent-lifecycle",
   chatBoardMessages: "chat-board-messages",
   chatTaskStarts: "chat-task-starts",
@@ -41,6 +43,7 @@ export const DELIVERY_QUEUES = {
   chatGitHubPublications: "chat-github-publications",
   chatFailedRunRetries: "chat-failed-run-retries",
   chatTelegramMaintenance: "chat-telegram-maintenance",
+  chatCommandRegistration: "chat-command-registration",
   chatTelegramSubscriptions: "chat-telegram-subscriptions",
   chatSessionSyncs: "chat-session-syncs",
   chatVerification: "chat-verification",
@@ -61,12 +64,14 @@ export const DELIVERY_QUEUES = {
   gitRestorePoints: "git-restore-points",
   nativeWorkspaceSyncRetention: "native-workspace-sync-retention",
   question: "question-responses",
+  pluginSchedules: "plugin-schedules",
   pluginLifecycle: "plugin-resource-lifecycle",
   toolAction: "tool-action-receipts",
   terminalWorkspaces: "terminal-workspaces",
   routineSchedules: "routine-schedules",
   issueMonitors: "issue-monitors",
   caseHandoffs: "case-handoffs",
+  nativeCheckpointExpiration: "native-checkpoint-expiration",
 } as const;
 export type DeliveryQueue = typeof DELIVERY_QUEUES[keyof typeof DELIVERY_QUEUES];
 
