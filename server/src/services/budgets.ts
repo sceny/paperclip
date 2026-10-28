@@ -1,3 +1,4 @@
+import { notifyCompanyRetentionWork, notifyRetentionWork } from "./retention-work-notifications.js";
 import { addCents, compareCents, normalizeCents } from "@paperclipai/shared";
 import { and, desc, eq, inArray, sql, or, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -258,6 +259,7 @@ async function markApprovalStatus(
   decidedByUserId: string,
 ) {
   if (!approvalId) return;
+  await notifyRetentionWork(db, "approval");
   await db
     .update(approvals)
     .set({
@@ -295,6 +297,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
 
     const scope = await resolveScopeRecord(db, "company", policy.scopeId);
     if (scope.paused) return;
+    await notifyCompanyRetentionWork(db);
     await notifyDeliveryWork(db, DELIVERY_QUEUES.agentLifecycle, policy.companyId);
     await notifyDeliveryWork(db, DELIVERY_QUEUES.skillSourceSync);
     await db
@@ -351,6 +354,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
     await notifyDeliveryWork(db, DELIVERY_QUEUES.skillSourceSync);
     const scope = await resolveScopeRecord(db, "company", policy.scopeId);
     if (scope.pauseReason !== "budget") return;
+    await notifyCompanyRetentionWork(db);
     await notifyDeliveryWork(db, DELIVERY_QUEUES.agentLifecycle, policy.companyId);
     await db
       .update(companies)
@@ -453,6 +457,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
       windowEnd: end,
     });
 
+    if (thresholdType === "hard") await notifyRetentionWork(db, "approval");
     const approval = thresholdType === "hard"
       ? await db
         .insert(approvals)

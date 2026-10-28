@@ -1094,7 +1094,6 @@ export async function createApp(
     api.use(publicMcpManagementRoutes(publicMcpOAuth, dotOAuth));
     api.use(dotRunnerRoutes(db, publicMcpOAuth.config.origin + "/mcp/runner"));
     api.use(grokBotRoutes(db, publicMcpOAuth.config.origin + "/mcp/runner"));
-    grokDispatcher.start();
   }
 
   api.use(museBoardRoutes(db, opts.authPublicBaseUrl));
@@ -1285,6 +1284,7 @@ export async function createApp(
   agentLifecycle.setWake(agentLifecycleDelivery.wake);
   publicMcpEvents?.start(deliveryWork);
   dotMcpEvents?.start(deliveryWork);
+  if (publicMcpOAuth) grokDispatcher.start(deliveryWork);
   const stopMuseMaintenance = startMuseMaintenance(db, deliveryWork);
   const resourceLifecycleDelivery = registerPluginLifecycleDelivery(deliveryWork, db, workerManager, lifecycle);
   await resourceLifecycleDelivery.ready;
@@ -1461,7 +1461,7 @@ export async function createApp(
       scheduler.stop();
       await agentLifecycle.stop();
       await publicMcpEvents?.stop();
-      await dotMcpEvents?.stop(); grokDispatcher.stop();
+      await dotMcpEvents?.stop();
       jobCoordinator.stop();
       resourceLifecycleDelivery.dispose();
       await deliveryWork.stop();
