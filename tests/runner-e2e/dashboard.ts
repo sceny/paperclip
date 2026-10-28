@@ -868,9 +868,9 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
     <section data-campaign-overview>
     <header class="report-header">
       <div>
-        <p class="eyebrow">Full-stack acceptance campaign</p>
+        <p class="eyebrow">E2E campaign</p>
         <h1 tabindex="-1">${html(input.presentation?.title ?? input.title)}</h1>
-        <p class="lede">${html(input.presentation?.description ?? "Results across runner profiles and execution environments. Declared PNG screenshots and normalized results are retained with every published campaign; additional diagnostic evidence remains in the access-controlled workflow artifact.")}</p>
+        <p class="lede">${html(input.presentation?.description ?? "App and agent journeys across deployment targets, profiles, and execution environments. Declared PNG screenshots and normalized results are retained with every published campaign; additional diagnostic evidence remains in the access-controlled workflow artifact.")}</p>
         ${input.campaign ? `<p class="report-source"><span>${html(input.generatedAt)}</span>${input.campaign.source.sha ? `<code>${html(input.campaign.source.sha.slice(0,8))}</code>` : ""}${input.campaign.source.workflowRunUrl ? `<a href="${html(input.campaign.source.workflowRunUrl)}">Source run ↗</a>` : ""}</p>` : ""}
       </div>
       <div class="report-actions">
@@ -909,7 +909,7 @@ export function renderRunnerE2EDashboard(input: RunnerDashboardInput) {
     <div data-feature-coverage>${renderJourneyFeatureCoverage(catalog, entryById)}</div>
     <section class="report-filters" aria-label="Filter test results">
       <label class="report-search"><span>Search tests</span><input type="search" placeholder="Test, model, provider, execution ID…" autocomplete="off" data-report-query></label>
-      <button class="filter-reset" type="button" data-report-reset>Reset</button>
+      <button class="filter-reset" type="button" data-report-reset>Reset all filters</button>
       <label class="report-feature"><span>Feature</span><select data-report-feature><option value="">All features</option>${renderJourneyFeatureOptions(catalog)}</select></label>
       <label><span>Agent profile</span><select data-report-profile><option value="">All profiles</option>${filterProfiles.map((profile) => `<option value="${html(profile.id)}">${html(profile.label)}</option>`).join("")}</select></label>
       <label><span>Environment</span><select data-report-environment><option value="">All environments</option>${filterEnvironments.map((environment) => `<option value="${html(environment.id)}">${html(environment.label)}</option>`).join("")}</select></label>

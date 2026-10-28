@@ -2531,3 +2531,15 @@ restored checkpoint must match the normalized session before writing its local
 projection. This adds a scoped checkpoint read and local reconstruction only
 when warm admission encounters an external marker or an older projection; it
 adds no streaming checkpoint writes or recurring idle work.
+
+Ordinary remote `per_turn` continuations restore a valid external controller
+marker from the referenced run's company/task-bound checkpoint before reading
+its durable identity. The restored checkpoint must match the normalized session.
+An existing prior-run projection also refreshes from that checkpoint, so a
+rejected attempt cannot retain state that its active owner later advances.
+Current-run full state stays owned by its controller. Legacy file-backed state
+retains its existing admission path when no database checkpoint exists.
+The existing prior-owner, suspended-state and backup checks still decide whether
+the next turn may start. Missing checkpoints and ambiguous identity remain
+blocked; restoration does not authorize a new provider session or change the
+configured lifecycle policy.

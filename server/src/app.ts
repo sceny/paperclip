@@ -321,7 +321,6 @@ export function shouldEnablePrivateHostnameGuard(opts: {
 }
 
 type ChatReconciliationLane =
-  | "voice sessions"
   | "deliveries"
   | "GitHub webhook recovery"
   | "run milestones"
@@ -335,7 +334,6 @@ type ChatReconciliationLane =
  * next publication sweep for every endpoint.
  */
 export function createChatReconciliationCoordinator(input: {
-  reconcileVoiceSessions: () => Promise<unknown>;
   processPendingDeliveries: () => Promise<unknown>;
   processFailedGitHubWebhookDeliveries?: () => Promise<unknown>;
   projectRunMilestones: () => Promise<number>;
@@ -377,7 +375,6 @@ export function createChatReconciliationCoordinator(input: {
   return {
     reconcile() {
       if (stopped) return;
-      start("voice sessions", input.reconcileVoiceSessions);
       start("deliveries", input.processPendingDeliveries);
       if (input.processFailedGitHubWebhookDeliveries) {
         start(
@@ -1298,6 +1295,7 @@ export async function createApp(
   }
   registerChatDeliveryWork(deliveryWork, chatChannels, () => !isIdleTaskDrainActive());
   registerChatActionWork(deliveryWork, chatChannels, () => !isIdleTaskDrainActive());
+  chatChannels.voice.registerReportWork(deliveryWork, () => !isWarmStandby() && !isIdleTaskDrainActive());
   chatChannels.voice.registerRecoveryWork(deliveryWork, () => !isWarmStandby() && !isIdleTaskDrainActive());
   chatChannels.voice.registerReplyWork(deliveryWork, () => !isWarmStandby() && !isIdleTaskDrainActive());
   chatChannels.voice.inbound.registerCleanupWork(deliveryWork, () => !isWarmStandby() && !isIdleTaskDrainActive());
@@ -1309,7 +1307,6 @@ export async function createApp(
     await chatChannels.processPublicationMaintenance();
   };
   const chatReconciliation = createChatReconciliationCoordinator({
-    reconcileVoiceSessions: () => chatChannels.voice.reconcileMaintenance(),
     // Chat delivery, action, and Telegram discovery workers now own these
     // duties. Keep the coordinator's other maintenance lanes independent.
     processPendingDeliveries: async () => undefined,

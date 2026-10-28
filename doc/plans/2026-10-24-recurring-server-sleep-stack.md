@@ -1617,6 +1617,38 @@ Next separate owner: voice call-report reconciliation. Preserve the existing
 24-hour post-call refresh obligation, transcript ordering, task projection and
 provider diagnostics while removing scans with no eligible calls. Inspect
 completion semantics before treating a report marked available as fully settled.
+
+Slice 24 is published as [#17583](https://github.com/paperclipai/paperclip/pull/17583)
+at `9c38ddfe53`, based on #17580 `4f0364d269`. It is attached to this chat.
+CI/review are running; no merge. The next branch is
+`codex/sleep-25-voice-call-reports`, with its owner audit recorded separately.
+
+## Slice 25: voice call reports
+
+Report refresh now owns a scoped deadline worker. Terminal transitions, signed
+callbacks, and reply call-ended responses activate existing report/session rows.
+Attempts save the next retry before provider I/O, and callback/new-attempt fences
+prevent stale settlement. The existing 24-hour refresh obligation is preserved,
+including available reports. Empty/configured-idle/live/old history is quiet.
+This removes the last voice duty from recurring chat maintenance.
+
+Acceptance: 174 selected real-database/wiring cases, workspace typecheck and build
+pass. A new integration case exposed missing baseRevisionId on an existing guest
+transcript; the fix uses the document revision contract and preserves lock
+behavior. Full failure history and external-wake limits are in
+`2026-10-25-voice-call-report-sleep-audit.md`. Publication and remote checks follow.
+Parent #17583 has a Discord rollback/drain test failure to repair at its owner;
+parent #17580 has two new cleanup review findings. Neither is marked complete.
+The remaining chat duties, original ledger, #17490 E2E failure, and final
+master/stack reconciliation remain required. No stack merge is authorized.
+
+Slice 25 published as [#17586](https://github.com/paperclipai/paperclip/pull/17586).
+Parent Discord test settlement and denial-latency repairs are propagated. At the
+report tip, 41 Discord tests and 138 full voice/app tests pass; unchanged report,
+cleanup and retention workers had 37 passing cases. CI/reviews remain required.
+Next owner audit splits Teams unused-consent expiry from abandoned send/upload
+attempt recovery, preserving one reason per PR. Company deletion cleanup policy
+and the earlier E2E failure remain unresolved completion duties.
 ## Acceptance follow-up after the plugin parent merged (October 27)
 
 Eighteen preceding sleep PRs are merged through plugin scheduling #17518 at
@@ -1754,3 +1786,26 @@ saved deadline. Confirmed deletes also avoid a redundant reload. The
 [retention review ledger](2026-10-25-voice-inbound-retention-sleep-audit.md#configuration-rescan-review-repair-october-28)
 records 282 passing cases, types/build, failures, writer coverage and limits.
 Current-head review/CI and the earlier stack remain required.
+
+
+## Report current-parent acceptance, October 28
+
+Report scheduling #17586 integrates retention `68b62b6d13` and uses the existing
+shared paged result contract. It yields after 100 headers per scope refresh,
+resets same-owner partial scans and retains the finite 24-hour report obligation.
+Officially generated migration 0396 preserves the preceding 394 SQL files and
+retains the five newest snapshots. The [report acceptance ledger](2026-10-25-voice-call-report-sleep-audit.md#current-parent-reconstruction-and-migration-acceptance-october-28)
+records 302 passing cases, types/build, migration/plan checks, guarded restart and
+fairness probes, failures and limits. Current-head review, all CI and parent
+landing still gate this slice. The full remaining stack stays in scope.
+
+
+## Report notification review follow-up, October 28
+
+Report reconstruction also received configuration hints that could not alter
+its eligibility or saved retry. Five real connection saves over 205 saved
+reports selected 1,025 session rows. The report owner now accepts exact session
+notifications and startup; those saves select zero rows and preserve the deadline.
+The [report notification ledger](2026-10-25-voice-call-report-sleep-audit.md#configuration-scope-review-repair-october-28)
+records 303 passing cases, types/build, the narrower contract and limits. Fresh
+exact-head review and CI are required after the repair.
