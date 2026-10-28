@@ -348,7 +348,13 @@ vi.mock("../services/index.js", () => ({
     list: vi.fn(async () => ({ items: [], nextCursor: null })),
   })),
   decisionService: vi.fn(() => ({
-    sweepExpired: vi.fn(async () => ({ expired: 0 })),
+    sweepInvalidTargets: vi.fn(async () => ({ expired: 0 })),
+    decisionTargetsChanged: vi.fn(),
+    hasDecisionTargetWork: vi.fn(() => false),
+    recoverEffects: vi.fn(async () => ({ resumed: 0 })),
+    nextEffectRecoveryAt: vi.fn(async () => null),
+    sweepTtlExpiry: vi.fn(async () => ({ expired: 0 })),
+    nextExpiryAt: vi.fn(async () => null),
     sweepContinuations: vi.fn(async () => ({ retry: false })),
   })),
   decisionRetentionService: vi.fn(() => ({
@@ -918,7 +924,12 @@ describe("startServer feedback export wiring", () => {
       expect(deliveryWorkRegisterMock.mock.calls.some(([queue]) => queue === DELIVERY_QUEUES.decisionContinuation)).toBe(true);
       const decisions = vi.mocked(decisionService).mock.results.at(-1)!.value;
       expect(decisions.sweepContinuations).toHaveBeenCalledTimes(1);
-      expect(decisions.sweepExpired).toHaveBeenCalledWith(expect.any(Date), { includeContinuations: false });
+      expect(decisions.sweepTtlExpiry).toHaveBeenCalledTimes(1);
+      expect(decisions.recoverEffects).toHaveBeenCalledTimes(1);
+      expect(deliveryWorkRegisterMock.mock.calls.some(([queue]) => queue === DELIVERY_QUEUES.decisionEffectRecovery)).toBe(true);
+      expect(deliveryWorkRegisterMock.mock.calls.some(([queue]) => queue === DELIVERY_QUEUES.decisionExpiry)).toBe(true);
+      expect(decisions.sweepInvalidTargets).toHaveBeenCalledTimes(1);
+      expect(deliveryWorkRegisterMock.mock.calls.some(([queue]) => queue === DELIVERY_QUEUES.decisionTargets)).toBe(true);
     } finally {
       setIntervalSpy.mockRestore();
     }
@@ -956,6 +967,9 @@ describe("startServer feedback export wiring", () => {
       expect(heartbeatServiceMock.reconcileCostAccounting).toHaveBeenCalledTimes(1);
       expect(environmentCustomImagesServiceMock.cleanupExpiredSetupSessions).not.toHaveBeenCalled();
       expect(deliveryWorkRegisterMock.mock.calls.some(([queue]) => queue === DELIVERY_QUEUES.decisionContinuation)).toBe(false);
+      expect(deliveryWorkRegisterMock.mock.calls.some(([queue]) => queue === DELIVERY_QUEUES.decisionExpiry)).toBe(false);
+      expect(deliveryWorkRegisterMock.mock.calls.some(([queue]) => queue === DELIVERY_QUEUES.decisionEffectRecovery)).toBe(false);
+      expect(deliveryWorkRegisterMock.mock.calls.some(([queue]) => queue === DELIVERY_QUEUES.decisionTargets)).toBe(false);
     } finally {
       setIntervalSpy.mockRestore();
     }
