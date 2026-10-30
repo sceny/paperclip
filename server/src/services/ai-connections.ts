@@ -1393,5 +1393,5 @@ export function aiConnectionService(db: Db) {
       return [{ ...row, summary }];
     });
   }
-  return { list, selectDecision, selectFastResponse, quotaAccounts, subscriptionAccounts: (companyId: string, userId: string) => quotaAccounts(companyId, userId, true), refreshQuotaCredential, renewDueClaudeCredentials, select, credential, accountCredential, credentialRaw, runtimeCredential, probeUsage, save, setDefault, membership, markAuthenticationFailed };
+  return { list, selectDecision, selectFastResponse, quotaAccounts, subscriptionAccounts: (companyId: string, userId: string) => quotaAccounts(companyId, userId, true), refreshQuotaCredential, renewDueClaudeCredentials, select, credential, accountCredential, credentialRaw, runtimeCredential, probeUsage, save, setDefault, membership, markAuthenticationFailed, authenticationFailureState };
 }
