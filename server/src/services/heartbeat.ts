@@ -266,6 +266,7 @@ import {
 } from "./native-local-process-stop.js";
 
 import {
+  isControllerLeaseLostRun,
   legacyControllerBootId,
   watchLegacyControllerLease,
 } from "./legacy-controller-lease.js";
@@ -281,6 +282,7 @@ import {
   AI_AUTH_ENV_KEYS,
 } from "./ai-connection-runtime.js";
 import { aiConnectionBindingSchema, aiRuntimeConnectionBindingSchema, type AiConnectionRouterSelection } from "@paperclipai/shared";
+import { aiConnectionService } from "./ai-connections.js";
 import { aiConnectionRouterService, AiConnectionPoolExhausted, applyAiConnectionRouterTaskSettings } from "./ai-connection-router.js";
 import { aiConnectionSessionCompatibilityInputs, managedAiSessionIdentityCompatible } from "./ai-connection-session.js";
 import {
@@ -1063,7 +1065,17 @@ export function heartbeatService(
     cancelWorkForScope: cancelBudgetScopeWork,
   };
   const budgets = budgetService(db, budgetHooks);
+  const aiAuthFailureState = async (run: Pick<typeof heartbeatRuns.$inferSelect, "companyId" | "startedAt" | "createdAt" | "contextSnapshot">) => {
+    const attribution = parseObject(run.contextSnapshot?.aiConnection);
+    if (typeof attribution.identity !== "string" || typeof attribution.connectionId !== "string" || typeof attribution.grantId !== "string") return "current" as const;
+    return aiConnectionService(db).authenticationFailureState({
+      companyId: run.companyId,
+      runStartedAt: run.startedAt ?? run.createdAt,
+      attribution: attribution as unknown as Parameters<ReturnType<typeof aiConnectionService>["authenticationFailureState"]>[0]["attribution"],
+    });
+  };
   const recovery = recoveryService(db, {
+    aiAuthFailureState,
     enqueueWakeup,
     liveRunExecutions,
     settleExplicitContinuationRetry: releaseIssueExecutionAndPromote,
@@ -1081,7 +1093,10 @@ export function heartbeatService(
     // Mirrors scheduleBoundedRetryForRun's transient budget check: a failed
     // or interrupted run that has already consumed every bounded transient
     // attempt cannot be retried again through this lane.
+    // A lost controller lease or a sign-in the user must restore is not a spent budget: the task waits, it is not blocked.
     transientRetryBudgetSpent: (run) =>
+      !isControllerLeaseLostRun(run) &&
+      run.errorCode !== "claude_auth_required" &&
       executionFailureRetryCount(run) >=
       BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS,
   });
@@ -1111,6 +1126,7 @@ export function heartbeatService(
     releaseIssueExecutionAndPromote,
     finalizeAgentStatus,
     getWorktreeExecutionCutoff,
+    aiAuthFailureState,
     applyRunDispatchPostCommitEffects,
   });
 
@@ -4859,7 +4875,9 @@ export function heartbeatService(
         );
       } else {
         await runCompletion.failRunSetup({
-          run, runId, outerErr, identityRedactor, readFailureReportSecrets,
+          run, runId, outerErr, signal: executionControl.controller.signal,
+          providerDispatchStarted: legacyAdapterEntered || nativeDispatchStarted,
+          identityRedactor, readFailureReportSecrets,
         });
       }
     } finally {

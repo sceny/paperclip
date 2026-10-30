@@ -1,7 +1,7 @@
 import { readWorkspaceBaseRefDiagnostic } from "./workspace-base-ref-diagnostics.js";
 import { getEnvironmentAcquisitionDiagnostic } from "./environment-acquisition-diagnostics.js";
 import type { heartbeatRuns } from "@paperclipai/db";
-import { readRunCancellation } from "./run-cancellation.js";
+import { readControllerLeaseLoss, readControllerLeaseLossCause, readRunCancellation } from "./run-cancellation.js";
 import { readProcessLossDiagnostic } from "./process-loss-diagnostics.js";
 import { WORKSPACE_RESTORE_FAILURE_CODES } from "@paperclipai/shared";
 import { redactDiagnosticText } from "@paperclipai/adapter-utils/command-redaction";
@@ -189,9 +189,19 @@ export function collectRunFailureDiagnostics(run: Run, options: RunFailureReport
     execution.cancellationSource = cancellation.source;
     execution.cancellationExpected = cancellation.expected;
     execution.cancellationInitiatorType = cancellation.initiator.type;
+    const leaseLossCause = readControllerLeaseLossCause(cancellation);
+    if (leaseLossCause) execution.controllerLeaseLossCause = leaseLossCause;
   } else if (run.status === "cancelled") {
     execution.cancellationSource = "unknown";
     execution.cancellationExpected = false;
+  }
+  const leaseLoss = readControllerLeaseLoss(read(result, "controllerLeaseLoss"));
+  if (leaseLoss) {
+    execution.controllerLeaseLossCause = leaseLoss.cause;
+    if (leaseLoss.sinceRenewalMs !== undefined) execution.controllerLeaseSinceRenewalMs = leaseLoss.sinceRenewalMs;
+    if (leaseLoss.renewalPendingMs !== undefined) execution.controllerLeaseRenewalPendingMs = leaseLoss.renewalPendingMs;
+    if (leaseLoss.deadlineLateMs !== undefined) execution.controllerLeaseDeadlineLateMs = leaseLoss.deadlineLateMs;
+    if (leaseLoss.renewalCount !== undefined) execution.controllerLeaseRenewalCount = leaseLoss.renewalCount;
   }
   Object.assign(execution, scalars(result, [
     "mode", "stopReason", "timeoutFired", "timeoutSource", "timeoutConfigured",

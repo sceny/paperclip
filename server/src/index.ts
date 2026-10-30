@@ -1,3 +1,4 @@
+import { aiConnectionService, CLAUDE_CREDENTIAL_RENEWAL_INTERVAL_MS, CLAUDE_CREDENTIAL_RENEWAL_STARTUP_DELAY_MS } from "./services/ai-connections.js";
 import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
 import { DELIVERY_QUEUES } from "./services/delivery-work-notifications.js";
 import type { createDeliveryWorkCoordinator } from "./services/delivery-work-coordinator.js";
@@ -49,6 +50,7 @@ import {
   companies,
   companyMemberships,
   instanceUserRoles,
+  closeLivenessDb,
 } from "@paperclipai/db";
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
@@ -650,7 +652,7 @@ async function startServerWithDatabaseTeardown(
   // by the fail-loud startup path, so no exit leaves pooled backends behind.
   const closeDatabaseClients = async () => {
     const clients = pluginMigrationDb === db ? [db] : [db, pluginMigrationDb];
-    await Promise.all(clients.map((client) => endDatabaseClient(client, 5)));
+    await Promise.all([...clients.map((client) => endDatabaseClient(client, 5)), closeLivenessDb(db, 5)]);
   };
   startupDatabase.close = closeDatabaseClients;
   
@@ -1212,6 +1214,24 @@ async function startServerWithDatabaseTeardown(
     }, config.heartbeatSchedulerIntervalMs);
     heartbeatSchedulerInterval?.unref?.();
   };
+  const aiConnections = aiConnectionService(db as any);
+  let claudeCredentialRenewalInFlight = false;
+  const sweepClaudeCredentialRenewals = () => {
+    if (claudeCredentialRenewalInFlight || heartbeatSchedulerStopped || isWarmStandby()) return;
+    claudeCredentialRenewalInFlight = true;
+    trackHeartbeatSchedulerWork(aiConnections.renewDueClaudeCredentials()
+      .then((result) => {
+        if (result.attempted > 0) logger.info(result, "background Claude token renewal ran");
+      })
+      .catch((err) => {
+        logger.error({ err }, "background Claude token renewal failed");
+      })
+      .finally(() => { claudeCredentialRenewalInFlight = false; }));
+  };
+  const claudeCredentialRenewalInterval = setInterval(sweepClaudeCredentialRenewals, CLAUDE_CREDENTIAL_RENEWAL_INTERVAL_MS);
+  claudeCredentialRenewalInterval.unref?.();
+  const claudeCredentialRenewalStartup = setTimeout(sweepClaudeCredentialRenewals, CLAUDE_CREDENTIAL_RENEWAL_STARTUP_DELAY_MS);
+  claudeCredentialRenewalStartup.unref?.();
   const externalObjects = externalObjectService(db as any, {
     pluginWorkerManager,
     enabled: async () => (await instanceSettingsService(db).getExperimental()).enableExternalObjects === true,
@@ -1968,6 +1988,8 @@ async function startServerWithDatabaseTeardown(
   ) => {
     await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
     heartbeatSchedulerStopped = true;
+    clearInterval(claudeCredentialRenewalInterval);
+    clearTimeout(claudeCredentialRenewalStartup);
     unsubscribeChatCompletions();
     await deliveryWork.stop();
     clearInterval(executionControlInterval);

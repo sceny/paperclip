@@ -233,7 +233,7 @@ const heartbeatRunSafeResultJsonColumn = sql<Record<string, unknown> | null>`
         'cancellation', case when jsonb_typeof(${heartbeatRuns.resultJson} -> 'cancellation') = 'object'
           then jsonb_strip_nulls(jsonb_build_object(
             'source', case when ${heartbeatRuns.resultJson} #>> '{cancellation,source}'
-              in ('operator', 'queued_message', 'shutdown', 'provider', 'transport', 'control_plane', 'unknown')
+              in ('operator', 'queued_message', 'shutdown', 'provider', 'transport', 'control_plane', 'controller_lease', 'unknown')
               then ${heartbeatRuns.resultJson} #> '{cancellation,source}' end,
             'expected', case when jsonb_typeof(${heartbeatRuns.resultJson} #> '{cancellation,expected}') = 'boolean'
               then ${heartbeatRuns.resultJson} #> '{cancellation,expected}' end,

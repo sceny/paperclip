@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -8,7 +8,7 @@ import {
   heartbeatRuns,
   issues,
 } from "@paperclipai/db";
-import { eq, type SQL } from "drizzle-orm";
+import { eq, sql, type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -17,6 +17,7 @@ import {
 } from "../../__tests__/helpers/embedded-postgres.js";
 import * as legacy from "../heartbeat.js";
 import * as extracted from "./run-state.js";
+import { readRunCancellation } from "../run-cancellation.js";
 
 // SQL_ASCII needs a separate database cluster. Inspect its selected SQL here;
 // the PostgreSQL tests below exercise the session queries and transactions.
@@ -118,6 +119,24 @@ describePostgres("heartbeat run state database wiring", () => {
     const [issue] = await db.insert(issues).values({ companyId, title: "Session task", assigneeAgentId: agent.id }).returning();
     return { companyId, agent, issue, state: extracted.createHeartbeatRunState(db) };
   }
+
+  it("preserves controller lease cancellation when a large result is bounded", async () => {
+    const { companyId, agent, state } = await fixture();
+    const cancellation = {
+      source: "controller_lease", expected: false, initiator: { type: "system" },
+      reason: "Legacy controller lease lost (renewal_rejected)", recordedAt: "2026-01-01T00:00:00Z",
+    };
+    const [run] = await db.insert(heartbeatRuns).values({
+      companyId, agentId: agent.id, invocationSource: "assignment", status: "cancelled",
+      resultJson: { cancellation, providerPrivateData: randomBytes(96 * 1024).toString("hex") },
+    }).returning();
+    const [stored] = await db.select({ size: sql<number>`pg_column_size(${heartbeatRuns.resultJson})` })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+    expect(stored.size).toBeGreaterThan(64 * 1024);
+    const bounded = await state.getRun(run.id);
+    expect(bounded?.resultJson).not.toHaveProperty("providerPrivateData");
+    expect(readRunCancellation(bounded?.resultJson)).toEqual(cancellation);
+  });
 
   it("resumes only the selected agent's run and task session", async () => {
     const { companyId, agent, issue, state } = await fixture();

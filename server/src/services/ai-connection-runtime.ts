@@ -358,10 +358,14 @@ export async function prepareManagedAiRuntime(
     }
     const attribution = { ...selection.attribution } as typeof selection.attribution & { subscriptionId?: string };
     if (attribution.method === "subscription") {
+      // Identity is read on the server, so Claude uses its login token here. The run keeps the inference-only one.
+      const identityCredential = selection.attribution.provider === "anthropic"
+        ? await service.accountCredential(selection).catch(() => value)
+        : value;
       const subscription = {
         companyId: input.companyId, connectionId: selection.connection.id, grantId: selection.grant.id,
         provider: selection.attribution.provider, name: selection.connection.name,
-        ownerUserId: selection.grant.subjectUserId, credential: value,
+        ownerUserId: selection.grant.subjectUserId, credential: identityCredential,
       };
       attribution.subscriptionId = await subscriptionService(db).register(subscription);
       void refreshSubscriptionConnection(db, subscription, attribution.subscriptionId);
