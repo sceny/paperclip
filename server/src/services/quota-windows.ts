@@ -57,7 +57,7 @@ export async function fetchCompanyQuotaWindows(db: Db, companyId: string, userId
       const result = trackIdleWork((async (): Promise<ProviderQuotaResult> => {
         let credentialResolved = false;
         try {
-          const value = await service.credential(row);
+          const value = await service.accountCredential(row);
           controller.signal.throwIfAborted();
           credentialResolved = true;
           let windows;
@@ -83,7 +83,7 @@ export async function fetchCompanyQuotaWindows(db: Db, companyId: string, userId
               // A reconnect can race the completed refresh. Bind the value and
               // cache identity to one revision, rather than label old quota with
               // a newer account's key. A concurrent change defers this poll.
-              const refreshedValue = await service.credential(refreshed);
+              const refreshedValue = await service.accountCredential(refreshed);
               const verified = (await service.quotaAccounts(companyId, userId)).find(candidate =>
                 candidate.connection.id === row.connection.id && candidate.grant.id === row.grant.id);
               if (!verified || verified.summary.status !== "connected") throw new Error("credentials_unavailable");

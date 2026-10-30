@@ -431,29 +431,44 @@ Grok retains its terminal sign-in flow until it has a local browser login runner
 Claude sign-in runs `claude auth login`, not `claude setup-token`. A setup token is a
 single access token that expires after about eight hours and cannot be renewed. The
 login file instead holds an access token, a refresh token, an expiry, and the full
-scope set. That set includes organization and account management, which an agent run
-must not hold. Connect stores the document as the connection's `ai.credential` secret.
-A run receives only the access token (`CLAUDE_CODE_OAUTH_TOKEN`), and only after the
-server exchanged the refresh token for an inference-only token (`user:inference`, the
-scope `setup-token` granted). The first credential read after Connect does that
-exchange; if it fails transiently, the run proceeds with the unexpired login token and
-the next read tries again. If the provider refuses the narrower scope (`invalid_scope`), the server
-repeats the exchange with the login scopes, marks the document `scopeNarrowingRefused`,
-and does not ask again; runs then hold the scopes the provider granted. When the access
-token is within two hours of expiry, the next credential read exchanges the refresh
-token on the server. The exchange is serialized per grant by a database advisory lock,
-so two server processes on one database never spend the same refresh token. A failed-run
-verdict for the same grant takes that lock too, so an old run cannot disable a grant
-while its renewal is in flight. The company credential mutation lock is held only for the
-short save, after the replacement is journaled with the same journal-before-save protocol
-Codex quota refresh uses, because the provider rotates the refresh token. The vault copy
-is the only copy: the attempt home is removed after Connect, so no CLI process competes
-for the rotating token. If the exchange fails transiently and the access token has not
-expired, the run proceeds with it. If the provider refuses the refresh token and the
-access token has expired, the grant becomes `needs_reauthorization` and the normal
-sign-in repair card appears. Connections saved before this change hold a plain token,
-keep working unchanged, and are renewed only by reconnecting. A macOS Keychain login also
-stores a plain token, so it is not renewable.
+scope set. That set includes account scopes such as `user:profile`, which the server
+needs to read usage windows and subscription identity, and which an agent run must not
+hold. Connect stores the document as the connection's `ai.credential` secret. The
+document keeps two access tokens: the login token, used only by the server for usage
+and identity reads, and a second token for runs, requested with only `user:inference`
+(the scope `setup-token` granted). A run receives only the second token
+(`CLAUDE_CODE_OAUTH_TOKEN`). The first credential read for a run after Connect
+exchanges the refresh token for it. A run never receives the login token.
+
+The provider narrows the refresh token to the scope of the last exchange. Once the
+inference-only exchange has happened, the login scopes can no longer be requested, so
+the login token is not renewed: usage and identity reads keep working until it expires
+(about eight hours), then report `ai_connection_scope_unavailable` until the account is
+reconnected. Runs are unaffected. A refused scope does not spend the refresh token.
+
+A login document without a scope list counts as unknown, not as safe, and gets no run
+token until the exchange succeeds.
+
+If the provider answers `invalid_scope` to the inference-only exchange, the run fails
+with `ai_connection_scope_unavailable`. The grant stays active and usage reads keep
+working. If the provider ignores the narrower scope and returns a wider token, the
+server keeps the rotated refresh token and uses the wider token for server reads only,
+marks the document `runRefused`, and fails runs the same way without asking again.
+Reconnecting replaces the document. When the run token is within two hours of expiry, the
+next run read exchanges the refresh token on the server. The exchange is serialized per
+grant by a database advisory lock held on its own connection, so a small database pool cannot starve the
+work done under the lock, and two server processes on one database never spend the same
+refresh token. A failed-run verdict for the same grant takes that lock too, so an old
+run cannot disable a grant while its renewal is in flight. The company credential
+mutation lock is held only for the short save, after the replacement is journaled with
+the same journal-before-save protocol Codex quota refresh uses, because the provider
+rotates the refresh token. The vault copy is the only copy: the attempt home is removed
+after Connect, so no CLI process competes for the rotating token. If the exchange fails
+transiently and the token for that use has not expired, the caller proceeds with it. If the provider refuses the
+refresh token and the token has expired, the grant becomes `needs_reauthorization` and
+the normal sign-in repair card appears. Connections saved before this change hold a
+plain token, keep working unchanged, and are renewed only by reconnecting. A macOS
+Keychain login also stores a plain token, so it is not renewable.
 
 Attempts reuse `adapter_auth_sessions`, binding company, owner, provider, access
 intent, reconnect target, and a 30-minute expiry. Validation and completion are

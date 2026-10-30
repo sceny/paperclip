@@ -25,9 +25,12 @@ let service: ReturnType<typeof aiConnectionService>;
 let home: string;
 let owners = 0;
 
-const document = (n: number, expiresAt: number, scopes = ["user:inference"]) => JSON.stringify({ claudeAiOauth: {
-  accessToken: `access-${n}`, refreshToken: `refresh-${n}`, expiresAt, scopes: scopes, subscriptionType: "max",
+const BROAD = ["user:inference", "user:profile", "org:create_api_key", "user:sessions:claude_code"];
+const document = (n: number, expiresAt: number, scopes: string[] | null = ["user:inference"]) => JSON.stringify({ claudeAiOauth: {
+  accessToken: `access-${n}`, refreshToken: `refresh-${n}`, expiresAt, ...(scopes ? { scopes } : {}), subscriptionType: "max",
 } });
+const body = (request: { mock: { calls: unknown[][] } }, call: number) => JSON.parse(String((request.mock.calls[call][1] as RequestInit).body));
+const wideGrant = (n: number) => () => Response.json({ access_token: `access-${n}`, refresh_token: `refresh-${n}`, expires_in: 28800, scope: BROAD.join(" ") });
 
 async function connect(value: string) {
   const owner = `claude-refresh-${owners++}`;
@@ -84,7 +87,7 @@ describe("Claude subscription token renewal", () => {
     expect(await service.runtimeCredential(row)).toBe("access-1");
     expect(request).toHaveBeenCalledTimes(1);
     expect(JSON.parse(String(request.mock.calls[0][1]?.body))).toMatchObject({ grant_type: "refresh_token", refresh_token: "refresh-0" });
-    expect(await stored(row)).toMatchObject({ accessToken: "access-1", refreshToken: "refresh-1", expiresAt: T0 + 15 * HOUR });
+    expect(await stored(row)).toMatchObject({ refreshToken: "refresh-1", run: { accessToken: "access-1", expiresAt: T0 + 15 * HOUR } });
 
     vi.setSystemTime(T0 + 8.5 * HOUR);
     expect(await service.runtimeCredential(row)).toBe("access-1");
@@ -204,34 +207,69 @@ describe("Claude subscription token renewal", () => {
     expect(grant.status).toBe("active");
   });
 
-  it("renews a broad login token for inference only before any run receives it", async () => {
+  it("gives runs an inference-only token and keeps the login token on the server", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(T0);
-    const request = providerSequence([() => Response.json({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 28800, scope: "user:inference" })]);
-    const row = await connect(document(0, T0 + 8 * HOUR, ["user:inference", "user:profile", "org:create_api_key", "user:sessions:claude_code"]));
-    expect(await service.runtimeCredential(row)).toBe("access-1");
-    expect(JSON.parse(String(request.mock.calls[0][1]?.body))).toMatchObject({ refresh_token: "refresh-0", scope: "user:inference" });
-    expect(await stored(row)).toMatchObject({ accessToken: "access-1", scopes: ["user:inference"] });
-    expect(await service.runtimeCredential(row)).toBe("access-1");
+    const request = providerSequence([() => Response.json({ access_token: "run-1", refresh_token: "refresh-1", expires_in: 28800, scope: "user:inference" })]);
+    const row = await connect(document(0, T0 + 8 * HOUR, BROAD));
+    expect(await service.runtimeCredential(row)).toBe("run-1");
+    expect(body(request, 0)).toMatchObject({ refresh_token: "refresh-0", scope: "user:inference" });
+    expect(await stored(row)).toMatchObject({
+      accessToken: "access-0", scopes: BROAD, refreshToken: "refresh-1", run: { accessToken: "run-1", expiresAt: T0 + 8 * HOUR },
+    });
+    expect(await service.credential(row)).toBe("run-1");
+    expect(await service.accountCredential(row)).toBe("access-0");
     expect(request).toHaveBeenCalledTimes(1);
   });
 
-  it("falls back to the login scopes once when the provider refuses an inference-only renewal", async () => {
+  it("renews the login token for server reads with the login scopes, without touching the run token", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(T0);
-    const broad = ["user:inference", "org:create_api_key"];
-    const request = providerSequence([
-      () => Response.json({ error: "invalid_scope" }, { status: 400 }),
-      () => Response.json({ access_token: "access-1", refresh_token: "refresh-1", expires_in: 28800, scope: broad.join(" ") }),
-    ]);
-    const row = await connect(document(0, T0 + 8 * HOUR, broad));
-    expect(await service.credential(row)).toBe("access-1");
-    expect(request.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).scope)).toEqual(["user:inference", broad.join(" ")]);
+    const request = providerSequence([wideGrant(2)]);
+    const base = JSON.stringify({ claudeAiOauth: { ...parseStoredClaudeOauth(document(1, T0 + 1 * HOUR, BROAD))!, run: { accessToken: "run-1", expiresAt: T0 + 8 * HOUR } } });
+    const row = await connect(base);
+    expect(await service.runtimeCredential(row)).toBe("run-1");
+    expect(request).not.toHaveBeenCalled();
+    expect(await service.accountCredential(row)).toBe("access-2");
+    expect(body(request, 0)).toMatchObject({ refresh_token: "refresh-1", scope: BROAD.join(" ") });
+    expect(await stored(row)).toMatchObject({ accessToken: "access-2", refreshToken: "refresh-2", run: { accessToken: "run-1" } });
+    expect(await service.runtimeCredential(row)).toBe("run-1");
+  });
+
+  it("never gives a run a token wider than inference when the provider refuses the narrow scope", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    const request = providerSequence([() => Response.json({ error: "invalid_scope" }, { status: 400 })]);
+    const row = await connect(document(0, T0 + 8 * HOUR, BROAD));
+    await expect(service.runtimeCredential(row)).rejects.toMatchObject({ details: { code: "ai_connection_scope_unavailable" } });
+    expect(request).toHaveBeenCalledTimes(1);
     const [grant] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, row.grant.id));
     expect(grant.status).toBe("active");
-    expect(await stored(row)).toMatchObject({ scopeNarrowingRefused: true, scopes: broad });
-    expect(await service.credential(row)).toBe("access-1");
-    expect(request).toHaveBeenCalledTimes(2);
+    expect(await stored(row)).toMatchObject({ accessToken: "access-0", refreshToken: "refresh-0" });
+    expect((await stored(row))?.run).toBeUndefined();
+    expect(await service.accountCredential(row)).toBe("access-0");
+  });
+
+  it("keeps the rotated refresh token, and still keeps the wide token from runs, when the provider ignores the narrow scope", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    const request = providerSequence([wideGrant(1)]);
+    const row = await connect(document(0, T0 + 8 * HOUR, BROAD));
+    await expect(service.runtimeCredential(row)).rejects.toMatchObject({ details: { code: "ai_connection_scope_unavailable" } });
+    expect(await stored(row)).toMatchObject({ accessToken: "access-1", refreshToken: "refresh-1", scopes: BROAD, runRefused: true });
+    expect((await stored(row))?.run).toBeUndefined();
+    await expect(service.credential(row)).rejects.toMatchObject({ details: { code: "ai_connection_scope_unavailable" } });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(await service.accountCredential(row)).toBe("access-1");
+  });
+
+  it("treats a login document without scopes as unknown, so a run never receives its token unrenewed", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    const request = providerSequence([() => Response.json({ error: "invalid_scope" }, { status: 400 })]);
+    const row = await connect(document(0, T0 + 8 * HOUR, null));
+    await expect(service.runtimeCredential(row)).rejects.toMatchObject({ details: { code: "ai_connection_scope_unavailable" } });
+    expect(body(request, 0).scope).toBe("user:inference");
   });
 
   it("renews through a pool of one connection because the renewal lock holds its own", async () => {
@@ -259,15 +297,20 @@ describe("Claude subscription token renewal", () => {
     const row = await connect(document(0, T0 + 1 * HOUR));
     // A second module instance has its own in-process state, like a second server task.
     vi.resetModules();
-    const other = (await import("../services/ai-connections.js")).aiConnectionService(db);
-    const first = service.credential(row);
-    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
-    const second = other.credential(row);
-    await new Promise(resolve => setTimeout(resolve, 500));
-    expect(request).toHaveBeenCalledTimes(1);
-    release();
-    expect(await Promise.all([first, second])).toEqual(["access-1", "access-1"]);
-    expect(request).toHaveBeenCalledTimes(1);
+    const otherDb = (await import("@paperclipai/db")).createDb(database.connectionString);
+    try {
+      const other = (await import("../services/ai-connections.js")).aiConnectionService(otherDb);
+      const first = service.credential(row);
+      await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+      const second = other.credential(row);
+      await new Promise(resolve => setTimeout(resolve, 500));
+      expect(request).toHaveBeenCalledTimes(1);
+      release();
+      expect(await Promise.all([first, second])).toEqual(["access-1", "access-1"]);
+      expect(request).toHaveBeenCalledTimes(1);
+    } finally {
+      await otherDb.$client.end({ timeout: 1 });
+    }
   });
 
   it("does not let an older run's failure disable a grant while its renewal is in flight", async () => {

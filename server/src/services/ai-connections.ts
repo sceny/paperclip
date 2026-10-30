@@ -41,7 +41,8 @@ import {
 } from "@paperclipai/shared";
 import { forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import {
-  CLAUDE_PROACTIVE_REFRESH_MARGIN_MS, claudeAccessTokenOf, claudeRefreshDue, ClaudeOauthRefreshError, parseStoredClaudeOauth, refreshClaudeOauth, type StoredClaudeOauth,
+  CLAUDE_PROACTIVE_REFRESH_MARGIN_MS, claudeAccessTokenOf, claudeRefreshDue, claudeTokenFor, ClaudeOauthRefreshError, parseStoredClaudeOauth, refreshClaudeOauth,
+  type ClaudeTokenUse, type StoredClaudeOauth,
 } from "./claude-oauth-credential.js";
 import { aiConnectionConfigurationFailure, aiConnectionCredentialNotSharedFailure } from "./ai-connection-configuration-failure.js";
 import { quotaCredentialRecovery, quotaCredentialHash } from "./quota-credential-recovery.js";
@@ -271,7 +272,7 @@ export function aiConnectionService(db: Db) {
     if (!supportsAiConnectionUsage(metadata.data.provider, metadata.data.method)) {
       return { ...identity, ...await probeAiConnectionUsage(metadata.data, "") };
     }
-    const value = await credential(row);
+    const value = await accountCredential(row);
     return { ...identity, ...await probeAiConnectionUsage(metadata.data, value) };
   }
   async function select(input: {
@@ -562,13 +563,27 @@ export function aiConnectionService(db: Db) {
     return value;
   }
   type CredentialAudit = Parameters<typeof credentialRaw>[2];
-  /** The token a run uses. Claude sign-ins store a renewable document; callers get its access token, renewed when due. */
-  async function credential(row: Parameters<typeof credentialRaw>[0], retry = 0, audit?: CredentialAudit): Promise<string> {
+  /**
+   * The token a caller uses. Claude sign-ins store a renewable document that holds two access tokens: the login
+   * token, which only the server uses for usage and identity reads (`account`), and an inference-only token for
+   * everything that reaches a model (`run`, the default). Each is renewed when due.
+   */
+  async function credential(row: Parameters<typeof credentialRaw>[0], retry = 0, audit?: CredentialAudit, use: ClaudeTokenUse = "run"): Promise<string> {
     const raw = await credentialRaw(row, retry, audit);
     const stored = parseStoredClaudeOauth(raw);
     if (!stored) return raw;
-    if (!claudeRefreshDue(stored)) return stored.accessToken;
-    return refreshClaudeCredential(row, stored);
+    if (!claudeRefreshDue(stored, use)) return claudeTokenFor(stored, use)?.accessToken ?? scopeUnavailable(use);
+    return refreshClaudeCredential(row, stored, use);
+  }
+  /** The login token for server-side usage and identity reads; never give it to a run. */
+  const accountCredential = (row: Parameters<typeof credentialRaw>[0]) => credential(row, 0, undefined, "account");
+  function scopeUnavailable(use: ClaudeTokenUse): never {
+    throw unprocessable(
+      use === "run"
+        ? "This Claude sign-in cannot be limited to inference. Reconnect with an inference-only token."
+        : "This Claude sign-in no longer grants account access. Reconnect it.",
+      { code: "ai_connection_scope_unavailable" },
+    );
   }
   /**
    * Renew the vaulted Claude sign-in. The provider rotates the refresh token, so the exchange is serialized per
@@ -578,13 +593,16 @@ export function aiConnectionService(db: Db) {
   async function refreshClaudeCredential(
     row: Parameters<typeof credentialRaw>[0],
     observed: StoredClaudeOauth,
+    use: ClaudeTokenUse,
     options: { marginMs?: number; reauthorizeWithinMs?: number } = {},
+    retried = false,
   ): Promise<string> {
     const companyId = row.connection.companyId;
     const recovery = quotaCredentialRecovery(companyId, row.grant.id);
     let savingReplacement = false;
     let rejected = false;
     let unavailable = false;
+    let scopeRefused = false;
     const missing = () => unprocessable("Reconnect this AI account", { code: "ai_connection_credential_missing" });
     const read = async (client: Db, lock: boolean) => {
       const query = client.select().from(connectionGrants).where(and(
@@ -644,18 +662,24 @@ export function aiConnectionService(db: Db) {
           await recovery.clear();
           pending = null;
         }
-        if (!pending && (!stored || !claudeRefreshDue(stored, Date.now(), options.marginMs))) return current;
+        if (!pending && (!stored || !claudeRefreshDue(stored, use, Date.now(), options.marginMs))) return current;
         let refreshed = pending?.value;
         if (!refreshed) {
           await recovery.prepare();
-          try { refreshed = await refreshClaudeOauth(stored!); }
+          try { refreshed = await refreshClaudeOauth(stored!, use); }
           catch (error) {
             if (!(error instanceof ClaudeOauthRefreshError)) throw error;
-            // The access token is still good for part of the margin; use it
+            // The token for this use is still good for part of the margin; use it
             // rather than failing a run over a renewal that can be retried.
-            if (stored!.expiresAt > Date.now() + (error.rejected ? options.reauthorizeWithinMs ?? 60_000 : 60_000)) {
+            if ((claudeTokenFor(stored!, use)?.expiresAt ?? 0) > Date.now() + (error.rejected ? options.reauthorizeWithinMs ?? 60_000 : 60_000)) {
               logger.warn({ grantId: grant.id, rejected: error.rejected }, "Claude token renewal failed; using the current access token");
               await recovery.clear().catch(clearError => logger.warn({ err: clearError, grantId: grant.id }, "Saved Claude credential recovery cleanup pending"));
+              return current;
+            }
+            // A refused scope leaves the login valid and the refresh token unspent; nothing was issued to save.
+            if (error.scopeRefused) {
+              await recovery.clear().catch(clearError => logger.warn({ err: clearError, grantId: grant.id }, "Saved Claude credential recovery cleanup pending"));
+              scopeRefused = true;
               return current;
             }
             if (!error.rejected) { unavailable = true; return current; }
@@ -679,7 +703,13 @@ export function aiConnectionService(db: Db) {
       });
       if (rejected) throw missing();
       if (unavailable) throw busy();
-      return claudeAccessTokenOf(value);
+      if (scopeRefused) scopeUnavailable(use);
+      const token = claudeAccessTokenOf(value, use);
+      if (token !== null) return token;
+      // A journaled replacement from the other use was saved; this use still needs its own exchange.
+      const after = parseStoredClaudeOauth(value);
+      if (after && !retried && claudeRefreshDue(after, use, Date.now(), options.marginMs)) return refreshClaudeCredential(row, after, use, options, true);
+      return scopeUnavailable(use);
     } catch (error) {
       if (error instanceof HttpError) throw error;
       if (savingReplacement) throw busy();
@@ -716,9 +746,11 @@ export function aiConnectionService(db: Db) {
       result.checked += 1;
       try {
         const stored = parseStoredClaudeOauth(await credentialRaw(row));
-        if (!stored || !claudeRefreshDue(stored, now, CLAUDE_PROACTIVE_REFRESH_MARGIN_MS)) continue;
+        // Runs hold the inference-only token; when the provider will not issue one, keep the login token fresh instead.
+        const use: ClaudeTokenUse = stored?.runRefused ? "account" : "run";
+        if (!stored || !claudeRefreshDue(stored, use, now, CLAUDE_PROACTIVE_REFRESH_MARGIN_MS)) continue;
         result.attempted += 1;
-        await refreshClaudeCredential(row, stored, {
+        await refreshClaudeCredential(row, stored, use, {
           marginMs: CLAUDE_PROACTIVE_REFRESH_MARGIN_MS, reauthorizeWithinMs: CLAUDE_PROACTIVE_REAUTHORIZE_WINDOW_MS,
         });
       } catch (error) {
@@ -1202,7 +1234,7 @@ export function aiConnectionService(db: Db) {
       if (!row) return "current";
       if (row.grant.status !== "active") return "needs_reauthorization";
       if (row.grant.updatedAt > input.runStartedAt) return "renewed";
-      const generation = createHash("sha256").update(claudeAccessTokenOf(await credentialRaw(row))).digest("hex").slice(0, 16);
+      const generation = createHash("sha256").update(claudeAccessTokenOf(await credentialRaw(row), "run") ?? "").digest("hex").slice(0, 16);
       return attribution.identity !== `${row.grant.id}:${attribution.responsibleUserId ?? "shared"}:${generation}` ? "renewed" : "current";
     });
   }
@@ -1231,7 +1263,7 @@ export function aiConnectionService(db: Db) {
           eq(companySecrets.companyId, input.companyId), eq(companySecrets.id, ref.secretId),
         )).for("update");
         const value = await aiConnectionService(tx as unknown as Db).credentialRaw({ connection, grant });
-        const generation = createHash("sha256").update(claudeAccessTokenOf(value)).digest("hex").slice(0, 16);
+        const generation = createHash("sha256").update(claudeAccessTokenOf(value, "run") ?? "").digest("hex").slice(0, 16);
         if (attribution.identity !== `${grant.id}:${attribution.responsibleUserId ?? "shared"}:${generation}`) return;
         // A quota exchange may have consumed this run's token before a failed
         // database commit. Save its working replacement instead of revoking it.
@@ -1361,5 +1393,5 @@ export function aiConnectionService(db: Db) {
       return [{ ...row, summary }];
     });
   }
-  return { list, selectDecision, selectFastResponse, quotaAccounts, subscriptionAccounts: (companyId: string, userId: string) => quotaAccounts(companyId, userId, true), refreshQuotaCredential, renewDueClaudeCredentials, select, credential, credentialRaw, runtimeCredential, probeUsage, save, setDefault, membership, markAuthenticationFailed };
+  return { list, selectDecision, selectFastResponse, quotaAccounts, subscriptionAccounts: (companyId: string, userId: string) => quotaAccounts(companyId, userId, true), refreshQuotaCredential, renewDueClaudeCredentials, select, credential, accountCredential, credentialRaw, runtimeCredential, probeUsage, save, setDefault, membership, markAuthenticationFailed };
 }

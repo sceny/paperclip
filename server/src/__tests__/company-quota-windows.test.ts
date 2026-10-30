@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../services/ai-connections.js", () => ({
   aiConnectionService: () => ({
     quotaAccounts: mocks.accounts,
-    credential: mocks.credential,
+    accountCredential: mocks.credential,
     refreshQuotaCredential: mocks.refresh,
   }),
 }));
