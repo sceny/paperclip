@@ -712,6 +712,21 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     await tempDb?.cleanup();
   });
 
+  function selectRecoveryActionsForIssue(issueId: (typeof issueRecoveryActions.$inferSelect)["sourceIssueId"]) {
+    return db
+      .select()
+      .from(issueRecoveryActions)
+      .where(eq(issueRecoveryActions.sourceIssueId, issueId));
+  }
+
+  function selectRecoveryIssueById(issueId: (typeof issues.$inferSelect)["id"]) {
+    return db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0] ?? null);
+  }
+
   async function seedRunFixture(input?: {
     adapterType?: string;
     agentStatus?: "paused" | "idle" | "running";
