@@ -12,6 +12,7 @@ import {
   projects,
 } from "@paperclipai/db";
 import { budgetService } from "../services/budgets.ts";
+import { projectService } from "../services/projects.ts";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -354,5 +355,57 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
       pauseReason: null,
     });
     expect(overviewAfterResume.activeIncidents).toHaveLength(0);
+  });
+
+  it("keeps budget and manual project pauses independent", async () => {
+    const { companyId, agentId, projectId } = await createBudgetFixture();
+    const projectPause = () =>
+      db.select({ pauseReason: projects.pauseReason, pausedAt: projects.pausedAt }).from(projects).then((rows) => rows[0]!);
+    const service = budgetService(db, { cancelWorkForScope: vi.fn().mockResolvedValue(undefined) });
+    const projectsSvc = projectService(db);
+    await db.insert(budgetPolicies).values({
+      companyId,
+      scopeType: "project",
+      scopeId: projectId,
+      metric: "billed_cents",
+      windowKind: "lifetime",
+      amount: 100,
+      warnPercent: 75,
+      hardStopEnabled: true,
+      notifyEnabled: true,
+      isActive: true,
+    });
+
+    // A budget hard-stop must not overwrite a manual pause.
+    await projectsSvc.setManualPause(projectId, true);
+    const event = await insertCostEvent({ companyId, agentId, projectId, costCents: 125 });
+    await service.evaluateCostEvent(event);
+    expect(await projectPause()).toMatchObject({ pauseReason: "manual", pausedAt: expect.any(Date) });
+
+    // Raising the budget and resuming must not clear a manual pause.
+    const [hardIncident] = await db.select().from(budgetIncidents).where(eq(budgetIncidents.thresholdType, "hard"));
+    expect(hardIncident).toBeDefined();
+    await service.resolveIncident(
+      companyId,
+      hardIncident!.id,
+      { action: "raise_budget_and_resume", amount: 175 },
+      "board-user",
+    );
+    expect(await projectPause()).toMatchObject({ pauseReason: "manual", pausedAt: expect.any(Date) });
+    expect(await service.getInvocationBlock(companyId, agentId, { projectId })).toMatchObject({
+      reason: "Project is paused and cannot start new work.",
+    });
+
+    // A manual resume clears the manual pause, and the budget hard-stop applies again.
+    await projectsSvc.setManualPause(projectId, false);
+    expect(await projectPause()).toEqual({ pauseReason: null, pausedAt: null });
+    await db.update(budgetPolicies).set({ amount: 100 }).where(eq(budgetPolicies.scopeId, projectId));
+    await service.evaluateCostEvent(event);
+    expect(await projectPause()).toMatchObject({ pauseReason: "budget", pausedAt: expect.any(Date) });
+
+    // A manual resume must not clear the budget pause, and a manual pause must not replace it.
+    await expect(projectsSvc.setManualPause(projectId, false)).rejects.toMatchObject({ status: 409 });
+    await expect(projectsSvc.setManualPause(projectId, true)).rejects.toMatchObject({ status: 409 });
+    expect(await projectPause()).toMatchObject({ pauseReason: "budget", pausedAt: expect.any(Date) });
   });
 });

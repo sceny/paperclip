@@ -20,6 +20,7 @@ import { InlineEditor } from "../components/InlineEditor";
 import { StatusBadge } from "../components/StatusBadge";
 import { ProjectTile } from "../components/ProjectTile";
 import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
+import { PauseResumeButton } from "../components/AgentActionButtons";
 import { IssuesList } from "../components/IssuesList";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { PageTabBar } from "../components/PageTabBar";
@@ -455,6 +456,27 @@ export function ProjectDetail() {
     },
   });
 
+  const pauseProject = useMutation({
+    mutationFn: (paused: boolean) => {
+      const companyId = resolvedCompanyId ?? lookupCompanyId;
+      return paused
+        ? projectsApi.pause(projectLookupRef, companyId)
+        : projectsApi.resume(projectLookupRef, companyId);
+    },
+    onSuccess: (updatedProject, paused) => {
+      invalidateProject();
+      const name = updatedProject?.name ?? project?.name ?? "Project";
+      pushToast({ title: paused ? `"${name}" has been paused` : `"${name}" has been resumed`, tone: "success" });
+    },
+    onError: (error, paused) => {
+      pushToast({
+        title: paused ? "Failed to pause project" : "Failed to resume project",
+        body: error instanceof Error ? error.message : undefined,
+        tone: "error",
+      });
+    },
+  });
+
   const archiveProject = useMutation({
     mutationFn: (archived: boolean) =>
       projectsApi.update(
@@ -778,6 +800,12 @@ export function ProjectDetail() {
               Paused by budget hard stop
             </div>
           ) : null}
+          {project.pauseReason === "manual" ? (
+            <div className="inline-flex items-center gap-2 rounded-full border border-(--status-agent-paused)/40 bg-(--status-agent-paused)/10 px-3 py-1 text-(length:--text-micro) font-medium uppercase tracking-(--tracking-caps) text-foreground">
+              <span className="h-2 w-2 rounded-full bg-(--status-agent-paused)" />
+              Paused manually
+            </div>
+          ) : null}
           {project.managedByPlugin ? (
             <div className="inline-flex items-center gap-2 rounded-full border border-border bg-muted px-3 py-1 text-(length:--text-micro) font-medium text-muted-foreground">
               <span className="h-2 w-2 rounded-full" style={{ backgroundColor: project.color ?? "var(--project-seed)" }} />
@@ -786,6 +814,14 @@ export function ProjectDetail() {
           ) : null}
         </div>
         <div className="ml-auto flex items-center gap-2">
+          {project.pauseReason !== "budget" ? (
+            <PauseResumeButton
+              isPaused={Boolean(project.pausedAt)}
+              onPause={() => pauseProject.mutate(true)}
+              onResume={() => pauseProject.mutate(false)}
+              disabled={pauseProject.isPending}
+            />
+          ) : null}
           <StarToggle
             size="button"
             starred={projectStarred}
