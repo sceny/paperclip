@@ -33,6 +33,10 @@ never start a server or depend on a tenant filesystem.
 | `stop-redirect` | Native agent; three work runs; qualified Docker oracle | Download a verified checkpoint, Stop an active revision, require native cancellation acknowledgement, submit a new direction once and verify completion without original-run activity |
 | `cloud-onboarding` | Signed-in admitted Cloud account; fresh workspace; qualified bounded provider route | Create workspace in the portal, connect API key and native Codex agent in the wizard, complete a task, download and independently check its artifact |
 
+The shared Studio helper waits for the original saved file body before typing.
+An editor control can mount before the file query completes; editing that empty
+draft can otherwise lose the original content when the file arrives.
+
 Supported acquisitions are managed self-hosted (`local`), registered existing
 Cloud (`local` or `daytona` when present), and new Cloud. New Cloud must start
 with onboarding. Its context can then satisfy the identical task-properties
@@ -41,7 +45,10 @@ reusing successful onboarding reports `onboarding`. Preconfigured state is never
 counted as onboarding coverage.
 
 The scripted onboarding request supplies a self-contained child brief. The
-parent must copy the full marked brief verbatim into `create_task.description`,
+parent must first save its proposal through the existing native confirmation
+tool and check the saved card receipt. The browser records the human decision;
+the parent must not record its own approval or treat the opening scope as acceptance.
+It must copy the full marked brief verbatim into `create_task.description`,
 including tool names, parameters, and the encoded input. It orders the child's
 work: create the files, publish `connection-proof.json` with that exact filename
 and workspace-relative content reference, save its Paperclip task document with
@@ -54,6 +61,9 @@ it does not retry the journey. The model still computes the result, publishes
 the file, saves the document, and completes the tasks. Independent download,
 math, provenance, document, and parent-link checks remain authoritative.
 Historical failed attempts retain their original fixture and outcome.
+The parent's final reply must use Markdown links to the saved child results,
+including the attachment's real content or download path. Naming a file or
+document key in inline code does not satisfy the existing parent-link check.
 
 Save this credential-free local target config outside the repository:
 
@@ -99,6 +109,27 @@ server proves that no provider work started. A scheduled replacement remains
 pending and consumes the run limit. It cannot satisfy completion; the child must
 still finish through native execution and pass the independent artifact checks.
 
+A failed native run can remain pending when the authenticated run projection
+identifies agent-owned automatic recovery on that same run. Its native phase
+must remain retryable, with matching nonempty cause strings, a bounded attempt
+and retry schedule, and no successor. Cause strings are diagnostic values, not
+a positive retry policy. Known permanent, permission-declined, and exhausted
+causes are also rejected defensively. The wait stays within the original
+campaign deadline. An overdue retry can still be reconnecting; it does not extend
+the deadline or authorize a new story attempt. Ordinary failures, terminal or
+board-owned recovery, and exhausted attempts still fail. The producing turn must
+settle before proposal acceptance, and the recovered child must actually succeed
+before the existing document, artifact, download, and parent-link checks can pass.
+
+An approved child that commits a board-owned current-track blocker fails with
+`onboarding_child_task_blocked` once all owned work has settled. The latest child
+run must prove the blocked decision at the child's current status version.
+Parent dependency waits, pending recovery, and stale child decisions keep waiting
+within the original deadline. This failure does not satisfy any delivery check.
+The [semantic control-plane port](../../server/src/services/native-runtime/paperclip-control-plane-port.ts)
+writes `prpReportedWorkDisposition`. [Native finalization](../../server/src/services/native-runtime/native-run-finalizer.ts)
+commits the blocked decision and `statusVersionAfter` into the run's `resultJson`.
+
 The attached `ask-question` recipe requires a prepared native general agent and
 an explicit execution environment. Legacy execution is unsupported until its
 saved model/provider identity can be verified. A registered
@@ -119,6 +150,17 @@ satisfy the check. A pending or suppressed comment can use the same proven nativ
 reply path. A finish summary by itself, an earlier turn, a progress
 bubble, or a cancelled run cannot satisfy it. Private receipts record the run,
 thread anchor and observed text; classic protocol comment matchers stay strict.
+Markdown replies compare complete text, GFM checkbox states and exact link destinations after parsing
+through the UI-owned projection of its existing Markdown renderer and GFM/issue-reference plugins. The observer receives the
+same visible-company prefix list used by the UI, so bare issue keys and URLs
+match their rendered links. Whitespace and inline formatting can change during rendering. A
+document or issue chip can replace a link label, but must retain its destination.
+Ordinary links retain their source label. Destination resolution uses the existing
+production company-route helper and the current task URL for fragments.
+Receipts retain both source Markdown and observed content. Unsupported structures
+such as images, raw HTML, tables and fenced code fail closed. Exact marker checks
+remain exact, and decline checks inspect both visible explanations and source
+text for unread service data.
 The decline oracle accepts this explicit native receipt without inventing an
 issue comment. The final run must start after the saved decline, and the usual
 truthful explanation, zero service calls and no unread marker checks still apply.
