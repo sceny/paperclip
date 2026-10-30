@@ -23,7 +23,14 @@ never start a server or depend on a tenant filesystem.
 
 | Journey | Required starting state | Observed outcome |
 | --- | --- | --- |
+| `task-create` | Company and signed-in board user | Create a task through the shared production composer, assign it to yourself, reopen and reload it, verify the saved prompt and no agent work |
+| `ask-question` | Company, configured agent capability, positive model allowance and exactly one permitted work run | Reuse the existing cross-model Ask question prompt; require one successful run with matching company/task/agent/model/environment, one saved exact answer, and visible readback after reload |
 | `task-properties` | Company, signed-in board user, task-write capability, prepared run-owned backlog task | Open its properties, assign it to the signed-in user, reload, check both UI and saved assignment; verify no agent run |
+| `plan-revise-accept` | Native agent; three work runs | Reuse the classic Plan story: canonical draft, browser revision request, new revision-bound confirmation, approval and exact saved final response |
+| `build-revise` | Native agent; two work runs; qualified Docker artifact oracle | Browser-download both ZIP versions, independently exercise source/CLI behavior, verify different hashes and preserve the original download |
+| `protected-actions` | Native agent; four work runs; authenticated reachable review-service fixture | Approve one action and decline another on separate owned tasks; verify zero calls before either decision, one after approval, zero after decline and a truthful saved explanation |
+| `create-skill-studio` | Native agent with skill-write permission; one work run | Create a uniquely named company skill, open its activity card, edit in Studio, reload and verify task-card readback |
+| `stop-redirect` | Native agent; three work runs; qualified Docker oracle | Download a verified checkpoint, Stop an active revision, require native cancellation acknowledgement, submit a new direction once and verify completion without original-run activity |
 | `cloud-onboarding` | Signed-in admitted Cloud account; fresh workspace; qualified bounded provider route | Create workspace in the portal, connect API key and native Codex agent in the wizard, complete a task, download and independently check its artifact |
 
 Supported acquisitions are managed self-hosted (`local`), registered existing
@@ -77,6 +84,24 @@ server proves that no provider work started. A scheduled replacement remains
 pending and consumes the run limit. It cannot satisfy completion; the child must
 still finish through native execution and pass the independent artifact checks.
 
+The attached `ask-question` recipe requires a prepared native general agent and
+an explicit execution environment. Legacy execution is unsupported until its
+saved model/provider identity can be verified. A registered
+agent avoids a new setup probe; a disposable QA agent uses the existing native
+fixture defaults and its setup remains separately unpriced. A restricted review
+bot is not a general-work fixture.
+The private provider supplies its exact execution identity through the `agent`
+capability and collects normalized run usage. The existing Cloud provider still
+owns authentication, conditional leases, fixture ownership, and cleanup.
+A model allowance is an accounting threshold; reused direct-provider routes do
+not acquire the onboarding gateway's request-level cash guarantee. The question
+observer allows one run and waits at most four minutes. Cleanup stops only
+run-owned question work; shared agent configuration stays outside ownership.
+When the QA adapter explicitly selects terminal-history retention, it terminates
+its disposable agent, makes owned tasks terminal, verifies no active runs, retains
+the records for decision-history integrity, and releases both QA leases. This is
+reported as retained data, rather than confirmed deletion.
+
 ## Evidence and lifecycle
 
 Results use the existing campaign/result schemas and dashboard. Each result
@@ -115,7 +140,8 @@ contract before successful cleanup. Missing assertions or paid accounting proof
 turn the campaign into a failure while preserving valid cost receipts, so an
 invalid success cannot trigger disposable-stack deletion.
 
-Only post-journey screenshots are captured. Browser state, login codes, raw
+The shared Plan story additionally retains draft and revised task screenshots privately. Other screenshots capture the post-journey task. Failed task/search screens are
+retained only after tenant setup; authentication pages are excluded. Browser state, login codes, raw
 errors, credentials, request headers, and auth screenshots are excluded. All
 Cloud evidence is private; the public history publisher rejects these bundles.
 The private provider uses conditional S3 identity/stack leases and intent/receipt
@@ -159,3 +185,25 @@ separate onboarding gateway product change, trusted CI selection, and real
 runtime gateway admission remain live qualification prerequisites. Testing and staging use separate
 registries and credentials; only the declared testing control plane is admitted. Defining a story or passing structural checks is
 not evidence that its Cloud journey passed.
+
+## Reuse and daily QA promotion
+
+The classic matrix and deployment-targeted stories share Plan revision actions,
+artifact download/oracle code, Skill Studio editing and protected-action decisions.
+Their target adapters own login, agent/connection provisioning, environment
+identity, and cleanup. The managed local recipe currently provides browser-only
+capabilities; paid stories fail as unsupported until a native agent fixture is
+supplied. This does not turn a classic local pass into a QA Cloud pass.
+
+Paid deployment campaigns declare the exact sum of expected work runs (Ask 1,
+Plan 3, artifact revision 2, protected actions 4, Skill Studio 1, Stop/redirect 3).
+Each observer reads only its owned tasks and checks native company, agent, model
+and execution-environment identity. Setup is separately unpriced. Skills and
+service connections are uniquely owned; customer credentials and company-wide
+configuration are never copied into a journey.
+
+The private QA adapter keeps candidate cases available for manual qualification.
+A candidate's presence in this source catalog is not qualification. It enters the
+saved daily TestOps plan only after an inspected real QA Cloud pass including
+usage, artifact/decision evidence and cleanup. The daily driver runs that saved
+plan against the registered QA tenant; it does not substitute a local instance.
