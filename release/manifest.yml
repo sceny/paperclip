@@ -22,13 +22,18 @@ branches:
     kind: upstream-request
     parent: PAP-9
     pr:
-  - branch: fix/ai-connection-renewal-after-auth-failure
+  # Beta port: fix/ai-connection-renewal-after-auth-failure is on newer upstream and conflicts with the beta
+  # (ui/src/pages/AgentDetail.tsx, server/src/app.ts, server/src/routes/ai-connections.ts). The port is the same 9 own commits on top of the beta.
+  # The pull request stays on fix/ai-connection-renewal-after-auth-failure. Drop the port when `base` moves past the conflict.
+  - branch: beta-port/fix/ai-connection-renewal-after-auth-failure
     kind: upstream-request
     parent: PAP-59
     pr:
   # Beta port: fix/claude-login-refresh (the request branch, on newer upstream) conflicts with
   # fix/ai-reconnect-missing-credential in server/src/services/ai-connections.ts when picked onto the beta.
-  # Same 3 commits, context adapted to the beta. The pull request stays on fix/claude-login-refresh.
+  # The own commits of fix/claude-login-refresh and its review fixes, context adapted to the beta, plus the upstream commits the beta lacks
+  # (lease-loss attribution and retry, the private lease pool, the retry after a restart, authenticationFailureState).
+  # The pull request stays on fix/claude-login-refresh. Drop the port when `base` moves past those upstream commits.
   - branch: beta-port/fix/claude-login-refresh
     kind: upstream-request
     parent: PAP-85
