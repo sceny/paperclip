@@ -40,6 +40,17 @@ journey without another setup. A recipe reports `startingState: recipe`;
 reusing successful onboarding reports `onboarding`. Preconfigured state is never
 counted as onboarding coverage.
 
+The scripted onboarding request orders the child's work: create the files,
+publish the proof file, save its document with the returned file link, then
+report completion. It explains the native completion contract: include actual
+verification, omit the optional schema, and use receipt-derived deliverable
+references in evidence and file artifacts. Local input paths are verification
+details. Correcting rejected tool arguments stays within the same attempt;
+it does not retry the journey. The model still computes the result, publishes
+the file, saves the document, and completes the tasks. Independent download,
+math, provenance, document, and parent-link checks remain authoritative.
+Historical failed attempts retain their original fixture and outcome.
+
 Save this credential-free local target config outside the repository:
 
 ```json
@@ -93,6 +104,17 @@ bot is not a general-work fixture.
 The private provider supplies its exact execution identity through the `agent`
 capability and collects normalized run usage. The existing Cloud provider still
 owns authentication, conditional leases, fixture ownership, and cleanup.
+
+The Plan and Stop final-answer checks reload the owned task and bind its exact,
+unique visible reply to the final successful native run. A settled native turn
+can render its saved reply before the comments projection exists; that path also
+requires exactly one matching final assistant message in the complete durable
+event stream, with the same company, agent, run and validated PRP source. If the run
+has a projected selected completion comment, only that attributed comment can
+satisfy the check. A pending or suppressed comment can use the same proven native
+reply path. A finish summary by itself, an earlier turn, a progress
+bubble, or a cancelled run cannot satisfy it. Private receipts record the run,
+thread anchor and observed text; classic protocol comment matchers stay strict.
 A model allowance is an accounting threshold; reused direct-provider routes do
 not acquire the onboarding gateway's request-level cash guarantee. The question
 observer allows one run and waits at most four minutes. Cleanup stops only
