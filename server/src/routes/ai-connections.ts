@@ -32,6 +32,10 @@ import { accessService } from "../services/access.js";
 import { logActivity } from "../services/activity-log.js";
 import { aiConnectionRouterService } from "../services/ai-connection-router.js";
 import { aiConnectionService } from "../services/ai-connections.js";
+import { connectionIntentService } from "../services/connection-intents.js";
+import { connectionIntentDeliveryService } from "../services/connection-intent-delivery.js";
+import type { heartbeatService } from "../services/heartbeat.js";
+import { logger } from "../middleware/logger.js";
 import { validate } from "../middleware/validate.js";
 
 /** Agent API calls inherit authenticated run identity, never the agent's own ID. */
@@ -136,7 +140,11 @@ export async function canInstallSharedAiConnectionForNewAgent(
 }
 
 
-export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLocalAiLogin>[0] = {}) {
+export function aiConnectionRoutes(
+  db: Db,
+  options: Parameters<typeof supportsLocalAiLogin>[0] = {},
+  heartbeat?: Pick<ReturnType<typeof heartbeatService>, "wakeup">,
+) {
   function assertLocalLoginAvailable() {
     if (!supportsLocalAiLogin(options)) throw unprocessable("Server-host subscription sign-in is unavailable on this hosted instance. Choose a supported sign-in environment or use an API key.");
   }
@@ -144,6 +152,19 @@ export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLo
   const service = aiConnectionService(db);
   const localLogin = localAiLoginService(db);
   const pools = aiConnectionRouterService(db);
+  // Without a heartbeat the delivery sweeper still wakes the tasks later.
+  async function resumeTasksAfterReconnect(req: Request, companyId: string, userId: string, connectionId: string | undefined) {
+    if (!connectionId) return;
+    // The reconnect is already saved, so a failure here must not turn the response into an error.
+    try {
+      const closed = await connectionIntentService(db).resolveAfterReconnect(companyId, userId, connectionId, {
+        bypassCurrentMembershipCheck: req.actor.source === "local_implicit" || req.actor.isInstanceAdmin === true,
+      });
+      if (heartbeat) for (const id of closed) await connectionIntentDeliveryService(db, heartbeat).tryDeliver(id);
+    } catch (err) {
+      logger.warn({ err, companyId, connectionId }, "AI connection reconnected; resuming tasks failed");
+    }
+  }
   router.get("/companies/:companyId/ai-connection-pools", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertBoard(req); assertCompanyAccess(req, companyId);
@@ -314,6 +335,7 @@ export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLo
         undefined,
         attemptStartedAt,
       );
+      await resumeTasksAfterReconnect(req, companyId, userId, input.connectionId);
       res.status(201).json(result);
     },
   );
@@ -328,7 +350,9 @@ export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLo
       if (!localSessionId) throw unprocessable(input.provider === "xai"
         ? "Start local sign-in for this connection before connecting."
         : "Start browser sign-in for this connection before connecting.");
-      res.status(201).json(await localLogin.complete(companyId, userId, localSessionId, input));
+      const result = await localLogin.complete(companyId, userId, localSessionId, input);
+      await resumeTasksAfterReconnect(req, companyId, userId, input.connectionId);
+      res.status(201).json(result);
     },
   );
   router.put(

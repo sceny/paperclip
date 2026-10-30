@@ -190,7 +190,11 @@ it.each([
 ])("routes a typed provider login rejection to sign-in recovery: %s", async (title) => {
   const { result } = await executeFailure(title, "access");
   expect(result).toMatchObject({ exitCode: 1, errorCode: "claude_auth_required" });
-  if (title === "ACP agent reported a terminal access failure.") expect(result.errorMessage).toBe("Claude sign-in failed. Sign in again and try again.");
+  if (title === "ACP agent reported a terminal access failure.") {
+    const reconnect = "Claude sign-in expired or was rejected. Sign in again: open the agent's AI connection and choose Reconnect.";
+    expect(result.errorMessage).toBe(reconnect);
+    expect(result.summary).toBe(reconnect);
+  }
   expect(result.errorFamily).not.toBe("provider_quota");
 });
 

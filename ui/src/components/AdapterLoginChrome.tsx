@@ -466,6 +466,8 @@ export function ProviderApiKeyCard({
   );
 }
 
+const CODE_VERIFY_TIMEOUT_MS = 30_000;
+
 /** Shared instructions for local subscription setup in every authentication host. */
 export function LocalProviderLoginInstructions({ adapterType, login }: {
   adapterType: string;
@@ -474,16 +476,29 @@ export function LocalProviderLoginInstructions({ adapterType, login }: {
   const [showCommand, setShowCommand] = useState(false);
   const [browserCode, setBrowserCode] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [submittedFor, setSubmittedFor] = useState<string | null>(null);
+  const [verifyTimedOut, setVerifyTimedOut] = useState(false);
   const provider = adapterType === "claude_local" ? "Claude Code" : adapterType === "grok_local" ? "Grok CLI" : "Codex CLI";
   const isolated = login?.isolated ?? (adapterType === "codex_local" || adapterType === "grok_local");
   const command = login?.command;
   const browserLogin = adapterType === "claude_local" || adapterType === "codex_local";
+  useEffect(() => {
+    setVerifyTimedOut(false);
+    if (submittedFor === null) return;
+    const timer = setTimeout(() => setVerifyTimedOut(true), CODE_VERIFY_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [submittedFor]);
+  function retry() {
+    setSubmittedFor(null);
+    login?.retry();
+  }
   async function submitBrowserCode() {
     if (!browserCode.trim() || !login?.submitCode || submitting) return;
     setSubmitting(true);
     try {
       await login.submitCode(browserCode.trim());
       setBrowserCode("");
+      setSubmittedFor(login.authorizationUrl ?? "");
     } catch {
       // The login hook presents the request error beside the sign-in card.
     } finally {
@@ -495,7 +510,7 @@ export function LocalProviderLoginInstructions({ adapterType, login }: {
   return <div className="min-w-0 max-w-full space-y-3 text-sm text-muted-foreground">
     {ready ? <>
       <p role="status" className="flex items-center gap-2 text-foreground"><Check className="size-4 shrink-0 text-(--status-task-icon-done)" />{provider} is signed in. Click Connect to use this account.</p>
-      {!showCommand && <button type="button" className="underline underline-offset-4" onClick={() => browserLogin ? login?.retry() : setShowCommand(true)}>Use a different account</button>}
+      {!showCommand && <button type="button" className="underline underline-offset-4" onClick={() => browserLogin ? retry() : setShowCommand(true)}>Use a different account</button>}
     </> : !browserLogin && <p>{isolated ? `Sign in to ${provider} for this connection on the machine running Paperclip. Your existing terminal login stays separate.` : `Connect uses your local ${provider} account on the machine running Paperclip.`}</p>}
     {browserLogin && !ready && !login?.authorizationUrl && !login?.error && <p role="status">Preparing browser sign-in…</p>}
     {browserLogin && !ready && !login?.error && login?.authorizationUrl && <ProviderSubscriptionCard
@@ -503,7 +518,10 @@ export function LocalProviderLoginInstructions({ adapterType, login }: {
       authorizationUrl={login.authorizationUrl}
       mode={adapterType === "claude_local" ? "submitted_code" : "displayed_code"}
     >
-      {adapterType === "claude_local" ? <div className="flex flex-col gap-2">
+      {adapterType === "claude_local" && submittedFor === (login.authorizationUrl ?? "") ? (verifyTimedOut
+        ? <p role="alert">That code did not work or expired. Start sign-in again.</p>
+        : <p role="status" className="flex items-center gap-2 text-foreground"><Loader2 className="size-4 animate-spin" />Code submitted. Verifying your sign-in…</p>)
+      : adapterType === "claude_local" ? <div className="flex flex-col gap-2">
         <OnboardingCardField
           value={browserCode}
           onChange={setBrowserCode}
@@ -521,6 +539,6 @@ export function LocalProviderLoginInstructions({ adapterType, login }: {
       </div>}
     </>}
     {login?.error && <p role="alert">{login.error}</p>}
-    {login && !login.preparing && !ready && (isolated || login.error) && <button type="button" className="underline underline-offset-4" onClick={login.retry}>{isolated ? "Start sign-in again" : "Check again"}</button>}
+    {login && !login.preparing && !ready && (isolated || login.error) && <button type="button" className="underline underline-offset-4" onClick={retry}>{isolated ? "Start sign-in again" : "Check again"}</button>}
   </div>;
 }

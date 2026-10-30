@@ -5,6 +5,7 @@ import { grantConnectionAgentTools } from "./connection-agent-access.js";
 import { agentService } from "./agents.js";
 import { createHash } from "node:crypto";
 import { logActivity } from "./activity-log.js";
+import { logger } from "../middleware/logger.js";
 import { aiConnectionService } from "./ai-connections.js";
 import { aiConnectionBindingSchema, aiConnectionRouterBindingSchema } from "@paperclipai/shared";
 import { aiBindingForAuthRecovery, isAiAuthenticationFailure, isAiAuthenticationRepairable } from "./ai-auth-failure.js";
@@ -1175,21 +1176,60 @@ export function connectionIntentService(db: Db) {
     );
   }
 
+  /** A reconnect outside the card closes the AI cards its connection left open, so their tasks can resume. */
+  async function resolveAfterReconnect(
+    companyId: string,
+    userId: string,
+    connectionId: string,
+    options: { bypassCurrentMembershipCheck?: boolean } = {},
+  ) {
+    const pending = await db.select({ id: issueThreadInteractions.id })
+      .from(issueThreadInteractions)
+      .innerJoin(heartbeatRuns, eq(heartbeatRuns.id, issueThreadInteractions.sourceRunId))
+      .where(and(
+        eq(issueThreadInteractions.companyId, companyId),
+        eq(issueThreadInteractions.kind, "connection_intent"),
+        eq(issueThreadInteractions.status, "pending"),
+        eq(issueThreadInteractions.addresseeUserId, userId),
+        sql`${issueThreadInteractions.payload}->>'purpose' = 'ai'`,
+        sql`${heartbeatRuns.contextSnapshot}->'aiConnection'->>'connectionId' = ${connectionId}`,
+      ));
+    const resolved: string[] = [];
+    for (const { id } of pending) {
+      // The reconnect is already saved. A card that cannot close stays open for the user.
+      try {
+        await complete(id, connectionId, userId, options);
+        resolved.push(id);
+      } catch (err) {
+        logger.warn({ err, companyId, interactionId: id, connectionId }, "AI connection reconnected; sign-in card left pending");
+      }
+    }
+    return resolved;
+  }
+
   return {
     validate: loadRunContext,
     usableConnectionForAgent,
+    resolveAfterReconnect,
     search,
     request,
     // Controller-only entry point. Runtime tokens still require a running run.
     requestForRunAuthFailure: async (runId: string) => {
       const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
-      if (!run || run.status !== "failed" || !isAiAuthenticationRepairable(run) || !run.responsibleUserId) return null;
-      const context = await loadRunContext({ sub: run.agentId, company_id: run.companyId, run_id: run.id, responsible_user_id: run.responsibleUserId }, true);
-      const [latest] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
-        eq(heartbeatRuns.companyId, run.companyId),
-        sql`coalesce(${heartbeatRuns.contextSnapshot}->>'issueId', ${heartbeatRuns.contextSnapshot}->>'taskId', ${heartbeatRuns.nativeIssueId}::text) = ${context.issue.id}`,
-      )).orderBy(desc(heartbeatRuns.createdAt)).limit(1);
-      if (latest?.id !== run.id) return null;
+      if (!run || run.status !== "failed" || !isAiAuthenticationRepairable(run)) return null;
+      const snapshot = record(run.contextSnapshot);
+      const issueId = text(snapshot?.issueId) ?? text(snapshot?.taskId) ?? run.nativeIssueId;
+      // Runs without a task cannot carry a card, but the stored sign-in is still dead.
+      const context = issueId && run.responsibleUserId
+        ? await loadRunContext({ sub: run.agentId, company_id: run.companyId, run_id: run.id, responsible_user_id: run.responsibleUserId }, true)
+        : null;
+      if (context) {
+        const [latest] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.companyId, run.companyId),
+          sql`coalesce(${heartbeatRuns.contextSnapshot}->>'issueId', ${heartbeatRuns.contextSnapshot}->>'taskId', ${heartbeatRuns.nativeIssueId}::text) = ${context.issue.id}`,
+        )).orderBy(desc(heartbeatRuns.createdAt)).limit(1);
+        if (latest?.id !== run.id) return null;
+      }
       const [agent] = await db.select().from(agents).where(and(eq(agents.id, run.agentId), eq(agents.companyId, run.companyId)));
       if (!agent) return null;
       const saved = aiConnectionBindingSchema.safeParse(agent.runtimeConfig.aiConnection).data;
@@ -1205,7 +1245,7 @@ export function connectionIntentService(db: Db) {
           runStartedAt: run.startedAt ?? run.createdAt,
           attribution: attribution as unknown as AiConnectionAttribution & { identity: string } });
       }
-      return requestWithContext(context, binding.provider, { purpose: "ai" });
+      return context ? requestWithContext(context, binding.provider, { purpose: "ai" }) : null;
     },
     loadIntent,
     setupOptions,
