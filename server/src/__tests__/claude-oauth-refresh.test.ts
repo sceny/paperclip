@@ -350,10 +350,22 @@ describe("Claude background token renewal", () => {
     const row = await connect(document(0, T0 + 2.5 * HOUR));
     expect(await service.renewDueClaudeCredentials()).toMatchObject({ attempted: 1, failed: 0 });
     expect(request).toHaveBeenCalledTimes(1);
-    expect(await stored(row)).toMatchObject({ accessToken: "access-1", refreshToken: "refresh-1", expiresAt: T0 + 8 * HOUR });
+    expect(await stored(row)).toMatchObject({ refreshToken: "refresh-1", run: { accessToken: "access-1", expiresAt: T0 + 8 * HOUR } });
     request.mockClear();
     expect(await service.renewDueClaudeCredentials()).toMatchObject({ attempted: 0 });
     expect(request).not.toHaveBeenCalled();
+  });
+
+  it("renews the inference-only token of a broad login and keeps the login token for the server", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    const request = providerSequence([granted(1)]);
+    const row = await connect(document(0, T0 + 6 * HOUR, BROAD));
+    expect(await service.renewDueClaudeCredentials()).toMatchObject({ attempted: 1, failed: 0 });
+    expect(body(request, 0).scope).toBe("user:inference");
+    expect(await stored(row)).toMatchObject({ accessToken: "access-0", scopes: BROAD, refreshToken: "refresh-1", run: { accessToken: "access-1" } });
+    expect(await service.credential(row)).toBe("access-1");
+    expect(await service.accountCredential(row)).toBe("access-0");
   });
 
   it("leaves a login with a fresh token alone", async () => {
