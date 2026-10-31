@@ -199,7 +199,6 @@ pub(crate) fn next_authority_config(
     next.normalized_session_id = read_identity("normalizedSessionId")?;
     next.turn_id = read_identity("turnId")?;
     next.item_id = read_identity("itemId")?;
-    next.validate()?;
     if next.runner_instance_id != current.runner_instance_id
         || next.environment_lease_id != current.environment_lease_id
         || next.normalized_session_id != current.normalized_session_id
@@ -209,6 +208,47 @@ pub(crate) fn next_authority_config(
             "run.attach authority changed an immutable session binding",
         ));
     }
+    if let Some(admission) = current
+        .acpx_launch_profile
+        .as_ref()
+        .and_then(|profile| profile.candidate_admission.as_ref())
+    {
+        if admission.agent == "kimi" {
+            let proposed: crate::acpx_candidate_admission::AcpxCandidateAdmission =
+                serde_json::from_value(boundary.get("candidateAdmission").cloned().ok_or_else(
+                    || {
+                        DurableRunnerError::invalid(
+                            "Kimi authority rotation requires exact trusted candidate admission",
+                        )
+                    },
+                )?)
+                .map_err(|_| {
+                    DurableRunnerError::invalid("Kimi authority rotation admission is invalid")
+                })?;
+            admission
+                .validate_next_run(
+                    &proposed,
+                    "kimi",
+                    &admission.model,
+                    &next.run_id,
+                    &next.normalized_session_id,
+                )
+                .map_err(|error| DurableRunnerError::invalid(error.to_string()))?;
+            next.acpx_launch_profile
+                .as_mut()
+                .unwrap()
+                .candidate_admission = Some(proposed);
+        } else if boundary.get("candidateAdmission").is_some() {
+            return Err(DurableRunnerError::invalid(
+                "candidate authority rotation is not admitted",
+            ));
+        }
+    } else if boundary.get("candidateAdmission").is_some() {
+        return Err(DurableRunnerError::invalid(
+            "authority rotation cannot create candidate admission",
+        ));
+    }
+    next.validate()?;
     Ok(Some(next))
 }
 
@@ -5103,5 +5143,130 @@ mod tests {
         assert_eq!(first_lifecycle.durable_state(), Some("suspended"));
         assert_eq!(executor.calls, 1);
         fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    #[cfg(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64")
+    ))]
+    fn kimi_candidate_handoff_binds_the_existing_authenticated_next_authority() {
+        let directory =
+            std::env::temp_dir().join(format!("kimi-grant-handoff-{}", std::process::id()));
+        let mut current = config(directory);
+        let mut grant = crate::acpx_candidate_admission::test_admission(
+            "run_1",
+            &current.normalized_session_id,
+        );
+        grant.agent = "kimi".to_owned();
+        grant.profile_digest = crate::generated_acpx_profiles::acpx_release_profile("kimi")
+            .unwrap()
+            .command_digest
+            .to_owned();
+        grant.platform = if cfg!(target_os = "macos") {
+            "darwin"
+        } else {
+            "linux"
+        }
+        .to_owned();
+        grant.architecture = if cfg!(target_os = "macos") {
+            "arm64"
+        } else {
+            "x64"
+        }
+        .to_owned();
+        grant.native_closure_digest = format!(
+            "sha256:{}",
+            crate::generated_acpx_profiles::kimi_native_closure(
+                &grant.platform,
+                &grant.architecture
+            )
+            .unwrap()
+        );
+        current.acpx_launch_profile = Some(crate::durable::AcpxLaunchProfile {
+            authority_digest: format!("sha256:{}", "a".repeat(64)),
+            command: PathBuf::from("/fixture/node"),
+            args: vec!["/fixture/sidecar.cjs".to_owned()],
+            artifacts: vec![crate::durable::QualifiedLaunchArtifact {
+                path: PathBuf::from("/fixture/node"),
+                sha256: format!("sha256:{}", "b".repeat(64)),
+            }],
+            candidate_admission: Some(grant.clone()),
+        });
+        current.validate().unwrap();
+        let mut next_grant = grant.clone();
+        next_grant.run_id = "run_2".to_owned();
+        let mut attach = command("run.attach");
+        attach.payload = json!({"paperclipNextAuthority":{
+            "identity":{"runnerInstanceId":current.runner_instance_id,"environmentLeaseId":current.environment_lease_id,
+                "runId":"run_2","normalizedSessionId":current.normalized_session_id,"turnId":"turn_2","itemId":"item_2"},
+            "connection":{"mode":"external"},"candidateAdmission":next_grant
+        }});
+        let next = next_authority_config(&attach, &current).unwrap().unwrap();
+        let actual = next
+            .acpx_launch_profile
+            .as_ref()
+            .unwrap()
+            .candidate_admission
+            .as_ref()
+            .unwrap();
+        assert_eq!(actual, &next_grant);
+        assert_eq!(
+            current
+                .acpx_launch_profile
+                .as_ref()
+                .unwrap()
+                .candidate_admission
+                .as_ref()
+                .unwrap(),
+            &grant
+        );
+        assert_eq!(next.runner_instance_id, current.runner_instance_id);
+        assert_eq!(next.environment_lease_id, current.environment_lease_id);
+        assert_eq!(next.normalized_session_id, current.normalized_session_id);
+        for (field, value) in [
+            ("companyId", json!("foreign-company")),
+            ("agent", json!("antigravity")),
+            ("model", json!("different-model")),
+            ("profileDigest", json!(format!("sha256:{}", "f".repeat(64)))),
+            (
+                "nativeClosureDigest",
+                json!(format!("sha256:{}", "e".repeat(64))),
+            ),
+            ("expiresAt", json!(grant.expires_at + 1)),
+            ("runId", json!("unbound-run")),
+            ("normalizedSessionId", json!("foreign-session")),
+        ] {
+            let mut changed = attach.clone();
+            changed.payload["paperclipNextAuthority"]["candidateAdmission"][field] = value;
+            assert!(
+                next_authority_config(&changed, &current).is_err(),
+                "{field}"
+            );
+        }
+        for field in [
+            "runnerInstanceId",
+            "environmentLeaseId",
+            "normalizedSessionId",
+        ] {
+            let mut changed = attach.clone();
+            changed.payload["paperclipNextAuthority"]["identity"][field] = json!("foreign");
+            assert!(
+                next_authority_config(&changed, &current).is_err(),
+                "{field}"
+            );
+        }
+        let mut missing = attach.clone();
+        missing.payload["paperclipNextAuthority"]
+            .as_object_mut()
+            .unwrap()
+            .remove("candidateAdmission");
+        assert!(next_authority_config(&missing, &current).is_err());
+        let mut no_prior = current.clone();
+        no_prior
+            .acpx_launch_profile
+            .as_mut()
+            .unwrap()
+            .candidate_admission = None;
+        assert!(next_authority_config(&attach, &no_prior).is_err());
     }
 }

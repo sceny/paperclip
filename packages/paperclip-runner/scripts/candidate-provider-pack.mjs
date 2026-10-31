@@ -1,7 +1,7 @@
 import { materializePiDistribution } from "./materialize-pi-distribution.mjs";
 import profiles from "../acpx-profiles.json" with { type: "json" };
 import { materializePinnedCursorDistribution } from "./materialize-cursor-distribution.mjs";
-const CANDIDATES = new Set(["cursor", "copilot", "pi"]);
+const CANDIDATES = new Set(["cursor", "copilot", "pi", "kimi"]);
 
 /** Only materialized providers enter the serialized manifest and its digest. */
 export function providerPackManifestFields(providers, candidates) {
@@ -34,6 +34,11 @@ export function parseProviderPackArguments(args) {
 /** Closed source-owned builder registry; provider branches add their exact pins. */
 export async function materializeCandidateProviderPack({ provider, outputRoot }) {
   if (!CANDIDATES.has(provider)) throw new Error("Unknown candidate provider");
+  if (provider === "kimi") {
+    const { materializeKimiDistribution } = await import("./materialize-kimi-distribution.mjs");
+    const result = await materializeKimiDistribution({ outputRoot });
+    return { version: result.version, profileDigest: profiles.profiles.kimi.commandDigest, closureDigest: result.closureDigest };
+  }
   if (provider === "pi") return materializePiDistribution({ outputRoot });
   if (provider === "copilot") {
     const { buildPinnedCopilotDistribution } = await import("./build-copilot-distribution.mjs");

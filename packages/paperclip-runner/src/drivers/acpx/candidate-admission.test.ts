@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { KIMI_DISTRIBUTION_CLOSURE_SHA256 } from "./kimi-closure-pins.js";
 import { ANTIGRAVITY_DISTRIBUTION_PINS } from "./generated-profiles.js";
 import { assertAcpxProfileReleased, resolveQualifiedAcpxProfile } from "./qualified-profiles.js";
 import { assertAcpxExecutionAdmission, bindAcpxCandidateAdmission, parseAcpxCandidateAdmission, parseAcpxCandidateStartupAdmission, type AcpxCandidateAdmission } from "./candidate-admission.js";
@@ -93,5 +94,61 @@ describe("candidate installation remains cryptographically verified", () => {
       permissionMode: "deny-all", providerPolicy: { readOnly: true } }, { verifyInstallation, openRuntime, retainAdmissionCleanup: () => {}, reportRetainedCleanupFailure: () => {} })).rejects.toMatchObject({ code: "ACPX_CANDIDATE_ADMISSION_INVALID" });
     expect(verifyInstallation).not.toHaveBeenCalled();
     expect(openRuntime).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("trusted Kimi candidate admission", () => {
+  const kimiExpected = { companyId: "company-kimi", agent: "kimi", model: "kimi-for-coding" };
+  const kimiCandidate = (target: "darwin-arm64" | "linux-x64"): AcpxCandidateAdmission => ({
+    schema: "paperclip.acpx-candidate-admission.v1", ...kimiExpected, agent: "kimi",
+    profileDigest: resolveQualifiedAcpxProfile("kimi", kimiExpected.model).commandDigest,
+    nativeClosureDigest: `sha256:${KIMI_DISTRIBUTION_CLOSURE_SHA256[target]}`,
+    platform: target === "darwin-arm64" ? "darwin" : "linux",
+    architecture: target === "darwin-arm64" ? "arm64" : "x64", expiresAt: now + 60_000,
+  });
+
+  it.each(["darwin-arm64", "linux-x64"] as const)("binds only the current pending Kimi profile and exact %s closure", target => {
+    expect(resolveQualifiedAcpxProfile("kimi", kimiExpected.model)).toMatchObject({ agentProfileVersion: 16, qualificationStatus: "pending" });
+    expect(parseAcpxCandidateAdmission(kimiCandidate(target), kimiExpected, now)).toEqual(kimiCandidate(target));
+    expect(() => assertAcpxProfileReleased("kimi")).toThrow("qualification is pending");
+    expect(() => assertAcpxExecutionAdmission(resolveQualifiedAcpxProfile("kimi", kimiExpected.model))).toThrow("qualification is pending");
+    const other = target === "darwin-arm64" ? "linux-x64" : "darwin-arm64";
+    for (const change of [
+      { companyId: "foreign-company" }, { agent: "antigravity" }, { model: "another-model" },
+      { model: "auto" }, { model: "default" }, { model: " kimi-for-coding" },
+      { profileDigest: `sha256:${"0".repeat(64)}` },
+      { nativeClosureDigest: `sha256:${KIMI_DISTRIBUTION_CLOSURE_SHA256[other]}` },
+      { platform: "linux", architecture: "arm64" }, { platform: "darwin", architecture: "x64" },
+      { expiresAt: now }, { expiresAt: now + 86_400_001 }, { expiresAt: "1800000060000" },
+      { unknown: true }, { runId: "injected-run" },
+    ]) expect(() => parseAcpxCandidateAdmission({ ...kimiCandidate(target), ...change }, kimiExpected, now)).toThrow(expect.objectContaining({ code: "ACPX_CANDIDATE_ADMISSION_INVALID" }));
+  });
+
+  it.each(["darwin-arm64", "linux-x64"] as const)("requires the exact actual host and startup identity for %s", target => {
+    const startup = bindAcpxCandidateAdmission({ ...kimiCandidate(target), expiresAt: Date.now() + 60_000 },
+      { runId: "kimi-run", normalizedSessionId: "kimi-session" });
+    const profile = resolveQualifiedAcpxProfile("kimi", kimiExpected.model);
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const architecture = Object.getOwnPropertyDescriptor(process, "arch")!;
+    try {
+      Object.defineProperty(process, "platform", { ...platform, value: startup.platform });
+      Object.defineProperty(process, "arch", { ...architecture, value: startup.architecture });
+      expect(() => assertAcpxExecutionAdmission(profile, startup)).not.toThrow();
+      for (const identity of [{ runId: "foreign-run" }, { normalizedSessionId: "foreign-session" }, { model: "foreign-model" }]) {
+        expect(() => parseAcpxCandidateStartupAdmission(startup, { ...kimiExpected, runId: "kimi-run", normalizedSessionId: "kimi-session", ...identity })).toThrow();
+      }
+      expect(() => assertAcpxExecutionAdmission({ ...profile, commandDigest: `sha256:${"f".repeat(64)}` }, startup)).toThrow();
+      expect(() => parseAcpxCandidateStartupAdmission(startup, kimiExpected, startup.expiresAt)).toThrow();
+      for (const [os, arch] of [["win32", "x64"], ["linux", "arm64"], ["darwin", "x64"],
+        target === "darwin-arm64" ? ["linux", "x64"] : ["darwin", "arm64"]]) {
+        Object.defineProperty(process, "platform", { ...platform, value: os });
+        Object.defineProperty(process, "arch", { ...architecture, value: arch });
+        expect(() => assertAcpxExecutionAdmission(profile, startup)).toThrow();
+      }
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+      Object.defineProperty(process, "arch", architecture);
+    }
   });
 });

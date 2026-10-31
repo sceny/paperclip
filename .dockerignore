@@ -48,3 +48,11 @@ packages/grok-acp/bin
 # Images build their pinned Copilot assets instead of copying host binaries.
 /packages/paperclip-runner/provider-assets/
 /server/provider-assets/
+
+!packages/paperclip-runner/test/fixtures/kimi-profile-v*-identity.json
+
+!packages/paperclip-runner/test/fixtures/grok-profile-v*-identity.json
+
+!packages/paperclip-runner/test/fixtures/copilot-profile-v*-identity.json
+
+!packages/paperclip-runner/test-fixtures/pi-acp/profile-v34-identity.json
